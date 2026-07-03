@@ -66,6 +66,12 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|Win32'">
   </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(SolutionDir)</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir)</AdditionalIncludeDirectories>
@@ -113,13 +119,18 @@
     <ClCompile Include="test_database.cpp" />
     <ClCompile Include="test_integration.cpp" />
     <ClCompile Include="test_historydialog.cpp" />
+    <ClCompile Include="test_historyeditsession.cpp" />
+    <ClCompile Include="test_history_commit.cpp" />
     <ClCompile Include="test_shutdowncoordinator.cpp" />
     <ClCompile Include="test_healthmonitor.cpp" />
     <ClCompile Include="test_timeline.cpp" />
     <ClCompile Include="test_renames.cpp" />
+    <ClCompile Include="test_persistence_contract.cpp" />
+    <ClCompile Include="test_contract_matrix.cpp" />
     <ClCompile Include="..\healthmonitor.cpp" />
     <ClCompile Include="..\splitdialog.cpp" />
     <ClCompile Include="..\historydialog.cpp" />
+    <ClCompile Include="..\historyeditsession.cpp" />
     <ClCompile Include="..\shutdowncoordinator.cpp" />
     <ClCompile Include="..\timer.cpp" />
     <ClCompile Include="..\lockstatewatcher.cpp" />
@@ -139,10 +150,14 @@
     <QtMoc Include="test_database.h" />
     <QtMoc Include="test_integration.h" />
     <QtMoc Include="test_historydialog.h" />
+    <QtMoc Include="test_historyeditsession.h" />
+    <QtMoc Include="test_history_commit.h" />
     <QtMoc Include="test_shutdowncoordinator.h" />
     <QtMoc Include="test_healthmonitor.h" />
     <QtMoc Include="test_timeline.h" />
     <QtMoc Include="test_renames.h" />
+    <QtMoc Include="test_persistence_contract.h" />
+    <QtMoc Include="test_contract_matrix.h" />
     <QtMoc Include="..\healthmonitor.h" />
     <QtMoc Include="..\splitdialog.h" />
     <QtMoc Include="..\historydialog.h" />
@@ -153,6 +168,7 @@
     <ClInclude Include="fakeclock.h" />
     <ClInclude Include="fakesessionstore.h" />
     <ClInclude Include="..\apppaths.h" />
+    <ClInclude Include="..\historyeditsession.h" />
     <ClInclude Include="..\sessionstore.h" />
     <ClInclude Include="..\shutdowncoordinator.h" />
     <ClInclude Include="..\timeformat.h" />
