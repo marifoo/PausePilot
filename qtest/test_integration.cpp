@@ -1,5 +1,6 @@
 #include "test_integration.h"
 #include "fakesessionstore.h"
+#include "fakeclock.h"
 #include "shutdowncoordinator.h"
 #include "../historyeditsession.h"
 #include <QtTest>
@@ -46,12 +47,17 @@ void IntegrationTest::test_integration_checkpoint_recovery_on_restart()
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
         Timer tracker(settings, db);
-        
+
+        // Drive the clock via the seam: no real sleep needed to age the checkpoint
+        // past the 1 s minimum-recoverable-orphan threshold.
+        FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
         tracker.useTimerViaButton(Button::Start);
-        QTest::qWait(1200);
-        
+        clock.advance(1200);
+
         // Manually save checkpoint
-        tracker.saveCheckpointInternal_dbg(QDateTime::currentDateTime());
+        tracker.saveCheckpointInternal_dbg(clock.now());
         QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
         orphanSegmentId = tracker.sessionState_dbg().segment_id;
 
@@ -98,9 +104,11 @@ void IntegrationTest::test_integration_orphan_reconciliation_is_idempotent()
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
         Timer tracker(settings, db);
+        FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.useTimerViaButton(Button::Start);
-        QTest::qWait(1200);
-        tracker.saveCheckpointInternal_dbg(QDateTime::currentDateTime());
+        clock.advance(1200);  // seam-driven aging, no real sleep
+        tracker.saveCheckpointInternal_dbg(clock.now());
         QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
         tracker.sessionState_dbg().segment_id = SegmentId{};
         tracker.forceMode_dbg(Timer::Mode::None);
@@ -191,9 +199,11 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_present_is_s
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
         Timer tracker(settings, db);
+        FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.useTimerViaButton(Button::Start);
-        QTest::qWait(1200);
-        tracker.saveCheckpointInternal_dbg(QDateTime::currentDateTime());
+        clock.advance(1200);  // seam-driven aging, no real sleep
+        tracker.saveCheckpointInternal_dbg(clock.now());
         QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
         tracker.sessionState_dbg().segment_id = SegmentId{};
         tracker.forceMode_dbg(Timer::Mode::None);
@@ -226,9 +236,11 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_absent_shows
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
         Timer tracker(settings, db);
+        FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.useTimerViaButton(Button::Start);
-        QTest::qWait(1200);
-        tracker.saveCheckpointInternal_dbg(QDateTime::currentDateTime());
+        clock.advance(1200);  // seam-driven aging, no real sleep
+        tracker.saveCheckpointInternal_dbg(clock.now());
         QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
         tracker.sessionState_dbg().segment_id = SegmentId{};
         tracker.forceMode_dbg(Timer::Mode::None);
@@ -611,6 +623,12 @@ void IntegrationTest::test_Y_engine_scheduled_stop_emits_MidnightScheduled()
     FakeSessionStore fakeDb;
     Timer tracker(settings, fakeDb);
 
+    // Pin the engine clock to mid-day so Start's auto-armed 23:59:59.500 timer is
+    // hours away and cannot fire during the qWait() below — removes the tiny
+    // near-real-midnight flake while we exercise the explicitly-armed stop.
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
     // Start the engine (Activity mode).
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -693,6 +711,11 @@ void IntegrationTest::test_AA_no_duplicate_stop_signal()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
     Timer tracker(settings, fakeDb);
+
+    // Pin the engine clock to mid-day so Start's auto-armed 23:59:59.500 timer is
+    // hours away and cannot fire during the qWait() below.
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -1062,8 +1085,12 @@ void IntegrationTest::test_A_toggle_ongoing_to_pause_crash_recovery_uses_refresh
         SqliteSessionStore db(settings);
         Timer tracker(settings, db);
 
+        // Seam-driven clock: advance instead of sleeping through the flow.
+        FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
         tracker.useTimerViaButton(Button::Start);
-        QTest::qWait(50);
+        clock.advance(50);  // ongoing becomes valid (segment_start < now)
 
         // Simulate dialog open: build the edit session (captures current snapshot).
         HistoryEditSession session;
@@ -1081,7 +1108,7 @@ void IntegrationTest::test_A_toggle_ongoing_to_pause_crash_recovery_uses_refresh
         // Advance clock so the refresh snapshot is clearly later than dialogOpenEnd,
         // and so the segment exceeds kMinRecoverableOrphanDurationMs (1 s) and is
         // finalized rather than dropped as too-short during recovery.
-        QTest::qWait(1200);
+        clock.advance(1200);
 
         // refreshOngoing() must advance end_utc while preserving the Pause type.
         session.refreshOngoing(tracker);

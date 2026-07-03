@@ -11,6 +11,7 @@
 #include <deque>
 #include <memory>
 #include <utility>
+#include <functional>
 #include "settings.h"
 #include "types.h"
 #include "sessionstore.h"
@@ -145,6 +146,10 @@ private:
     };
 
     const Settings & settings_;
+    /// Wall-clock source for the engine. Defaults to QDateTime::currentDateTime;
+    /// tests inject a controllable clock via setNowProvider_dbg(). Every internal
+    /// "now" read in Timer routes through this so the clock is fully drivable.
+    std::function<QDateTime()> now_provider_;
     QElapsedTimer timer_;
     SessionState session_;
     Mode mode_;
@@ -362,6 +367,11 @@ private slots:
 public:
     // ---- Debug-build test probes ----
     // Narrow accessors for white-box tests. NOT compiled in release builds.
+
+    /// Injects a controllable wall-clock source so tests can drive the engine
+    /// without sleeping. Pass a lambda over a FakeClock; every internal "now"
+    /// read (checkpoints, ongoing duration, stop/backpause, watchdog) uses it.
+    void setNowProvider_dbg(std::function<QDateTime()> provider) { now_provider_ = std::move(provider); }
 
     /// Direct access to the SessionState for test setup and assertions.
     SessionState& sessionState_dbg() { return session_; }

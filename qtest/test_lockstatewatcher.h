@@ -16,6 +16,8 @@ private slots:
     void test_shouldEmitLongLock_unknown_does_not_mature();
     void test_shouldEmitLongLock_locked_matures();
     void test_shouldEmitLongLock_locked_short_elapsed_does_not_mature();
+    // Phase 2 seam: stubbed query probe drives update(); now-provider records lock_time_.
+    void test_seam_query_provider_drives_update_and_records_lock_time();
 };
 
 #endif // TEST_LOCKSTATEWATCHER_H

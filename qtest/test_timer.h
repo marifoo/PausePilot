@@ -134,6 +134,9 @@ private slots:
     void test_QF1_explicit_resume_emits_started_not_modeChanged();
     void test_QF1_lock_autopause_emits_modeChanged_not_paused();
     void test_QF1_lock_resume_emits_started_and_modeChanged_once_each();
+
+    // Phase 2 clock seam: fake clock drives the ongoing duration with no sleep.
+    void test_seam_fake_clock_drives_ongoing_duration();
 };
 
 #endif // TEST_TIMER_H

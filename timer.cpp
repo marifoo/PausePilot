@@ -97,7 +97,7 @@ void Timer::DayBoundaryWatcher::onMidnightTimerFired()
         Logger::Log("[MIDNIGHT] suspended during history edit");
         return;
     }
-    owner_.stopTimer(QDateTime::currentDateTime(), StopReason::MidnightScheduled);
+    owner_.stopTimer(owner_.now_provider_(), StopReason::MidnightScheduled);
 }
 
 // ============================================================================
@@ -346,7 +346,8 @@ void Timer::checkCrossLayerInvariants() const
 // ============================================================================
 
 Timer::Timer(const Settings &settings, SessionStore& db, QObject *parent)
-    : QObject(parent), settings_(settings), timer_(), session_(), mode_(Mode::None),
+    : QObject(parent), settings_(settings), now_provider_(QDateTime::currentDateTime),
+      timer_(), session_(), mode_(Mode::None),
       autopause_pending_resume_(false), is_locked_(false),
       dialog_open_(false), db_(db),
       checkpoint_interval_msec_(settings.getCheckpointIntervalMsec()),
@@ -372,7 +373,7 @@ Timer::Timer(const Settings &settings, SessionStore& db, QObject *parent)
 
 void Timer::initializeFromStore()
 {
-    const StartupRecoveryResult recovery = db_.recoverStartupCheckpoints(QDateTime::currentDateTime());
+    const StartupRecoveryResult recovery = db_.recoverStartupCheckpoints(now_provider_());
     if (recovery.ok) {
         startup_recovered_seconds_ = recovery.recovered_seconds;
         startup_recovery_notification_needed_ = recovery.notify_user;
@@ -386,7 +387,7 @@ Timer::~Timer()
     checkpointTimer_.stop();
     checkpointTimer_.disconnect();
     QMutexLocker locker(&mutex_);
-    stopTimer(QDateTime::currentDateTime(), StopReason::Shutdown);
+    stopTimer(now_provider_(), StopReason::Shutdown);
 }
 
 /**
@@ -671,7 +672,7 @@ void Timer::useTimerViaButton(Button button)
     StateGuard guard(*this, "useTimerViaButton");
     guard.markTransitioned();
 #endif
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = now_provider_();
     if (discardCrossMidnightOngoingAndStop(now)) {
         // Ongoing segment crossed midnight — engine is now in None state.
         // Whatever the user asked for, discard it: per the day-boundary
@@ -699,7 +700,7 @@ void Timer::onStartPausePressed()
     StateGuard guard(*this, "onStartPausePressed");
     guard.markTransitioned();
 #endif
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = now_provider_();
     if (discardCrossMidnightOngoingAndStop(now)) {
 #ifndef QT_NO_DEBUG
         checkDurationInvariants();
@@ -739,7 +740,7 @@ void Timer::useTimerViaLockEvent(LockEvent event)
     StateGuard guard(*this, "useTimerViaLockEvent");
     guard.markTransitioned();
 #endif
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = now_provider_();
     if (discardCrossMidnightOngoingAndStop(now)) {
         // Already-forced stopped — ignore the lock event for engine
         // purposes. autopause_pending_resume_ is already cleared inside
@@ -1003,7 +1004,7 @@ std::optional<TimeDuration> Timer::getOngoingDuration() const
 std::optional<TimeDuration> Timer::getOngoingDuration_locked() const
 {
     if (mode_ == Mode::None) return std::nullopt;
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = now_provider_();
     if (!session_.segment_start_time.isValid() || session_.segment_start_time >= now) {
         return std::nullopt;
     }
@@ -1039,7 +1040,7 @@ Timer::ShutdownResult Timer::shutdown()
     QMutexLocker locker(&mutex_);
     bool stopCalled = false;
     if (mode_ != Mode::None) {
-        stopTimer(QDateTime::currentDateTime(), StopReason::Shutdown);
+        stopTimer(now_provider_(), StopReason::Shutdown);
         stopCalled = true;
     }
     const bool stopped = (mode_ == Mode::None);
@@ -1158,7 +1159,7 @@ bool Timer::isOngoingSegmentCrossMidnight() const
     QMutexLocker locker(&mutex_);
     if (mode_ == Mode::None) return false;
     if (!session_.segment_start_time.isValid()) return false;
-    return isCrossMidnight(session_.segment_start_time, QDateTime(QDate::currentDate(), QTime(0,0,0), Qt::LocalTime));
+    return isCrossMidnight(session_.segment_start_time, QDateTime(now_provider_().date(), QTime(0,0,0), Qt::LocalTime));
 }
 
 /**
@@ -1220,7 +1221,7 @@ void Timer::saveCheckpoint()
     }
 
     // Capture wall-clock time once for the entire checkpoint operation.
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = now_provider_();
     saveCheckpointInternal(now);
 }
 
@@ -1275,7 +1276,7 @@ void Timer::endExclusiveEdit()
         pending_midnight_stop_ = false;
         pending_lock_event_ = LockEvent::None;
         Logger::Log("[MIDNIGHT] Replaying deferred midnight stop after dialog close");
-        stopTimer(QDateTime::currentDateTime(), StopReason::MidnightScheduled);
+        stopTimer(now_provider_(), StopReason::MidnightScheduled);
     } else if (pending_lock_event_ == LockEvent::LongOngoingLock) {
         pending_lock_event_ = LockEvent::None;
         Logger::Log("[LOCK] Replaying deferred LongOngoingLock after dialog close");

@@ -1,5 +1,7 @@
 #include "test_lockstatewatcher.h"
+#include "fakeclock.h"
 #include <QtTest>
+#include <vector>
 
 void LockStateWatcherTest::test_lockstatewatcher_debounce_logic()
 {
@@ -100,4 +102,41 @@ void LockStateWatcherTest::test_lockstatewatcher_unknown_does_not_unlock()
         finalEvent = watcher.determineLockEvent_dbg(r);
     }
     QCOMPARE(finalEvent, LockEvent::Unlock);
+}
+
+// Phase 2 clock/query seam: drive update() through the stubbed lock-state probe
+// (no DBus/WTS) and prove the injected now-provider records the wall-clock lock
+// instant. A scripted [U,U,L,L,L] sequence must produce exactly one Lock event.
+void LockStateWatcherTest::test_seam_query_provider_drives_update_and_records_lock_time()
+{
+    // Arrange: watcher with an injected clock and a scripted query probe.
+    Settings settings(TestCommon::createSettingsFile(QDir::tempPath(), 7));
+    LockStateWatcher watcher(settings);
+
+    const QDateTime lockInstant(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(lockInstant);
+    watcher.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    std::deque<LockQueryResult> script = {
+        LockQueryResult::Unlocked, LockQueryResult::Unlocked,
+        LockQueryResult::Locked,   LockQueryResult::Locked, LockQueryResult::Locked };
+    watcher.setQueryProvider_dbg([&script]() {
+        LockQueryResult r = script.front();
+        script.pop_front();
+        return r;
+    });
+
+    // Capture emitted events without QSignalSpy (LockEvent has no metatype).
+    std::vector<LockEvent> events;
+    QObject::connect(&watcher, &LockStateWatcher::desktopLockEvent,
+                     [&events](LockEvent e) { events.push_back(e); });
+
+    // Act: run the 100 ms poll five times over the scripted samples.
+    for (int i = 0; i < 5; ++i)
+        watcher.update();
+
+    // Assert: exactly one Lock event, and lock_time_ captured from the fake clock.
+    QCOMPARE(events.size(), static_cast<size_t>(1));
+    QCOMPARE(events[0], LockEvent::Lock);
+    QCOMPARE(watcher.lockTime_dbg(), lockInstant);
 }

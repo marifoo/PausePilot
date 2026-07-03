@@ -61,6 +61,11 @@ LockStateWatcher::LockStateWatcher(const Settings &settings, QObject *parent)
 		LockQueryResult::Unlocked, LockQueryResult::Unlocked };
 	lock_timer_.invalidate();
 
+	// Default seams: real platform probe and the real wall clock. Tests override
+	// these via setQueryProvider_dbg()/setNowProvider_dbg().
+	query_provider_ = [this]() { return isSessionLocked(); };
+	now_provider_ = QDateTime::currentDateTime;
+
 #ifdef Q_OS_LINUX
 	initializeLinuxLockDetection();
 #endif
@@ -174,18 +179,20 @@ bool LockStateWatcher::shouldEmitLongLock(LockQueryResult latest, qint64 elapsed
 
 void LockStateWatcher::update()
 {
-	const LockQueryResult q = isSessionLocked();
+	const LockQueryResult q = query_provider_();
 	const LockEvent lock_event = determineLockEvent(q);
 
 	if (lock_event == LockEvent::Lock) {
 		Logger::Log("[LOCK] >> Lock determined");
 		lock_timer_.start();
+		lock_time_ = now_provider_();
 		emit desktopLockEvent(LockEvent::Lock);
 	}
 	else if (lock_event == LockEvent::Unlock) {
 		if (lock_timer_.isValid())
 			Logger::Log("[LOCK] Current Lock Duration = " + QString::number(lock_timer_.elapsed()) + "ms");
 		lock_timer_.invalidate();
+		lock_time_ = QDateTime();
 		Logger::Log("[LOCK] Unlock determined <<");
 		emit desktopLockEvent(LockEvent::Unlock);
 	}
@@ -193,6 +200,7 @@ void LockStateWatcher::update()
 	if (lock_timer_.isValid() && shouldEmitLongLock(q, lock_timer_.elapsed())) {
 		Logger::Log("[LOCK] Current Lock Duration = " + QString::number(lock_timer_.elapsed()) + "ms");
 		lock_timer_.invalidate();
+		lock_time_ = QDateTime();
 		Logger::Log("[LOCK] Ongoing Lock is long enough to be counted as a Pause");
 		emit desktopLockEvent(LockEvent::LongOngoingLock);
 	}

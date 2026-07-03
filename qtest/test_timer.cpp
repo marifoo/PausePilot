@@ -1,5 +1,6 @@
 #include "test_timer.h"
 #include "fakesessionstore.h"
+#include "fakeclock.h"
 #include <QtTest>
 
 using TestCommon::createSettingsFile;
@@ -2023,4 +2024,37 @@ void TimerTest::test_commitEditedTimeline_clears_anchor_when_no_ongoing_from_pau
              Timer::StopReason::EditApplied);
     QCOMPARE(startedSpy.count(), 0);
     QCOMPARE(pausedSpy.count(), 0);
+}
+
+// Phase 2 clock-seam enabler: prove the injected now-provider fully controls the
+// engine's clock. Start the engine at a fixed fake instant, advance the fake
+// clock by 90 minutes with NO real sleep, and assert the ongoing duration is
+// computed from the fake clock (start/end/duration exact to the millisecond).
+void TimerTest::test_seam_fake_clock_drives_ongoing_duration()
+{
+    // Arrange: inject a controllable clock.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore db;
+    Timer tracker(settings, db);
+
+    const QDateTime start(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(start);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Act: start the engine (segment anchored at the fake now), then jump ahead.
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    QCOMPARE(tracker.sessionState_dbg().segment_start_time, start);
+
+    const qint64 ninetyMinutesMs = 90ll * 60ll * 1000ll;
+    clock.advance(ninetyMinutesMs);
+
+    // Assert: the ongoing segment reflects the advanced fake clock — no sleeping.
+    const auto ongoing = tracker.getOngoingDuration();
+    QVERIFY(ongoing.has_value());
+    QCOMPARE(ongoing->startTime, start);
+    QCOMPARE(ongoing->endTime, start.addMSecs(ninetyMinutesMs));
+    QCOMPARE(ongoing->duration, ninetyMinutesMs);
 }
