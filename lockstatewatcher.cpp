@@ -9,9 +9,10 @@
  * - Linux: DBus queries with fallback chain (systemd-logind → Freedesktop → GNOME → KDE)
  *
  * Debouncing:
- * - Uses a 5-sample buffer to filter transient state changes
- * - Lock requires pattern: [false, false, true, true, true]
- * - Unlock requires pattern: [true, true, false, false, false]
+ * - Hysteresis on a debounced level tracked in a 5-sample buffer
+ * - Flips to Locked when the last 3 samples are all Locked (emits Lock)
+ * - Flips to Unlocked when the last 3 samples are all Unlocked (emits Unlock)
+ * - Tolerates a single flaky sample and keeps Lock/Unlock strictly alternating
  *
  * Events emitted:
  * - LockEvent::Lock - Desktop just locked
@@ -48,18 +49,11 @@ struct ScopedLibrary {
 
 LockStateWatcher::LockStateWatcher(const Settings &settings, QObject *parent)
 	: QObject(parent),
-	settings_(settings),
-	buffer_for_lock{
-		LockQueryResult::Unlocked, LockQueryResult::Unlocked,
-		LockQueryResult::Locked, LockQueryResult::Locked, LockQueryResult::Locked },
-	buffer_for_unlock{
-		LockQueryResult::Locked, LockQueryResult::Locked,
-		LockQueryResult::Unlocked, LockQueryResult::Unlocked, LockQueryResult::Unlocked }
+	settings_(settings)
 {
 	lock_state_buffer_ = {
 		LockQueryResult::Unlocked, LockQueryResult::Unlocked, LockQueryResult::Unlocked,
 		LockQueryResult::Unlocked, LockQueryResult::Unlocked };
-	lock_timer_.invalidate();
 
 	// Default seams: real platform probe and the real wall clock. Tests override
 	// these via setQueryProvider_dbg()/setNowProvider_dbg().
@@ -150,12 +144,26 @@ LockEvent LockStateWatcher::determineLockEvent(LockQueryResult query_result)
 	lock_state_buffer_.push_back(query_result);
 	lock_state_buffer_.pop_front();
 
-	if (lock_state_buffer_ == buffer_for_lock)
+	// Hysteresis on a debounced level: flip only when the three most recent
+	// samples agree, and emit the event on the flip. A single flaky sample
+	// during a transition no longer permanently misses the event, and because
+	// each flip is gated on the current level, Lock/Unlock strictly alternate.
+	auto lastThreeAll = [this](LockQueryResult v) {
+		const size_t n = lock_state_buffer_.size();
+		return lock_state_buffer_[n - 1] == v
+		    && lock_state_buffer_[n - 2] == v
+		    && lock_state_buffer_[n - 3] == v;
+	};
+
+	if (!debounced_locked_ && lastThreeAll(LockQueryResult::Locked)) {
+		debounced_locked_ = true;
 		return LockEvent::Lock;
-	else if (lock_state_buffer_ == buffer_for_unlock)
+	}
+	if (debounced_locked_ && lastThreeAll(LockQueryResult::Unlocked)) {
+		debounced_locked_ = false;
 		return LockEvent::Unlock;
-	else
-		return LockEvent::None;
+	}
+	return LockEvent::None;
 }
 
 /**
@@ -164,11 +172,11 @@ LockEvent LockStateWatcher::determineLockEvent(LockQueryResult query_result)
  * Workflow:
  * 1. Query current lock state via platform-specific isSessionLocked()
  * 2. Feed state into debounce buffer via determineLockEvent()
- * 3. On Lock: Start lock_timer_, emit Lock event
- * 4. On Unlock: Emit Unlock event
- * 5. While locked: Check if lock_timer_ exceeded threshold → emit LongOngoingLock
+ * 3. On Lock: Record wall-clock lock_time_, emit Lock event
+ * 4. On Unlock: Clear lock_time_, emit Unlock event
+ * 5. While locked: Check if wall-clock duration (now - lock_time_) exceeded threshold → emit LongOngoingLock
  *
- * The lock_timer_ is invalidated after emitting LongOngoingLock to prevent
+ * The wall-clock lock_time_ is cleared after emitting LongOngoingLock to prevent
  * repeated emissions during the same lock session.
  */
 bool LockStateWatcher::shouldEmitLongLock(LockQueryResult latest, qint64 elapsedMs) const
@@ -180,29 +188,30 @@ bool LockStateWatcher::shouldEmitLongLock(LockQueryResult latest, qint64 elapsed
 void LockStateWatcher::update()
 {
 	const LockQueryResult q = query_provider_();
+	const QDateTime now = now_provider_();
 	const LockEvent lock_event = determineLockEvent(q);
 
 	if (lock_event == LockEvent::Lock) {
 		Logger::Log("[LOCK] >> Lock determined");
-		lock_timer_.start();
-		lock_time_ = now_provider_();
-		emit desktopLockEvent(LockEvent::Lock);
+		lock_time_ = now;
+		emit desktopLockEvent(LockEvent::Lock, lock_time_);
 	}
 	else if (lock_event == LockEvent::Unlock) {
-		if (lock_timer_.isValid())
-			Logger::Log("[LOCK] Current Lock Duration = " + QString::number(lock_timer_.elapsed()) + "ms");
-		lock_timer_.invalidate();
+		if (lock_time_.isValid())
+			Logger::Log("[LOCK] Current Lock Duration = " + QString::number(lock_time_.msecsTo(now)) + "ms");
 		lock_time_ = QDateTime();
 		Logger::Log("[LOCK] Unlock determined <<");
-		emit desktopLockEvent(LockEvent::Unlock);
+		emit desktopLockEvent(LockEvent::Unlock, QDateTime());
 	}
 
-	if (lock_timer_.isValid() && shouldEmitLongLock(q, lock_timer_.elapsed())) {
-		Logger::Log("[LOCK] Current Lock Duration = " + QString::number(lock_timer_.elapsed()) + "ms");
-		lock_timer_.invalidate();
+	// The maturation decision uses the wall-clock lock instant (lock_time_)
+	// so it is not affected by system suspend events.
+	if (lock_time_.isValid() && shouldEmitLongLock(q, lock_time_.msecsTo(now))) {
+		Logger::Log("[LOCK] Current Lock Duration = " + QString::number(lock_time_.msecsTo(now)) + "ms");
+		const QDateTime lockInstant = lock_time_;
 		lock_time_ = QDateTime();
 		Logger::Log("[LOCK] Ongoing Lock is long enough to be counted as a Pause");
-		emit desktopLockEvent(LockEvent::LongOngoingLock);
+		emit desktopLockEvent(LockEvent::LongOngoingLock, lockInstant);
 	}
 }
 

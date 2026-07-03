@@ -11,6 +11,7 @@
  */
 
 #include "fakesessionstore.h"
+#include <algorithm>
 
 FakeSessionStore::FakeSessionStore()
     : startupRecoveryResult{}
@@ -88,6 +89,20 @@ SessionStoreResult FakeSessionStore::saveCheckpoint(DurationType type, const QDa
         savedCheckpoints.push_back({type, startTime, endTime, segmentId});
     }
     return saveCheckpointResult;
+}
+
+SessionStoreResult FakeSessionStore::discardCheckpoint(const SegmentId& segmentId)
+{
+    callLog.append("discardCheckpoint");
+    if (segmentId.isEmpty()) {
+        return SessionStoreResult::callerBug("empty segment_id");
+    }
+    // Mirror deleting the unfinalized rows: drop any recorded checkpoints for this id.
+    savedCheckpoints.erase(
+        std::remove_if(savedCheckpoints.begin(), savedCheckpoints.end(),
+                       [&](const CheckpointRecord& cp) { return cp.segmentId == segmentId; }),
+        savedCheckpoints.end());
+    return SessionStoreResult::success();
 }
 
 SchemaStatus FakeSessionStore::checkSchemaOnStartup()

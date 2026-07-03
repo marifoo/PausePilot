@@ -26,7 +26,6 @@ class LockStateWatcher : public QObject
 
 private:
 	const Settings & settings_;
-	QElapsedTimer lock_timer_;
 	/// Wall-clock instant of the most recent Lock, captured via now_provider_.
 	/// Recorded here as the injectable wall-clock lock-time source (the A2 seam).
 	QDateTime lock_time_;
@@ -36,8 +35,10 @@ private:
 	/// Injectable wall-clock source. Defaults to QDateTime::currentDateTime.
 	std::function<QDateTime()> now_provider_;
 	std::deque<LockQueryResult> lock_state_buffer_;
-	const std::deque<LockQueryResult> buffer_for_lock;
-	const std::deque<LockQueryResult> buffer_for_unlock;
+	/// Debounced lock level. Flips to true (Locked) only when the last 3 samples
+	/// are all Locked, and back to false when the last 3 are all Unlocked; the
+	/// flip is what emits Lock/Unlock. Starts Unlocked to match the initial buffer.
+	bool debounced_locked_ = false;
 
 #ifdef Q_OS_LINUX
 	enum class LinuxLockMethod {
@@ -74,7 +75,7 @@ public:
 #endif
 
 signals:
-	void desktopLockEvent(LockEvent event);
+	void desktopLockEvent(LockEvent event, const QDateTime& lockTime);
 
 public slots:
 	void update();

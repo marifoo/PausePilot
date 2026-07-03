@@ -137,6 +137,18 @@ private slots:
 
     // Phase 2 clock seam: fake clock drives the ongoing duration with no sleep.
     void test_seam_fake_clock_drives_ongoing_duration();
+
+    // A2: backpause anchors the Activity→Pause boundary at the real wall-clock
+    // lock instant, not now−backpause, so a late (post-suspend) LongOngoingLock
+    // does not credit suspended time as Activity.
+    void test_A2_backpause_anchors_at_lock_time_across_suspend();
+    // A2: display totals come from wall-clock segment_start_time, so they match
+    // persisted totals across a suspend instead of tracking the frozen monotonic timer.
+    void test_A2_display_total_matches_wallclock_across_suspend();
+
+    // A3: the cross-midnight watchdog discard deletes the in-flight segment's
+    // unfinalized checkpoint row so it cannot be resurrected or dropped as stale.
+    void test_A3_watchdog_discard_deletes_checkpoint_row();
 };
 
 #endif // TEST_TIMER_H

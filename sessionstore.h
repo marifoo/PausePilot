@@ -171,6 +171,15 @@ public:
     virtual SessionStoreResult saveCheckpoint(DurationType type, const QDateTime& startTime,
                                               const QDateTime& endTime, const SegmentId& segmentId) = 0;
 
+    /// Deletes the unfinalized checkpoint row(s) for segmentId (is_finalized = 0).
+    /// Called when the engine deliberately discards an in-flight segment (e.g. the
+    /// cross-midnight watchdog) so the orphaned checkpoint is neither resurrected
+    /// by startup recovery nor silently dropped by the stale-orphan policy.
+    /// Returns Disabled when history storage is off (no-op, not an error).
+    /// Returns TransientError/FatalError on DB failure.
+    /// @pre segmentId must be non-empty
+    virtual SessionStoreResult discardCheckpoint(const SegmentId& segmentId) = 0;
+
     virtual SchemaStatus checkSchemaOnStartup() = 0;
 
     /// Forces pending writes to disc.  Returns Disabled when history is off,

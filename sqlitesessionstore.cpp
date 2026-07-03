@@ -1039,6 +1039,38 @@ SessionStoreResult SqliteSessionStore::saveCheckpoint(DurationType type, const Q
         : SessionStoreResult::transient("Checkpoint transaction commit failed: " + db.lastError().text());
 }
 
+SessionStoreResult SqliteSessionStore::discardCheckpoint(const SegmentId& segmentId)
+{
+    QMutexLocker locker(&db_mutex_);
+
+    if (segmentId.isEmpty()) {
+        Logger::Log("[DB] discardCheckpoint: empty segment_id — caller bug");
+        return SessionStoreResult::callerBug("discardCheckpoint called with empty segment_id");
+    }
+
+    if (history_days_to_keep_ == 0) {
+        return SessionStoreResult::disabled();
+    }
+
+    if (!ensureOpen()) {
+        Logger::Log("[DB] Could not open DB to discard checkpoint");
+        return SessionStoreResult::fatal("DB connection could not be opened");
+    }
+
+    // Only unfinalized rows may be removed here; finalized history is never touched.
+    QSqlQuery query(db);
+    query.prepare("DELETE FROM durations WHERE segment_id = :segment_id AND is_finalized = 0");
+    query.bindValue(":segment_id", segmentId.toString());
+    if (!query.exec()) {
+        Logger::Log("[DB] Error discarding checkpoint: " + query.lastError().text());
+        return SessionStoreResult::transient("Failed to discard checkpoint: " + query.lastError().text());
+    }
+
+    Logger::Log(QString("[DB] discardCheckpoint: removed %1 unfinalized row(s) for segment_id %2")
+        .arg(query.numRowsAffected()).arg(segmentId.toString()));
+    return SessionStoreResult::success();
+}
+
 /**
  * Smart upsert (update or insert) for a batch of durations using segment identity.
  *

@@ -2,6 +2,7 @@
 #include "fakesessionstore.h"
 #include "fakeclock.h"
 #include <QtTest>
+#include <QSqlQuery>
 
 using TestCommon::createSettingsFile;
 using TestCommon::sumDurations;
@@ -2057,4 +2058,118 @@ void TimerTest::test_seam_fake_clock_drives_ongoing_duration()
     QCOMPARE(ongoing->startTime, start);
     QCOMPARE(ongoing->endTime, start.addMSecs(ninetyMinutesMs));
     QCOMPARE(ongoing->duration, ninetyMinutesMs);
+}
+
+void TimerTest::test_A2_backpause_anchors_at_lock_time_across_suspend()
+{
+    // Arrange: autopause on, 15 min threshold, fake clock.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/autopause_enabled", true);
+    writer.setValue("uTimer/autopause_threshold_minutes", 15); // 900s backpause
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore db;
+    Timer tracker(settings, db);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Act: Activity from 09:00; desktop locks at 10:00.
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    const QDateTime lockInstant(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::LocalTime);
+    clock.setNow(lockInstant);
+    tracker.useTimerViaLockEvent(LockEvent::Lock, lockInstant);
+
+    // Machine suspends; LongOngoingLock only surfaces at 14:00 after resume,
+    // carrying the real lock instant (10:00).
+    const QDateTime resumeInstant(QDate(2025, 6, 1), QTime(14, 0, 0), Qt::LocalTime);
+    clock.setNow(resumeInstant);
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockInstant);
+
+    // Assert: Activity is exactly 09:00→10:00 (1h) and Pause 10:00→14:00 (4h);
+    // none of the suspended interval leaks into Activity.
+    QVERIFY(tracker.isPaused());
+    const auto& d = tracker.sessionState_dbg().durations;
+    const qint64 activeMs = sumDurations(d, DurationType::Activity);
+    const qint64 pauseMs  = sumDurations(d, DurationType::Pause);
+    QCOMPARE(activeMs, 60ll * 60ll * 1000ll);       // 1 hour
+    QCOMPARE(pauseMs,  4ll * 60ll * 60ll * 1000ll);  // 4 hours
+
+    // The Pause segment must start at the lock instant, not now−backpause.
+    bool foundPauseAtLock = false;
+    for (const auto& seg : d)
+        if (seg.type == DurationType::Pause && seg.startTime == lockInstant)
+            foundPauseAtLock = true;
+    QVERIFY(foundPauseAtLock);
+}
+
+void TimerTest::test_A2_display_total_matches_wallclock_across_suspend()
+{
+    // Arrange: fake clock; the monotonic timer_ will not advance with it.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore db;
+    Timer tracker(settings, db);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Act: start Activity, then jump the wall clock two hours (simulated suspend).
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    const qint64 twoHoursMs = 2ll * 60ll * 60ll * 1000ll;
+    clock.advance(twoHoursMs);
+
+    // Assert: the displayed Active total tracks wall-clock elapsed, matching what
+    // persistence would compute from segment_start_time — not the frozen timer_.
+    QCOMPARE(tracker.getActiveTime(), twoHoursMs);
+    QCOMPARE(tracker.getPauseTime(), 0ll);
+}
+
+// Counts unfinalized (is_finalized = 0) checkpoint rows in the store's DB.
+static int countUnfinalizedRows(SqliteSessionStore& db)
+{
+    db.ensureOpen_dbg();
+    QSqlQuery q(db.rawDb_dbg());
+    q.exec("SELECT COUNT(*) FROM durations WHERE is_finalized = 0");
+    q.next();
+    return q.value(0).toInt();
+}
+
+void TimerTest::test_A3_watchdog_discard_deletes_checkpoint_row()
+{
+    // Arrange: real store so we can inspect checkpoint rows, plus a fake clock.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore db(settings);
+    Timer tracker(settings, db);
+
+    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(preMidnight);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Start Activity and write a checkpoint before midnight.
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    clock.advance(5ll * 60ll * 1000ll); // 23:55
+    tracker.saveCheckpointInternal_dbg(clock.now());
+    QCOMPARE(countUnfinalizedRows(db), 1);
+
+    // Act: cross midnight — the watchdog discards the in-flight segment.
+    const QDateTime postMidnight(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime);
+    clock.setNow(postMidnight);
+    QVERIFY(tracker.discardCrossMidnightOngoingAndStop_dbg(postMidnight));
+    QVERIFY(tracker.isStopped());
+
+    // Assert: the orphaned checkpoint row is gone — nothing for recovery to
+    // resurrect and nothing for the stale policy to silently drop.
+    QCOMPARE(countUnfinalizedRows(db), 0);
 }

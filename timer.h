@@ -171,7 +171,7 @@ private:
     void startTimer(const QDateTime& now);
     void stopTimer(const QDateTime& now, StopReason reason);
     void pauseTimer(const QDateTime& now);
-    void backpauseTimer(const QDateTime& now);
+    void backpauseTimer(const QDateTime& now, const QDateTime& lockTime = QDateTime());
     void finalizePauseTransition(const QDateTime& now);
     // Appends a single same-day segment to session_.durations.
     // Silently discards segments where startTime.date() != endTime.date()
@@ -338,7 +338,7 @@ public:
 
 public slots:
     void useTimerViaButton(Button button);
-    void useTimerViaLockEvent(LockEvent event);
+    void useTimerViaLockEvent(LockEvent event, const QDateTime& lockTime = QDateTime());
     void onTick(const QDateTime& now);  // 100 ms heartbeat for the watchdog
     /// Start if stopped/paused, pause if active. Called by the start/pause button.
     void onStartPausePressed();
@@ -394,7 +394,7 @@ public:
     void saveCheckpointInternal_dbg(const QDateTime& now) { saveCheckpointInternal(now); }
 
     /// Exposes the backpause path for direct testing.
-    void backpauseTimer_dbg(const QDateTime& now) { backpauseTimer(now); }
+    void backpauseTimer_dbg(const QDateTime& now, const QDateTime& lockTime = QDateTime()) { backpauseTimer(now, lockTime); }
 
     /// Exposes the addDuration path for direct testing.
     void addDuration_dbg(DurationType type, const QDateTime& start, const QDateTime& end) {

@@ -42,6 +42,7 @@ public:
     EntriesForDateResult hasEntriesForDate(const QDate& date) override;
     SessionStoreResult saveCheckpoint(DurationType type, const QDateTime& startTime,
                                       const QDateTime& endTime, const SegmentId& segmentId) override;
+    SessionStoreResult discardCheckpoint(const SegmentId& segmentId) override;
     SchemaStatus checkSchemaOnStartup() override;
     SessionStoreResult flushToDisc() override;
     SessionStoreResult setLastCleanShutdownMarker(const QDateTime& timestamp) override;

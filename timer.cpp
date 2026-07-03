@@ -568,7 +568,7 @@ void Timer::finalizePauseTransition(const QDateTime& now)
  * since checkpoints are suspended while locked but the time before lock detection
  * may have been saved as Activity.
  */
-void Timer::backpauseTimer(const QDateTime& now)
+void Timer::backpauseTimer(const QDateTime& now, const QDateTime& lockTime)
 {
     if (mode_ != Mode::Activity) {
         Logger::Log("[DEBUG] Backpause ignored; not in Activity");
@@ -596,8 +596,12 @@ void Timer::backpauseTimer(const QDateTime& now)
 
     timer_.restart();
 
-    // Calculate Activity end time (backpause boundary)
-    QDateTime activity_end = now.addMSecs(-backpause_msec);
+    // Calculate Activity end time (backpause boundary). Anchor the pause at the
+    // real wall-clock lock instant when it is known: the LongOngoingLock event
+    // may arrive long after the lock (e.g. after a suspend), so now−backpause
+    // would credit the suspended interval as Activity. Fall back to now−backpause
+    // only when no lock time was plumbed through (e.g. deferred replay).
+    QDateTime activity_end = lockTime.isValid() ? lockTime : now.addMSecs(-backpause_msec);
 
     // Ensure activity_end is not before segment_start_time
     if (activity_end < session_.segment_start_time) {
@@ -733,7 +737,7 @@ void Timer::onStopPressed()
  * Note: Lock/Unlock events for checkpoint control are always processed.
  * Autopause behavior (LongOngoingLock handling) respects isAutopauseEnabled().
  */
-void Timer::useTimerViaLockEvent(LockEvent event)
+void Timer::useTimerViaLockEvent(LockEvent event, const QDateTime& lockTime)
 {
     QMutexLocker locker(&mutex_);
 #ifndef QT_NO_DEBUG
@@ -787,7 +791,7 @@ void Timer::useTimerViaLockEvent(LockEvent event)
         }
         autopause_pending_resume_ = (mode_ == Mode::Activity);
         if (autopause_pending_resume_) {
-            backpauseTimer(now);
+            backpauseTimer(now, lockTime);
             emit modeChanged(PauseCause::LockAutopause);
         }
     } else if (event == LockEvent::Unlock) {
@@ -810,26 +814,15 @@ void Timer::onTick(const QDateTime& now)
 
 qint64 Timer::getActiveTime() const
 {
-    QMutexLocker locker(&mutex_);
-    qint64 sum = 0;
-    for (const auto &t : session_.durations)
-        if (t.type == DurationType::Activity)
-            sum += t.duration;
-    if (mode_ == Mode::Activity)
-        sum += timer_.elapsed();
-    return sum;
+    // Totals come from the wall-clock timeline (completed + ongoing) so the
+    // display stays consistent with persistence across a suspend; the monotonic
+    // timer_ freezes during suspend and no longer drives the displayed total.
+    return snapshot().activeMsec();
 }
 
 qint64 Timer::getPauseTime() const
 {
-    QMutexLocker locker(&mutex_);
-    qint64 sum = 0;
-    for (const auto &t : session_.durations)
-        if (t.type == DurationType::Pause)
-            sum += t.duration;
-    if (mode_ == Mode::Pause)
-        sum += timer_.elapsed();
-    return sum;
+    return snapshot().pauseMsec();
 }
 
 Timeline Timer::snapshot() const
@@ -1178,6 +1171,10 @@ bool Timer::discardCrossMidnightOngoingAndStop(const QDateTime& now)
     if (!session_.segment_start_time.isValid()) return false;
     if (!isCrossMidnight(session_.segment_start_time, now)) return false;
 
+    // Capture the in-flight segment id before teardown so its orphaned
+    // (unfinalized) checkpoint row can be deleted below.
+    const SegmentId discardedId = session_.segment_id;
+
     Logger::Log(QString("[MIDNIGHT] Cross-midnight ongoing detected "
                         "(segment_start=%1, now=%2) — discarding segment, forcing stop")
         .arg(session_.segment_start_time.toString(Qt::ISODateWithMs))
@@ -1201,6 +1198,15 @@ bool Timer::discardCrossMidnightOngoingAndStop(const QDateTime& now)
     // (flush-failure path), so the updateDurationsInDB call inside stopTimer is a
     // no-op on success and a harmless retry on flush failure.
     stopTimer(now, StopReason::MidnightWatchdog);
+
+    // Delete the discarded segment's checkpoint row. Without this, a later
+    // startup recovery would finalize it (silently re-adding the deliberately
+    // discarded time) or the stale policy would drop it (silently losing
+    // checkpointed pre-midnight work). Observable side effect + log line.
+    if (!discardedId.isEmpty()) {
+        const SessionStoreResult r = db_.discardCheckpoint(discardedId);
+        logDbResultOrWarn(r, "discardCheckpoint");
+    }
     return true;
 }
 

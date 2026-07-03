@@ -163,7 +163,7 @@ int main(int argc, char *argv[])
 	});
 
 	QObject::connect(&timer, SIGNAL(timeout()), &lockstate_watcher, SLOT(update()));
-	QObject::connect(&lockstate_watcher, SIGNAL(desktopLockEvent(LockEvent)),	&time_tracker, SLOT(useTimerViaLockEvent(LockEvent)));
+	QObject::connect(&lockstate_watcher, SIGNAL(desktopLockEvent(LockEvent,QDateTime)),	&time_tracker, SLOT(useTimerViaLockEvent(LockEvent,QDateTime)));
 	QObject::connect(&time_tracker, &Timer::userWarning, &main_win, &MainWin::showUserWarning);
 
 	QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, &main_win, &MainWin::onAboutToQuit);
