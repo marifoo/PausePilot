@@ -16,6 +16,16 @@ private slots:
     void test_shouldEmitLongLock_unknown_does_not_mature();
     void test_shouldEmitLongLock_locked_matures();
     void test_shouldEmitLongLock_locked_short_elapsed_does_not_mature();
+    // Phase 2 seam: stubbed query probe drives update(); now-provider records lock_time_.
+    void test_seam_query_provider_drives_update_and_records_lock_time();
+    // A2: LongOngoingLock decision uses the wall-clock lock instant, so it matures
+    // across a suspend gap the monotonic lock_timer_ would miss.
+    void test_A2_longlock_uses_wallclock_across_suspend();
+    // A5: hysteresis debounce — a single flaky sample no longer permanently
+    // misses the Lock; Lock/Unlock strictly alternate; LongOngoingLock at most once.
+    void test_A5_noisy_transition_emits_exactly_one_lock();
+    void test_A5_lock_unlock_strictly_alternate();
+    void test_A5_longlock_fires_at_most_once_per_lock_session();
 };
 
 #endif // TEST_LOCKSTATEWATCHER_H

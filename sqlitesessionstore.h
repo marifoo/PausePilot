@@ -45,6 +45,7 @@ public:
     LoadResult loadDurations() override;
     EntriesForDateResult hasEntriesForDate(const QDate& date) override;
     SessionStoreResult saveCheckpoint(DurationType type, const QDateTime& startTime, const QDateTime& endTime, const SegmentId& segmentId) override;
+    SessionStoreResult discardCheckpoint(const SegmentId& segmentId) override;
     SchemaStatus checkSchemaOnStartup() override;
     SessionStoreResult flushToDisc() override;
     SessionStoreResult setLastCleanShutdownMarker(const QDateTime& timestamp) override;
@@ -97,7 +98,7 @@ private:
 
     bool ensureOpen();
     bool ensureSchema();
-    void lazyClose();
+    void closeConnection();
     bool ensureSettingsTable();
     BackupResult createBackup(const std::deque<TimeDuration>& durations, TransactionMode mode);
     void performRetentionCleanup();
@@ -128,9 +129,9 @@ public:
     /// Exposed for tests that need to seed the DB via rawDb_dbg() directly.
     bool ensureOpen_dbg() { return ensureOpen(); }
 
-    /// Closes the database connection (lazy: happens at next open).
+    /// Closes the database connection immediately.
     /// Call after raw SQL seeding to release the connection for the next open.
-    void lazyClose_dbg() { lazyClose(); }
+    void closeConnection_dbg() { closeConnection(); }
 
     /// Returns the raw QSqlDatabase handle for test-only SQL seeding.
     /// The connection must be open (call ensureOpen_dbg() first).

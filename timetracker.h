@@ -11,15 +11,16 @@
 #include <deque>
 #include <memory>
 #include <utility>
+#include <functional>
 #include "settings.h"
 #include "types.h"
 #include "sessionstore.h"
 #include "timeline.h"
 
 /**
- * SessionState — groups the mutable per-session data that Timer manages.
+ * SessionState — groups the mutable per-session data that TimeTracker manages.
  *
- * Previously these fields were scattered as raw members on Timer,
+ * Previously these fields were scattered as raw members on TimeTracker,
  * making it easy for code paths to mutate them as side effects without the
  * caller being aware. Grouping them into a struct with explicit transition
  * methods ensures:
@@ -28,7 +29,7 @@
  *   - Callers like addDuration can compute results without touching the struct
  *     directly, and the caller applies changes explicitly
  *
- * The struct is intentionally not a class — Timer is its sole owner
+ * The struct is intentionally not a class — TimeTracker is its sole owner
  * and accesses fields directly. The transition methods are convenience
  * helpers that enforce logging discipline, not access control.
  */
@@ -89,7 +90,7 @@ struct SessionState {
 };
 
 
-class Timer : public QObject
+class TimeTracker : public QObject
 {
     Q_OBJECT
 public:
@@ -120,13 +121,13 @@ private:
      * DayBoundaryWatcher — owns the 23:59:59.500 single-shot QTimer and the
      * cross-midnight watchdog logic.
      *
-     * T5.1: skeleton with tick(). Arms/cancels the internal timer.
-     * T5.2: timer fires and calls the engine's stop path.
-     * T5.3: tick() contains the watchdog poll (moved from MainWin::update()).
+     * tick() arms/cancels the internal timer, calls the engine's stop path
+     * when it fires, and contains the watchdog poll (moved from
+     * MainWin::update()).
      */
     class DayBoundaryWatcher {
     public:
-        explicit DayBoundaryWatcher(Timer& owner);
+        explicit DayBoundaryWatcher(TimeTracker& owner);
 
         /// Called on every 100 ms heartbeat. Runs the cross-midnight watchdog.
         void tick(const QDateTime& now);
@@ -138,13 +139,17 @@ private:
         void cancel();
 
     private:
-        Timer& owner_;
+        TimeTracker& owner_;
         QTimer midnight_timer_;
 
         void onMidnightTimerFired();
     };
 
     const Settings & settings_;
+    /// Wall-clock source for the engine. Defaults to QDateTime::currentDateTime;
+    /// tests inject a controllable clock via setNowProvider_dbg(). Every internal
+    /// "now" read in TimeTracker routes through this so the clock is fully drivable.
+    std::function<QDateTime()> now_provider_;
     QElapsedTimer timer_;
     SessionState session_;
     Mode mode_;
@@ -152,10 +157,12 @@ private:
     bool is_locked_;     // Track if desktop is currently locked (to prevent checkpoints while locked)
     bool dialog_open_;   // True while HistoryDialog is open (suspends mutation)
     bool pending_midnight_stop_ = false;
+    bool shutdown_called_ = false;  // Set once shutdown() has torn down the engine.
     LockEvent pending_lock_event_ = LockEvent::None;
+    QDateTime pending_lock_time_;   // Lock instant for deferred LongOngoingLock replay
     SessionStore& db_;
     mutable QRecursiveMutex mutex_;  // Protects state transitions from concurrent access
-    QTimer checkpointTimer_;  // Timer for periodic checkpoint saving
+    QTimer checkpointTimer_;  // TimeTracker for periodic checkpoint saving
     qint64 checkpoint_interval_msec_; // Checkpoint interval (0 = disabled)
     int last_history_load_skipped_;
     int last_history_load_repaired_;
@@ -166,7 +173,7 @@ private:
     void startTimer(const QDateTime& now);
     void stopTimer(const QDateTime& now, StopReason reason);
     void pauseTimer(const QDateTime& now);
-    void backpauseTimer(const QDateTime& now);
+    void backpauseTimer(const QDateTime& now, const QDateTime& lockTime = QDateTime());
     void finalizePauseTransition(const QDateTime& now);
     // Appends a single same-day segment to session_.durations.
     // Silently discards segments where startTime.date() != endTime.date()
@@ -182,7 +189,7 @@ private:
     // Safe to call multiple times; only the first call does real work.
     bool discardCrossMidnightOngoingAndStop(const QDateTime& now);
     EntriesForDateResult hasEntriesForDate(const QDate& date);
-    void saveCheckpointInternal(const QDateTime& now);  // Internal checkpoint save (called when mutex already held)
+    void saveCheckpoint_locked(const QDateTime& now);  // Internal checkpoint save (called when mutex already held)
     SessionStoreResult appendDurationsChunkToDB(const std::deque<TimeDuration>& durations);
     /// Applies the standard log/warn policy for a SessionStoreResult in the
     /// named context.  Does NOT affect control flow — callers decide what to do
@@ -201,7 +208,7 @@ private:
     void replaceCurrentDurations(const std::deque<TimeDuration>& newDurations,
                                  const std::optional<TimeDuration>& ongoing = std::nullopt);
     // Atomically replaces the live session with `edited`. Delegates to
-    // commitEditedTimeline; use commitEditedTimeline directly from outside Timer.
+    // commitEditedTimeline; use commitEditedTimeline directly from outside TimeTracker.
     void commit(const Timeline& edited);
 
 #ifndef QT_NO_DEBUG
@@ -219,12 +226,12 @@ private:
     /// for unexpected mutations on exit. Only active in debug builds.
     class StateGuard {
     public:
-        StateGuard(const Timer& tracker, const char* methodName);
+        StateGuard(const TimeTracker& tracker, const char* methodName);
         ~StateGuard();
         /// Call this to acknowledge that the method intentionally modified state.
         void markTransitioned();
     private:
-        const Timer& tracker_;
+        const TimeTracker& tracker_;
         const char* method_;
         StateSnapshot entry_;
         bool transitioned_ = false;
@@ -249,6 +256,10 @@ public:
     bool isActive() const  { QMutexLocker lk(&mutex_); return mode_ == Mode::Activity; }
     bool isPaused() const  { QMutexLocker lk(&mutex_); return mode_ == Mode::Pause; }
     bool isStopped() const { QMutexLocker lk(&mutex_); return mode_ == Mode::None; }
+    /// True once shutdown() has run. Distinct from isStopped(): a normally
+    /// stopped engine is still editable, but a shut-down engine must not accept
+    /// a HistoryDialog save (it would re-write finalized rows as unfinalized).
+    bool wasShutDown() const { QMutexLocker lk(&mutex_); return shutdown_called_; }
 
     /**
      * Result returned by commitEditedTimeline().
@@ -267,12 +278,12 @@ public:
         static EditCommitResult failure(QString msg) { return {false, std::move(msg)}; }
     };
 
-    explicit Timer(const Settings & settings, SessionStore& db, QObject *parent = nullptr);
-    ~Timer();
+    explicit TimeTracker(const Settings & settings, SessionStore& db, QObject *parent = nullptr);
+    ~TimeTracker();
 
     /// Consumes the clean-shutdown marker and reconciles orphan checkpoints.
     /// Must be called once after checkSchemaOnStartup() returns Ready or Created,
-    /// and before the event loop starts.  The Timer constructor performs no
+    /// and before the event loop starts.  The TimeTracker constructor performs no
     /// persistence side effects; this method is where recovery happens.
     void initializeFromStore();
 
@@ -281,11 +292,11 @@ public:
     /// Returns completed + ongoing segments. Use for history display.
     Timeline snapshot() const;
     /// Returns completed segments only (excludes ongoing). Use for checkpoint saves.
-    Timeline getCurrentDurations() const;
+    Timeline completedTimeline() const;
     /**
      * Atomically replaces the live session with `edited`, aligning mode_,
      * re-anchoring checkpoint state, and deciding whether checkpoint writes
-     * are allowed.  Thread-safe; caller must hold no Timer locks.
+     * are allowed.  Thread-safe; caller must hold no TimeTracker locks.
      *
      * Owns internally:
      *   - replacing completed segments and clearing the retry cache,
@@ -300,6 +311,10 @@ public:
      *     or paused() so the UI reflects the new mode.
      *   - ongoing absent, mode_ was not None: emits stopped(EditApplied) so
      *     the tray/UI learns that tracking ended due to the edit.
+     *   - ongoing present but mode_ is already None: refused. Adopting the
+     *     segment identity would leave segment_id set while the engine stays
+     *     stopped — a state SessionState documents as impossible. The
+     *     ongoing segment is ignored; no signal emitted.
      *   - no mode change: no signal emitted.
      *
      * Returns EditCommitResult::failure if the checkpoint write fails;
@@ -333,7 +348,7 @@ public:
 
 public slots:
     void useTimerViaButton(Button button);
-    void useTimerViaLockEvent(LockEvent event);
+    void useTimerViaLockEvent(LockEvent event, const QDateTime& lockTime = QDateTime());
     void onTick(const QDateTime& now);  // 100 ms heartbeat for the watchdog
     /// Start if stopped/paused, pause if active. Called by the start/pause button.
     void onStartPausePressed();
@@ -342,7 +357,7 @@ public slots:
 
 signals:
     void userWarning(const QString& text);
-    void stopped(Timer::StopReason reason);
+    void stopped(TimeTracker::StopReason reason);
     /// Emitted after a successful None→Activity or Pause→Activity transition,
     /// including lock-driven resume. fromPause is true when the previous mode
     /// was Pause, false for a fresh start from None.
@@ -353,7 +368,7 @@ signals:
     /// Emitted for lock-driven autopause (LockAutopause) and autoresume
     /// (LockResume). On LockResume, started(true) also fires — GUI must not
     /// double-act on both.
-    void modeChanged(Timer::PauseCause cause);
+    void modeChanged(TimeTracker::PauseCause cause);
 
 private slots:
     void saveCheckpoint();  // Periodic checkpoint saving every 5 minutes
@@ -362,6 +377,11 @@ private slots:
 public:
     // ---- Debug-build test probes ----
     // Narrow accessors for white-box tests. NOT compiled in release builds.
+
+    /// Injects a controllable wall-clock source so tests can drive the engine
+    /// without sleeping. Pass a lambda over a FakeClock; every internal "now"
+    /// read (checkpoints, ongoing duration, stop/backpause, watchdog) uses it.
+    void setNowProvider_dbg(std::function<QDateTime()> provider) { now_provider_ = std::move(provider); }
 
     /// Direct access to the SessionState for test setup and assertions.
     SessionState& sessionState_dbg() { return session_; }
@@ -381,10 +401,10 @@ public:
     QElapsedTimer& elapsedTimer_dbg() { return timer_; }
 
     /// Exposes the internal checkpoint-save path for direct testing.
-    void saveCheckpointInternal_dbg(const QDateTime& now) { saveCheckpointInternal(now); }
+    void saveCheckpoint_locked_dbg(const QDateTime& now) { saveCheckpoint_locked(now); }
 
     /// Exposes the backpause path for direct testing.
-    void backpauseTimer_dbg(const QDateTime& now) { backpauseTimer(now); }
+    void backpauseTimer_dbg(const QDateTime& now, const QDateTime& lockTime = QDateTime()) { backpauseTimer(now, lockTime); }
 
     /// Exposes the addDuration path for direct testing.
     void addDuration_dbg(DurationType type, const QDateTime& start, const QDateTime& end) {
@@ -420,7 +440,7 @@ public:
 #endif // QT_NO_DEBUG
 };
 
-Q_DECLARE_METATYPE(Timer::StopReason)
-Q_DECLARE_METATYPE(Timer::PauseCause)
+Q_DECLARE_METATYPE(TimeTracker::StopReason)
+Q_DECLARE_METATYPE(TimeTracker::PauseCause)
 
 #endif // TIMER_H

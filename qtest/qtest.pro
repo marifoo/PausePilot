@@ -39,7 +39,7 @@ SOURCES += \
     $$PWD/../historydialog.cpp \
     $$PWD/../historyeditsession.cpp \
     $$PWD/../shutdowncoordinator.cpp \
-    $$PWD/../timer.cpp \
+    $$PWD/../timetracker.cpp \
     $$PWD/../lockstatewatcher.cpp \
     $$PWD/../sqlitesessionstore.cpp \
     $$PWD/../timeformat.cpp \
@@ -73,7 +73,7 @@ HEADERS += \
     $$PWD/../historyeditsession.h \
     $$PWD/../healthmonitor.h \
     $$PWD/../shutdowncoordinator.h \
-    $$PWD/../timer.h \
+    $$PWD/../timetracker.h \
     $$PWD/../lockstatewatcher.h \
     $$PWD/../sqlitesessionstore.h \
     $$PWD/../sessionstore.h \

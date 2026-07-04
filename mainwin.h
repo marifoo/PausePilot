@@ -18,7 +18,7 @@ private:
 	ContentWidget *content_widget_;
 	QSystemTrayIcon *tray_icon_;
 	const Settings & settings_;
-	Timer& timetracker_;
+	TimeTracker& timetracker_;
 	SessionStore& db_;
 	ShutdownCoordinator& shutdown_coordinator_;
 	HealthMonitor* health_monitor_;
@@ -28,7 +28,7 @@ private:
 	void showMainWin();
 	void toggleAlwaysOnTopFlag();
 	void setupIcon();
-	void setupCentralWidget(Settings &settings, Timer &timetracker);
+	void setupCentralWidget(Settings &settings, TimeTracker &timetracker);
 	void shutdown(ShutdownMode mode);
 
 protected:
@@ -36,7 +36,7 @@ protected:
 	void closeEvent(QCloseEvent *event) override;
 
 public:
-	explicit MainWin(Settings &settings, Timer &timetracker, SessionStore &db,
+	explicit MainWin(Settings &settings, TimeTracker &timetracker, SessionStore &db,
 	                 ShutdownCoordinator &shutdown_coordinator, QWidget *parent = nullptr);
 	/// Applies startup preferences (pin, minimize, auto-start) and shows crash-recovery notification.
 	void start();

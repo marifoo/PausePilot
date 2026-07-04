@@ -2,9 +2,10 @@
 #include <QtTest>
 
 #include "../historyeditsession.h"
-#include "../timer.h"
+#include "../timetracker.h"
 
 #include "fakesessionstore.h"
+#include "fakeclock.h"
 #include "testcommon.h"
 
 using TestCommon::createSettingsFile;
@@ -50,7 +51,7 @@ void HistoryEditSessionTest::test_build_today_page_only_from_memory()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime start = todayUTC(10, 0);
     const QDateTime end   = todayUTC(10, 30);
@@ -81,7 +82,7 @@ void HistoryEditSessionTest::test_build_today_page_memory_plus_db()
     fakeDb.loadDurationsResult.durations.push_back(
         TimeDuration::fromPersistedRow(DurationType::Pause, dbStart, dbEnd));
 
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     // Memory row (different time, different segment_id)
     const QDateTime memStart = todayUTC(9, 0);
@@ -111,7 +112,7 @@ void HistoryEditSessionTest::test_build_historical_page_separate_from_today()
     fakeDb.loadDurationsResult.durations.push_back(
         TimeDuration::fromPersistedRow(DurationType::Activity, histStart, histEnd));
 
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     HistoryEditSession session;
     session.buildFromTimer(tracker);
@@ -136,7 +137,7 @@ void HistoryEditSessionTest::test_build_deduplicates_db_row_matching_memory_segm
     const QDateTime end   = todayUTC(10, 30);
 
     // Memory row with sharedId
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, start, end, sharedId));
 
     // DB row with the same segment_id — should be deduped out.
@@ -161,7 +162,7 @@ void HistoryEditSessionTest::test_origin_memory_rows_marked_true()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime start = todayUTC(10, 0);
     const QDateTime end   = todayUTC(10, 30);
@@ -186,7 +187,7 @@ void HistoryEditSessionTest::test_origin_db_rows_marked_false()
     fakeDb.loadDurationsResult.durations.push_back(
         TimeDuration::fromPersistedRow(DurationType::Activity, dbStart, dbEnd));
 
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     HistoryEditSession session;
     session.buildFromTimer(tracker);
@@ -205,7 +206,7 @@ void HistoryEditSessionTest::test_split_registers_child_with_same_origin()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime start = todayUTC(10, 0);
     const QDateTime end   = todayUTC(10, 0, 8); // 8-second segment
@@ -243,7 +244,7 @@ void HistoryEditSessionTest::test_split_history_row_child_is_false_origin()
     fakeDb.loadDurationsResult.durations.push_back(
         TimeDuration::fromPersistedRow(DurationType::Activity, histStart, histEnd));
 
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     HistoryEditSession session;
     session.buildFromTimer(tracker);
@@ -275,7 +276,7 @@ void HistoryEditSessionTest::test_type_toggle_updates_pending_timeline()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime start = todayUTC(10, 0);
     const QDateTime end   = todayUTC(10, 30);
@@ -307,7 +308,7 @@ void HistoryEditSessionTest::test_no_merge_needed_for_non_overlapping()
     fakeDb.loadDurationsResult.durations.push_back(
         TimeDuration::fromPersistedRow(DurationType::Pause, dbStart, dbEnd));
 
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime memStart = todayUTC(9, 0);
     const QDateTime memEnd   = todayUTC(9, 30);
@@ -333,7 +334,7 @@ void HistoryEditSessionTest::test_merge_needed_for_overlapping_rows()
     fakeDb.loadDurationsResult.durations.push_back(
         TimeDuration::fromPersistedRow(DurationType::Activity, dbStart, dbEnd));
 
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime memStart = todayUTC(10, 15);
     const QDateTime memEnd   = todayUTC(10, 45);
@@ -366,7 +367,7 @@ void HistoryEditSessionTest::test_cross_midnight_preserved_in_payload()
     fakeDb.loadDurationsResult.durations.push_back(
         TimeDuration::fromPersistedRow(DurationType::Activity, cmStart, cmEnd));
 
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     HistoryEditSession session;
     session.buildFromTimer(tracker);
@@ -391,7 +392,7 @@ void HistoryEditSessionTest::test_refresh_ongoing_updates_end_time()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     // Start the timer so there is an ongoing segment.
     tracker.useTimerViaButton(Button::Start);
@@ -424,7 +425,7 @@ void HistoryEditSessionTest::test_refresh_ongoing_advances_end_time_and_preserve
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(30);
@@ -470,7 +471,7 @@ void HistoryEditSessionTest::test_refresh_ongoing_clears_when_engine_has_no_ongo
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(20);
@@ -500,7 +501,7 @@ void HistoryEditSessionTest::test_toggle_activity_to_pause_payload_end_utc_advan
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(30);
@@ -556,7 +557,7 @@ void HistoryEditSessionTest::test_toggle_pause_to_activity_payload_end_utc_advan
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(20);
@@ -610,8 +611,10 @@ void HistoryEditSessionTest::test_toggle_pause_to_activity_payload_end_utc_advan
 
 void HistoryEditSessionTest::test_payload_history_vs_session_buckets()
 {
-    // DB row (yesterday): goes to historyTimeline (finalized).
-    // Memory row (today): goes to sessionTimeline (unfinalized).
+    // A9: completed rows are finalized on save regardless of origin.
+    // DB row (yesterday) and memory row (today) both go to historyTimeline
+    // (finalized). The session bucket stays empty when there is no ongoing.
+    // The memory row also appears in memoryTimeline (for the live-session commit).
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
@@ -622,7 +625,7 @@ void HistoryEditSessionTest::test_payload_history_vs_session_buckets()
     fakeDb.loadDurationsResult.durations.push_back(
         TimeDuration::fromPersistedRow(DurationType::Activity, histStart, histEnd));
 
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime memStart = todayUTC(9, 0);
     const QDateTime memEnd   = todayUTC(9, 30);
@@ -633,18 +636,19 @@ void HistoryEditSessionTest::test_payload_history_vs_session_buckets()
 
     const auto payload = session.buildSavePayload();
 
-    // 1 history row, 1 session row (no ongoing here).
-    QCOMPARE(payload.historyTimeline.completed().size(), static_cast<size_t>(1));
-    QCOMPARE(payload.sessionTimeline.completed().size(), static_cast<size_t>(1));
-    QCOMPARE(payload.historyTimeline.completed()[0].startTime.toUTC().time(), QTime(10, 0, 0));
-    QCOMPARE(payload.sessionTimeline.completed()[0].startTime.toUTC().time(), QTime(9, 0, 0));
+    // Both completed rows are finalized; no unfinalized session rows (no ongoing).
+    QCOMPARE(payload.historyTimeline.completed().size(), static_cast<size_t>(2));
+    QCOMPARE(payload.sessionTimeline.completed().size(), static_cast<size_t>(0));
+    // The memory-origin row is still committed into the live session.
+    QCOMPARE(payload.memoryTimeline.completed().size(), static_cast<size_t>(1));
+    QCOMPARE(payload.memoryTimeline.completed()[0].startTime.toUTC().time(), QTime(9, 0, 0));
     QVERIFY(!payload.needsMergeConfirmation);
 }
 
 void HistoryEditSessionTest::test_payload_memory_timeline_for_commit()
 {
     // memoryTimeline must contain only the memory-origin rows (+ ongoing if present),
-    // ready for Timer::commitEditedTimeline().
+    // ready for TimeTracker::commitEditedTimeline().
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
@@ -656,7 +660,7 @@ void HistoryEditSessionTest::test_payload_memory_timeline_for_commit()
     fakeDb.loadDurationsResult.durations.push_back(
         TimeDuration::fromPersistedRow(DurationType::Pause, dbStart, dbEnd));
 
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     // Memory row today.
     const QDateTime memStart = todayUTC(9, 0);
@@ -668,18 +672,19 @@ void HistoryEditSessionTest::test_payload_memory_timeline_for_commit()
 
     const auto payload = session.buildSavePayload();
 
-    // memoryTimeline has only the memory row.
+    // memoryTimeline has only the memory row (for the live-session commit).
     QCOMPARE(payload.memoryTimeline.completed().size(), static_cast<size_t>(1));
     QCOMPARE(payload.memoryTimeline.completed()[0].startTime.toUTC().time(), QTime(9, 0, 0));
-    // historyTimeline has the DB row.
-    QCOMPARE(payload.historyTimeline.completed().size(), static_cast<size_t>(1));
+    // A9: both completed rows (DB + memory) are finalized in the history bucket.
+    QCOMPARE(payload.historyTimeline.completed().size(), static_cast<size_t>(2));
 }
 
 void HistoryEditSessionTest::test_payload_memory_absorbs_merged_memory_row()
 {
     // When a DB row and a memory row overlap and are merged during normalization,
-    // the merged row is placed into the session bucket (not history) because it
-    // absorbed current-session time.
+    // the merged row is finalized in the history bucket (A9: completed rows are
+    // finalized on save) while still being committed into the live session via
+    // memoryTimeline because it absorbed current-session time.
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
@@ -691,7 +696,7 @@ void HistoryEditSessionTest::test_payload_memory_absorbs_merged_memory_row()
     fakeDb.loadDurationsResult.durations.push_back(
         TimeDuration::fromPersistedRow(DurationType::Activity, dbStart, dbEnd));
 
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     // Memory Activity row 10:15–10:45 (overlaps DB row)
     const QDateTime memStart = todayUTC(10, 15);
@@ -705,12 +710,58 @@ void HistoryEditSessionTest::test_payload_memory_absorbs_merged_memory_row()
 
     // After normalization: exactly 1 merged row covering 10:00–10:45.
     QVERIFY(payload.needsMergeConfirmation);
-    // The merged row absorbed memory time, so it must be in the session bucket.
-    QCOMPARE(payload.sessionTimeline.completed().size(), static_cast<size_t>(1));
-    QCOMPARE(payload.sessionTimeline.completed()[0].startTime.toUTC().time(), QTime(10, 0, 0));
-    QCOMPARE(payload.sessionTimeline.completed()[0].endTime.toUTC().time(), QTime(10, 45, 0));
-    // History bucket should be empty.
-    QCOMPARE(payload.historyTimeline.completed().size(), static_cast<size_t>(0));
-    // Memory timeline also has the merged row.
+    // The merged completed row is finalized in the history bucket.
+    QCOMPARE(payload.historyTimeline.completed().size(), static_cast<size_t>(1));
+    QCOMPARE(payload.historyTimeline.completed()[0].startTime.toUTC().time(), QTime(10, 0, 0));
+    QCOMPARE(payload.historyTimeline.completed()[0].endTime.toUTC().time(), QTime(10, 45, 0));
+    // No unfinalized session rows (no ongoing).
+    QCOMPARE(payload.sessionTimeline.completed().size(), static_cast<size_t>(0));
+    // Memory timeline still has the merged row (absorbed current-session time).
     QCOMPARE(payload.memoryTimeline.completed().size(), static_cast<size_t>(1));
+}
+
+// ---------------------------------------------------------------------------
+// A8: backward clock jump must not silently stop the engine on save
+// ---------------------------------------------------------------------------
+
+void HistoryEditSessionTest::test_backward_clock_jump_keeps_engine_running()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    // Deterministic clock; start a running Activity session at 12:00.
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(12, 0, 0), Qt::LocalTime));
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(30000); // 12:00:30 — ongoing has a positive length at dialog-open
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker);
+    QVERIFY(session.pendingTimelines()[0].ongoing().has_value());
+
+    // The wall clock jumps backward 2 minutes (NTP/DST): now < segment_start.
+    clock.advance(-120000); // 11:58:30
+
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+
+    // Drive the dialog-OK flow at the engine/session level (the editless no-op
+    // gate is A10's concern; here there is an in-flight save through commit).
+    session.refreshOngoing(tracker);
+    const auto payload = session.buildSavePayload();
+
+    // The pending ongoing must NOT be cleared by the backward jump.
+    QVERIFY(payload.memoryTimeline.ongoing().has_value());
+
+    tracker.commitEditedTimeline(payload.memoryTimeline);
+
+    // The engine must still be running — no stopped(EditApplied).
+    QVERIFY(!tracker.isStopped());
+    QCOMPARE(stoppedSpy.count(), 0);
+
+    // Cleanup: restore the clock ahead of the segment start before stopping.
+    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(12, 5, 0), Qt::LocalTime));
+    tracker.useTimerViaButton(Button::Stop);
 }

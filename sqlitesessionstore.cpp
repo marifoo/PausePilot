@@ -49,6 +49,12 @@ namespace {
 const char* kLastCleanShutdownKey = "last_clean_shutdown";
 constexpr qint64 kMinRecoverableOrphanDurationMs = 1000;
 constexpr qint64 kOrphanStaleAgeMs = 24LL * 60LL * 60LL * 1000LL;
+// A backward clock jump can make an orphan's endTime land after "now" at
+// recovery time (endTime.msecsTo(now) negative, defeating the stale check
+// below). A small slack tolerates normal timestamp/tick granularity without
+// misclassifying genuinely-fresh orphans; anything further in the future is
+// a clock-jump artifact and must be dropped, not resurrected.
+constexpr qint64 kOrphanFutureSlackMs = 60LL * 1000LL;
 
 static QString toUtcIso(const QDateTime& dt)
 {
@@ -117,7 +123,7 @@ SqliteSessionStore::SqliteSessionStore(const Settings& settings, QObject *parent
 
 SqliteSessionStore::~SqliteSessionStore()
 {
-    lazyClose();
+    closeConnection();
     
     QString connName = db.connectionName();
     db = QSqlDatabase();
@@ -222,7 +228,7 @@ bool SqliteSessionStore::ensureSchema()
     return true;
 }
 
-void SqliteSessionStore::lazyClose()
+void SqliteSessionStore::closeConnection()
 {
     if (db.isOpen()) {
         db.close();
@@ -636,7 +642,7 @@ bool SqliteSessionStore::saveDurations(const std::deque<TimeDuration>& durations
         return true;
     }
 
-    // Validate connection first (S5: ensureOpen before createBackup so we don't
+    // Validate connection first (ensureOpen before createBackup so we don't
     // create a backup for a DB we can't open).
     if (!ensureOpen()) {
         Logger::Log("[DB] Could not open DB to save Durations");
@@ -830,7 +836,16 @@ LoadResult SqliteSessionStore::loadDurations()
 
     // Parse each row and reconstruct TimeDuration objects
     while (query.next()) {
-        const SegmentId segmentId = SegmentId::fromString(query.value(0).toString());
+        // An empty segment_id is a corrupt row (SegmentId::fromString asserts
+        // non-empty in debug; the empty id would match every empty-id row on
+        // upsert in release). Treat it as a skipped corrupt row.
+        const QString segmentIdStr = query.value(0).toString();
+        if (segmentIdStr.isEmpty()) {
+            Logger::Log("[DB] Warning: Skipped row with empty segment_id");
+            result.skipped++;
+            continue;
+        }
+        const SegmentId segmentId = SegmentId::fromString(segmentIdStr);
         const int typeInt = query.value(1).toInt();
         const QDateTime startDateTime = QDateTime::fromString(query.value(2).toString(), Qt::ISODateWithMs).toLocalTime();
         const QDateTime endDateTime   = QDateTime::fromString(query.value(3).toString(), Qt::ISODateWithMs).toLocalTime();
@@ -899,6 +914,10 @@ EntriesForDateResult SqliteSessionStore::hasEntriesForDate(const QDate& date)
 {
     QMutexLocker locker(&db_mutex_);
 
+    if (history_days_to_keep_ == 0) {
+        return EntriesForDateResult::Unknown;
+    }
+
     if (!ensureOpen()) {
         Logger::Log("[DB] Could not open DB to check entries for date");
         return EntriesForDateResult::Unknown;
@@ -940,7 +959,7 @@ EntriesForDateResult SqliteSessionStore::hasEntriesForDate(const QDate& date)
  * - Uses segment_id to update existing row instead of inserting new one
  * - Stores the actual segment_start_time_ (preserves original start, only updates end/duration)
  *
- * The caller (Timer) rotates session_.segment_id on mode changes,
+ * The caller (TimeTracker) rotates session_.segment_id on mode changes,
  * causing the next checkpoint to create a new row for the new segment.
  */
 SessionStoreResult SqliteSessionStore::saveCheckpoint(DurationType type, const QDateTime& startTime, const QDateTime& endTime, const SegmentId& segmentId)
@@ -1037,6 +1056,38 @@ SessionStoreResult SqliteSessionStore::saveCheckpoint(DurationType type, const Q
     return success
         ? SessionStoreResult::success()
         : SessionStoreResult::transient("Checkpoint transaction commit failed: " + db.lastError().text());
+}
+
+SessionStoreResult SqliteSessionStore::discardCheckpoint(const SegmentId& segmentId)
+{
+    QMutexLocker locker(&db_mutex_);
+
+    if (segmentId.isEmpty()) {
+        Logger::Log("[DB] discardCheckpoint: empty segment_id — caller bug");
+        return SessionStoreResult::callerBug("discardCheckpoint called with empty segment_id");
+    }
+
+    if (history_days_to_keep_ == 0) {
+        return SessionStoreResult::disabled();
+    }
+
+    if (!ensureOpen()) {
+        Logger::Log("[DB] Could not open DB to discard checkpoint");
+        return SessionStoreResult::fatal("DB connection could not be opened");
+    }
+
+    // Only unfinalized rows may be removed here; finalized history is never touched.
+    QSqlQuery query(db);
+    query.prepare("DELETE FROM durations WHERE segment_id = :segment_id AND is_finalized = 0");
+    query.bindValue(":segment_id", segmentId.toString());
+    if (!query.exec()) {
+        Logger::Log("[DB] Error discarding checkpoint: " + query.lastError().text());
+        return SessionStoreResult::transient("Failed to discard checkpoint: " + query.lastError().text());
+    }
+
+    Logger::Log(QString("[DB] discardCheckpoint: removed %1 unfinalized row(s) for segment_id %2")
+        .arg(query.numRowsAffected()).arg(segmentId.toString()));
+    return SessionStoreResult::success();
 }
 
 /**
@@ -1190,6 +1241,7 @@ SessionStoreResult SqliteSessionStore::flushToDisc()
 
     if (!db.transaction()) {
         Logger::Log("[DB] flushToDisc: could not begin transaction");
+        pragma.exec("PRAGMA synchronous=NORMAL");
         return SessionStoreResult::transient("Failed to start flush transaction: " + db.lastError().text());
     }
 
@@ -1201,15 +1253,18 @@ SessionStoreResult SqliteSessionStore::flushToDisc()
     if (!query.exec()) {
         Logger::Log("[DB] flushToDisc: write failed: " + query.lastError().text());
         db.rollback();
+        pragma.exec("PRAGMA synchronous=NORMAL");
         return SessionStoreResult::transient("Flush write failed: " + query.lastError().text());
     }
     if (!db.commit()) {
         Logger::Log("[DB] flushToDisc: commit failed: " + db.lastError().text());
         db.rollback();
+        pragma.exec("PRAGMA synchronous=NORMAL");
         return SessionStoreResult::transient("Flush commit failed: " + db.lastError().text());
     }
 
     Logger::Log("[DB] flushToDisc: durable heartbeat committed");
+    pragma.exec("PRAGMA synchronous=NORMAL");
     return SessionStoreResult::success();
 }
 
@@ -1235,6 +1290,13 @@ std::optional<std::deque<SqliteSessionStore::OrphanCheckpoint>> SqliteSessionSto
     }
 
     while (query.next()) {
+        // An empty segment_id is a corrupt row (SegmentId::fromString asserts
+        // non-empty in debug). Skip it rather than assert-aborting.
+        const QString segmentIdStr = query.value(1).toString();
+        if (segmentIdStr.isEmpty()) {
+            Logger::Log("[DB] loadUnfinalizedCheckpoints: skipped row with empty segment_id");
+            continue;
+        }
         const int typeInt = query.value(2).toInt();
         if (typeInt != static_cast<int>(DurationType::Activity) &&
             typeInt != static_cast<int>(DurationType::Pause)) {
@@ -1520,7 +1582,7 @@ bool SqliteSessionStore::deleteLastCleanShutdownMarker()
  * qualifying rows, and decides whether the user needs to be notified.
  *
  * All internal mechanics (row ids, finalize/drop lists, marker timestamps) stay
- * inside this method.  Timer receives only domain facts via StartupRecoveryResult.
+ * inside this method.  TimeTracker receives only domain facts via StartupRecoveryResult.
  */
 StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateTime& now)
 {
@@ -1560,8 +1622,12 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
     for (const auto& orphan : orphans) {
         const bool tooShort = orphan.duration < kMinRecoverableOrphanDurationMs;
         const bool stale = orphan.endTime.isValid() && (orphan.endTime.msecsTo(now) > kOrphanStaleAgeMs);
+        // A backward clock jump since the checkpoint was written can leave the
+        // orphan's endTime after "now" (msecsTo(now) negative, passing the
+        // stale check above). Drop future-dated orphans instead of resurrecting them.
+        const bool futureDated = orphan.endTime.isValid() && (now.msecsTo(orphan.endTime) > kOrphanFutureSlackMs);
 
-        if (tooShort || stale) {
+        if (tooShort || stale || futureDated) {
             dropIds.push_back(orphan.id);
         } else {
             toFinalize.push_back(orphan);
@@ -1593,7 +1659,7 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
 
     // Decide whether to notify the user.
     // If a valid clean-shutdown marker exists and its timestamp covers (is >= )
-    // the oldest finalized orphan's end time, the shutdown was clean — no notification.
+    // the newest finalized orphan's end time, the shutdown was clean — no notification.
     if (!reconcile.finalized.empty()) {
         bool showNotification = true;
 
@@ -1602,18 +1668,20 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
             && markerResult->timestamp.isValid();
         if (hasValidMarker) {
             const QDateTime markerUtc = markerResult->timestamp.toUTC();
-            QDateTime oldestFinalizedOrphanEndUtc;
+            QDateTime newestFinalizedOrphanEndUtc;
             for (const auto& orphan : orphans) {
                 if (std::find(reconcile.finalized.begin(), reconcile.finalized.end(), orphan.id)
                         == reconcile.finalized.end()) {
                     continue;
                 }
                 const QDateTime orphanEndUtc = orphan.endTime.toUTC();
-                if (!oldestFinalizedOrphanEndUtc.isValid() || orphanEndUtc < oldestFinalizedOrphanEndUtc) {
-                    oldestFinalizedOrphanEndUtc = orphanEndUtc;
+                if (!newestFinalizedOrphanEndUtc.isValid() || orphanEndUtc > newestFinalizedOrphanEndUtc) {
+                    newestFinalizedOrphanEndUtc = orphanEndUtc;
                 }
             }
-            if (oldestFinalizedOrphanEndUtc.isValid() && markerUtc >= oldestFinalizedOrphanEndUtc) {
+            // Suppress only when the marker covers the NEWEST finalized orphan;
+            // notify iff any finalized orphan ends after the marker.
+            if (newestFinalizedOrphanEndUtc.isValid() && markerUtc >= newestFinalizedOrphanEndUtc) {
                 showNotification = false;
             }
         }

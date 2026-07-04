@@ -53,7 +53,7 @@ void Settings::readSettingsFile()
 	warning_activity_min_ = 9*60+45;
 	history_days_to_keep_ = qMax(0, sfile_.value(kKeyHistoryDays, 99).toInt());
 	log_to_file_ = sfile_.value(kKeyLogToFile, false).toBool();
-	boot_time_sec_ = sfile_.value(kKeyBootTimeSec, 0).toUInt();
+	boot_time_sec_ = qBound(0u, sfile_.value(kKeyBootTimeSec, 0).toUInt(), 3600u);
 	checkpoint_interval_min_ = qBound(0, sfile_.value(kKeyCheckpointMin, 5).toInt(), 60);
 }
 

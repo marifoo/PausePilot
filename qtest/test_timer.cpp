@@ -1,6 +1,8 @@
 #include "test_timer.h"
 #include "fakesessionstore.h"
+#include "fakeclock.h"
 #include <QtTest>
+#include <QSqlQuery>
 
 using TestCommon::createSettingsFile;
 using TestCommon::sumDurations;
@@ -34,7 +36,7 @@ void TimerTest::test_timer_start_pause_resume_stop_and_checkpoints()
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     // Start -> Activity
     tracker.useTimerViaButton(Button::Start);
@@ -57,7 +59,7 @@ void TimerTest::test_timer_start_pause_resume_stop_and_checkpoints()
 
     // Trigger checkpoint manually
     QTest::qWait(100); // Ensure elapsed > 0
-    tracker.saveCheckpointInternal_dbg(QDateTime::currentDateTime());
+    tracker.saveCheckpoint_locked_dbg(QDateTime::currentDateTime());
     QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
 
     // Stop -> move to None and durations flushed
@@ -79,7 +81,7 @@ void TimerTest::test_timer_backpause_resets_checkpoint_and_splits()
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
     tracker.useTimerViaButton(Button::Start);
 
     tracker.sessionState_dbg().segment_start_time = QDateTime::currentDateTime().addSecs(-120);
@@ -104,7 +106,7 @@ void TimerTest::test_timer_lock_events_checkpoint_and_resume()
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     tracker.useTimerViaButton(Button::Start);
     tracker.elapsedTimer_dbg().invalidate();
@@ -121,7 +123,7 @@ void TimerTest::test_timer_ongoing_duration()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     // Initially stopped
     QCOMPARE(tracker.getOngoingDuration(), std::nullopt);
@@ -151,7 +153,7 @@ void TimerTest::test_timer_set_duration_type()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     // Add a duration manually
     QDateTime now = QDateTime::currentDateTime();
@@ -181,7 +183,7 @@ void TimerTest::test_timer_checkpoints_paused()
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
     
     // Must be in Activity to save checkpoints
     tracker.useTimerViaButton(Button::Start);
@@ -197,7 +199,7 @@ void TimerTest::test_timer_checkpoints_paused()
     QVERIFY(query.exec("SELECT COUNT(*) FROM durations WHERE is_finalized = 0"));
     QVERIFY(query.next());
     QCOMPARE(query.value(0).toInt(), 0);
-    db.lazyClose_dbg();
+    db.closeConnection_dbg();
 
     // Resume and trigger
     tracker.endExclusiveEdit();
@@ -208,7 +210,7 @@ void TimerTest::test_timer_checkpoints_paused()
     QVERIFY(query.exec("SELECT COUNT(*) FROM durations WHERE is_finalized = 0"));
     QVERIFY(query.next());
     QCOMPARE(query.value(0).toInt(), 1);
-    db.lazyClose_dbg();
+    db.closeConnection_dbg();
 }
 
 void TimerTest::test_timer_retry_append_failure_then_success_preserves_segments()
@@ -219,7 +221,7 @@ void TimerTest::test_timer_retry_append_failure_then_success_preserves_segments(
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
     SqliteSessionStore db2(settings);
     QVERIFY(db2.saveDurations({}, TransactionMode::Append));
 
@@ -231,7 +233,7 @@ void TimerTest::test_timer_retry_append_failure_then_success_preserves_segments(
     // and fails on the read-only permission.  (With a long-lived connection the
     // file descriptor is open with write permission; making the file read-only
     // afterwards doesn't revoke that permission until the connection is closed.)
-    db.lazyClose_dbg();
+    db.closeConnection_dbg();
     QFile dbFile(db_path_);
     QVERIFY(dbFile.setPermissions(QFile::ReadOwner | QFile::ReadUser | QFile::ReadGroup | QFile::ReadOther));
     tracker.useTimerViaButton(Button::Stop);
@@ -272,7 +274,7 @@ void TimerTest::test_timer_retry_failure_keeps_unsaved_state_and_durations()
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
     SqliteSessionStore db2(settings);
     QVERIFY(db2.saveDurations({}, TransactionMode::Append));
 
@@ -281,7 +283,7 @@ void TimerTest::test_timer_retry_failure_keeps_unsaved_state_and_durations()
 
     // Force first stop save to fail.  Close the connection before making the
     // file read-only so that ensureOpen() re-tries and fails on the permission.
-    db.lazyClose_dbg();
+    db.closeConnection_dbg();
     QFile dbFile(db_path_);
     QVERIFY(dbFile.setPermissions(QFile::ReadOwner | QFile::ReadUser | QFile::ReadGroup | QFile::ReadOther));
     tracker.useTimerViaButton(Button::Stop);
@@ -311,7 +313,7 @@ void TimerTest::test_session_state_begin_new_segment()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     QDateTime startTime = QDateTime::currentDateTime();
     QVERIFY(tracker.sessionState_dbg().segment_id.isEmpty());
@@ -332,7 +334,7 @@ void TimerTest::test_session_state_clear_segment()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     tracker.sessionState_dbg().beginNewSegment(QDateTime::currentDateTime());
     QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
 
@@ -351,7 +353,7 @@ void TimerTest::test_session_state_mark_and_clear_unsaved()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     QVERIFY(!tracker.sessionState_dbg().has_unsaved_data);
 
     // Act: mark unsaved
@@ -375,7 +377,7 @@ void TimerTest::test_session_state_reset_for_new_session()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     QDateTime now = QDateTime::currentDateTime();
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-10), now));
     tracker.sessionState_dbg().has_unsaved_data = true;
@@ -396,7 +398,7 @@ void TimerTest::test_replaceAll_success_clears_unsaved_cache()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     QDateTime now = QDateTime::currentDateTime();
     tracker.sessionState_dbg().durations.emplace_back(
@@ -418,7 +420,7 @@ void TimerTest::test_replaceAll_failure_keeps_unsaved_cache()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
     fakeDb.replaceDurationsResult = SessionStoreResult::transient("injected failure");
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     QDateTime now = QDateTime::currentDateTime();
     tracker.sessionState_dbg().durations.emplace_back(
@@ -441,7 +443,7 @@ void TimerTest::test_session_state_adopt_ongoing_segment()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     QDateTime start = QDateTime::currentDateTime().addSecs(-30);
     QDateTime end = QDateTime::currentDateTime();
     TimeDuration ongoing = TimeDuration::fromLiveSession(DurationType::Activity, start, end);
@@ -461,7 +463,7 @@ void TimerTest::test_session_state_start_to_pause_transition()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     // Act: start
     tracker.useTimerViaButton(Button::Start);
@@ -492,7 +494,7 @@ void TimerTest::test_session_state_pause_to_activity_transition()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
     tracker.useTimerViaButton(Button::Pause);
@@ -518,7 +520,7 @@ void TimerTest::test_session_state_stop_clears_segment()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
     QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
@@ -556,7 +558,7 @@ void TimerTest::test_boot_time_not_added_when_history_disabled()
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     // Act: start timer twice (simulating a second start on the same day)
     tracker.useTimerViaButton(Button::Start);
@@ -595,7 +597,7 @@ void TimerTest::test_boot_time_added_once_on_empty_db()
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     // Act: start the timer (first session today, empty DB)
     tracker.useTimerViaButton(Button::Start);
@@ -635,7 +637,7 @@ void TimerTest::test_boot_time_not_added_when_db_has_entries_for_today()
     }
 
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     // Act: start the timer (DB already has entries for today)
     tracker.useTimerViaButton(Button::Start);
@@ -669,7 +671,7 @@ void TimerTest::test_pause_row_persisted_immediately_on_resume()
 
     {
         SqliteSessionStore db(settings);
-        Timer tracker(settings, db);
+        TimeTracker tracker(settings, db);
 
         // Start -> Activity
         tracker.useTimerViaButton(Button::Start);
@@ -685,7 +687,7 @@ void TimerTest::test_pause_row_persisted_immediately_on_resume()
 
         // Simulate crash: destroy tracker without calling stopTimer.
         // Set mode to None to prevent destructor from saving a clean stop.
-        tracker.forceMode_dbg(Timer::Mode::None);
+        tracker.forceMode_dbg(TimeTracker::Mode::None);
         tracker.sessionState_dbg().segment_id = SegmentId{};
     }
 
@@ -722,7 +724,7 @@ void TimerTest::test_addduration_appends_single_same_day_segment()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     QDateTime start = QDateTime::currentDateTime().addSecs(-60);
     QDateTime end = QDateTime::currentDateTime();
@@ -744,7 +746,7 @@ void TimerTest::test_addduration_discards_cross_midnight_segment()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     QDate yesterday = QDate::currentDate().addDays(-1);
     QDateTime start(yesterday, QTime(23, 59, 58, 0));
@@ -764,7 +766,7 @@ void TimerTest::test_addduration_discards_zero_and_negative_duration()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     QDateTime now = QDateTime::currentDateTime();
 
     // Act: zero duration
@@ -785,7 +787,7 @@ void TimerTest::test_addduration_discards_invalid_timestamp()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     QDateTime valid = QDateTime::currentDateTime();
     QDateTime invalid; // default-constructed QDateTime is invalid
@@ -806,7 +808,7 @@ void TimerTest::test_isOngoingSegmentCrossMidnight_returns_false_when_stopped()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     // mode_ == None by default
     QVERIFY(!tracker.isOngoingSegmentCrossMidnight());
@@ -819,9 +821,9 @@ void TimerTest::test_isOngoingSegmentCrossMidnight_returns_false_for_same_day()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
-    tracker.forceMode_dbg(Timer::Mode::Activity);
+    tracker.forceMode_dbg(TimeTracker::Mode::Activity);
     tracker.sessionState_dbg().segment_start_time = QDateTime::currentDateTime().addSecs(-60);
 
     // Assert
@@ -835,9 +837,9 @@ void TimerTest::test_isOngoingSegmentCrossMidnight_returns_true_when_segment_sta
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
-    tracker.forceMode_dbg(Timer::Mode::Activity);
+    tracker.forceMode_dbg(TimeTracker::Mode::Activity);
     tracker.sessionState_dbg().segment_start_time =
         QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0));
 
@@ -852,9 +854,9 @@ void TimerTest::test_useTimerViaButton_force_stops_on_cross_midnight_ongoing()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
-    tracker.forceMode_dbg(Timer::Mode::Activity);
+    tracker.forceMode_dbg(TimeTracker::Mode::Activity);
     tracker.sessionState_dbg().segment_start_time =
         QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0));
     tracker.elapsedTimer_dbg().start();
@@ -880,9 +882,9 @@ void TimerTest::test_useTimerViaButton_pause_event_is_dropped_when_cross_midnigh
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
-    tracker.forceMode_dbg(Timer::Mode::Activity);
+    tracker.forceMode_dbg(TimeTracker::Mode::Activity);
     tracker.sessionState_dbg().segment_start_time =
         QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0));
     tracker.elapsedTimer_dbg().start();
@@ -907,9 +909,9 @@ void TimerTest::test_useTimerViaLockEvent_unlock_does_not_restart_after_cross_mi
 
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
-    tracker.forceMode_dbg(Timer::Mode::Pause);
+    tracker.forceMode_dbg(TimeTracker::Mode::Pause);
     tracker.sessionState_dbg().segment_start_time =
         QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0));
     tracker.setAutopausePendingResume_dbg(true);
@@ -923,7 +925,7 @@ void TimerTest::test_useTimerViaLockEvent_unlock_does_not_restart_after_cross_mi
     QVERIFY(!tracker.isAutopausePendingResume_dbg());
 }
 
-void TimerTest::test_saveCheckpointInternal_does_not_write_cross_midnight_row()
+void TimerTest::test_saveCheckpoint_locked_does_not_write_cross_midnight_row()
 {
     // Arrange
     QTemporaryDir tempDir;
@@ -935,16 +937,16 @@ void TimerTest::test_saveCheckpointInternal_does_not_write_cross_midnight_row()
 
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
-    tracker.forceMode_dbg(Timer::Mode::Activity);
+    tracker.forceMode_dbg(TimeTracker::Mode::Activity);
     tracker.sessionState_dbg().segment_start_time =
         QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0));
     tracker.elapsedTimer_dbg().start();
 
     // Act: checkpoint fires (simulating late checkpoint after sleep)
     QDateTime now = QDateTime::currentDateTime();
-    tracker.saveCheckpointInternal_dbg(now);
+    tracker.saveCheckpoint_locked_dbg(now);
 
     // Assert: engine stopped, no checkpoint written to DB
     QVERIFY(tracker.isStopped());
@@ -958,7 +960,7 @@ void TimerTest::test_stop_clears_was_active_before_autopause()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
@@ -976,6 +978,10 @@ void TimerTest::test_startTimer_drops_cross_midnight_boot_time_entry()
 {
     // A boot_time_sec large enough that bootStart falls on the previous day.
     // addDuration should silently discard it and the user still enters Activity.
+    //
+    // A14: boot_time_sec_ is now capped at 3600s (1h), so the fake clock is
+    // parked shortly after midnight (00:30) rather than relying on a
+    // multi-hour boot time to reach across the day boundary.
 
     // Arrange
     resetDatabaseFile();
@@ -983,17 +989,19 @@ void TimerTest::test_startTimer_drops_cross_midnight_boot_time_entry()
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    // Use a large boot time that is guaranteed to reach back across midnight
-    writer.setValue("uTimer/boot_time_seconds", 90000); // 25 hours
+    // Boot time at the (post-A14) cap; combined with "now" just after midnight
+    // below, bootStart still lands on the previous day.
+    writer.setValue("uTimer/boot_time_seconds", 3600); // 1 hour (capped max)
     writer.sync();
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(0, 30, 0), Qt::LocalTime));
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     // Act
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
 
     // Assert: cross-midnight boot entry was dropped; no completed durations
     // (the ongoing segment is fresh from startTimer)
@@ -1010,9 +1018,9 @@ void TimerTest::test_getOngoingDuration_returns_nullopt_when_cross_midnight()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
-    tracker.forceMode_dbg(Timer::Mode::Activity);
+    tracker.forceMode_dbg(TimeTracker::Mode::Activity);
     tracker.sessionState_dbg().segment_start_time =
         QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0));
 
@@ -1024,12 +1032,12 @@ void TimerTest::test_getOngoingDuration_returns_nullopt_when_cross_midnight()
 }
 
 // ============================================================================
-// Timer public surface regression guard
+// TimeTracker public surface regression guard
 // ============================================================================
 
 void TimerTest::test_D_timetracker_public_surface_regression()
 {
-    // Construct a Timer and exercise every public method to confirm none
+    // Construct a TimeTracker and exercise every public method to confirm none
     // were accidentally removed. This is a regression guard — it would fail
     // to compile if a method disappeared from the header.
 
@@ -1038,7 +1046,7 @@ void TimerTest::test_D_timetracker_public_surface_regression()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     QDateTime now = QDateTime::currentDateTime();
 
@@ -1053,7 +1061,7 @@ void TimerTest::test_D_timetracker_public_surface_regression()
     qint64 pause = tracker.getPauseTime();
     QVERIFY(pause >= 0);
 
-    const auto& durations = tracker.getCurrentDurations();
+    const auto& durations = tracker.completedTimeline();
     (void)durations;
 
     auto ongoing = tracker.getOngoingDuration();
@@ -1127,7 +1135,7 @@ void TimerTest::test_E_boot_time_gate_entries_yes_skips_boot_time()
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
     fakeDb.entriesForDateResult = EntriesForDateResult::Yes;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     // Act
     tracker.useTimerViaButton(Button::Start);
@@ -1160,7 +1168,7 @@ void TimerTest::test_E_boot_time_gate_entries_no_adds_boot_time()
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
     fakeDb.entriesForDateResult = EntriesForDateResult::No;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     // Act
     tracker.useTimerViaButton(Button::Start);
@@ -1193,7 +1201,7 @@ void TimerTest::test_E_boot_time_gate_entries_unknown_skips_boot_time()
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
     fakeDb.entriesForDateResult = EntriesForDateResult::Unknown;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     // Act
     tracker.useTimerViaButton(Button::Start);
@@ -1227,7 +1235,7 @@ void TimerTest::test_E_boot_time_inmemory_start_date_skips_boot_time()
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
     fakeDb.entriesForDateResult = EntriesForDateResult::No;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     // Pre-seed a cross-midnight completed segment: startTime is today, endTime is
     // tomorrow. This is the discriminating case — if the production check used
@@ -1274,7 +1282,7 @@ void TimerTest::test_X_stop_persists_via_commitSession_only()
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     // Act
     tracker.useTimerViaButton(Button::Start);
@@ -1308,7 +1316,7 @@ void TimerTest::test_dialog_open_blocks_backpause()
 
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
@@ -1346,7 +1354,7 @@ void TimerTest::test_dialog_open_defers_midnight_stop()
 
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
@@ -1363,7 +1371,7 @@ void TimerTest::test_dialog_open_defers_midnight_stop()
 }
 
 // Issue 3 Layer A: Lock bookkeeping (is_locked_) must still run even when dialog is open,
-// but saveCheckpointInternal must not be called.
+// but saveCheckpoint_locked must not be called.
 void TimerTest::test_dialog_open_allows_lock_bookkeeping()
 {
     QTemporaryDir tempDir;
@@ -1372,7 +1380,7 @@ void TimerTest::test_dialog_open_allows_lock_bookkeeping()
 
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
@@ -1388,7 +1396,7 @@ void TimerTest::test_dialog_open_allows_lock_bookkeeping()
     // is_locked_ must be set (bookkeeping)
     QVERIFY(tracker.isLocked_dbg());
 
-    // saveCheckpoint (i.e. saveCheckpointInternal path via DB) must not have fired
+    // saveCheckpoint (i.e. saveCheckpoint_locked path via DB) must not have fired
     QCOMPARE(fakeDb.callLog.count("saveCheckpoint"), checksBefore);
 
     tracker.endExclusiveEdit();
@@ -1410,7 +1418,7 @@ void TimerTest::test_T1_unpause_creates_new_pause_segment_with_fresh_id()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
@@ -1452,7 +1460,7 @@ void TimerTest::test_T9_new_activity_segment_after_unpause_has_activity_type()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
@@ -1496,7 +1504,7 @@ void TimerTest::test_T10_was_active_cleared_on_start_from_none()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     // Pre-set the flag to simulate a stale autopause state
     tracker.setAutopausePendingResume_dbg(true);
@@ -1520,7 +1528,7 @@ void TimerTest::test_T10_was_active_cleared_on_start_from_pause()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
@@ -1545,11 +1553,11 @@ void TimerTest::test_T10_was_active_cleared_on_start_from_pause()
 
 void TimerTest::test_T8_destructor_does_not_crash_while_active()
 {
-    // Verify that destroying a Timer while it is actively running (and its
+    // Verify that destroying a TimeTracker while it is actively running (and its
     // checkpointTimer_ could in theory fire) does not crash or deadlock.
     //
     // The ordering fix (T8) stops and disconnects checkpointTimer_ before
-    // acquiring the mutex in ~Timer(). Without this fix, a queued slot
+    // acquiring the mutex in ~TimeTracker(). Without this fix, a queued slot
     // firing during destruction could deadlock on the recursive mutex or
     // access already-freed members.
     //
@@ -1571,7 +1579,7 @@ void TimerTest::test_T8_destructor_does_not_crash_while_active()
     FakeSessionStore fakeDb;
 
     {
-        Timer tracker(settings, fakeDb);
+        TimeTracker tracker(settings, fakeDb);
         tracker.useTimerViaButton(Button::Start);
         QTest::qWait(10);
         // tracker destroyed here while in Activity mode with checkpointTimer_ running
@@ -1597,7 +1605,7 @@ void TimerTest::test_T2_replaceCurrentDurations_skips_checkpoint_while_dialog_op
 
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
@@ -1632,7 +1640,7 @@ void TimerTest::test_C6_replaceCurrentDurations_writes_checkpoint_after_endExclu
 
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
@@ -1656,8 +1664,8 @@ void TimerTest::test_C6_replaceCurrentDurations_writes_checkpoint_after_endExclu
 void TimerTest::test_S12_marker_error_skips_reconciliation()
 {
     // When recoverStartupCheckpoints() returns ok=false (e.g. marker read error),
-    // Timer must treat recovered seconds as 0 and must NOT show a notification.
-    // The store is responsible for skipping reconciliation on error; Timer only
+    // TimeTracker must treat recovered seconds as 0 and must NOT show a notification.
+    // The store is responsible for skipping reconciliation on error; TimeTracker only
     // acts on the domain facts returned.
 
     QTemporaryDir tempDir;
@@ -1670,7 +1678,7 @@ void TimerTest::test_S12_marker_error_skips_reconciliation()
     fakeDb.startupRecoveryResult.recovered_seconds = 0;
     fakeDb.startupRecoveryResult.notify_user = false;
 
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     tracker.initializeFromStore();
 
     // No seconds recovered; notification suppressed.
@@ -1685,10 +1693,10 @@ void TimerTest::test_QF1_explicit_pause_emits_paused_not_modeChanged()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
-    QSignalSpy pausedSpy(&tracker, &Timer::paused);
-    QSignalSpy modeSpy(&tracker, &Timer::modeChanged);
+    QSignalSpy pausedSpy(&tracker, &TimeTracker::paused);
+    QSignalSpy modeSpy(&tracker, &TimeTracker::modeChanged);
 
     tracker.useTimerViaButton(Button::Start);
     tracker.useTimerViaButton(Button::Pause);
@@ -1703,13 +1711,13 @@ void TimerTest::test_QF1_explicit_resume_emits_started_not_modeChanged()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     tracker.useTimerViaButton(Button::Start);
     tracker.useTimerViaButton(Button::Pause);
 
-    QSignalSpy startedSpy(&tracker, &Timer::started);
-    QSignalSpy modeSpy(&tracker, &Timer::modeChanged);
+    QSignalSpy startedSpy(&tracker, &TimeTracker::started);
+    QSignalSpy modeSpy(&tracker, &TimeTracker::modeChanged);
 
     tracker.useTimerViaButton(Button::Start);
 
@@ -1724,19 +1732,19 @@ void TimerTest::test_QF1_lock_autopause_emits_modeChanged_not_paused()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     tracker.useTimerViaButton(Button::Start);
 
-    QSignalSpy pausedSpy(&tracker, &Timer::paused);
-    QSignalSpy modeSpy(&tracker, &Timer::modeChanged);
+    QSignalSpy pausedSpy(&tracker, &TimeTracker::paused);
+    QSignalSpy modeSpy(&tracker, &TimeTracker::modeChanged);
 
     tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock);
 
     QCOMPARE(pausedSpy.count(), 0);
     QCOMPARE(modeSpy.count(), 1);
-    QCOMPARE(modeSpy.first().first().value<Timer::PauseCause>(),
-             Timer::PauseCause::LockAutopause);
+    QCOMPARE(modeSpy.first().first().value<TimeTracker::PauseCause>(),
+             TimeTracker::PauseCause::LockAutopause);
 }
 
 void TimerTest::test_QF1_lock_resume_emits_started_and_modeChanged_once_each()
@@ -1745,15 +1753,15 @@ void TimerTest::test_QF1_lock_resume_emits_started_and_modeChanged_once_each()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     tracker.useTimerViaButton(Button::Start);
     tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock);
     QVERIFY(tracker.isPaused());
 
-    QSignalSpy startedSpy(&tracker, &Timer::started);
-    QSignalSpy pausedSpy(&tracker, &Timer::paused);
-    QSignalSpy modeSpy(&tracker, &Timer::modeChanged);
+    QSignalSpy startedSpy(&tracker, &TimeTracker::started);
+    QSignalSpy pausedSpy(&tracker, &TimeTracker::paused);
+    QSignalSpy modeSpy(&tracker, &TimeTracker::modeChanged);
 
     tracker.useTimerViaLockEvent(LockEvent::Unlock);
 
@@ -1761,8 +1769,8 @@ void TimerTest::test_QF1_lock_resume_emits_started_and_modeChanged_once_each()
     QVERIFY(startedSpy.first().first().toBool()); // fromPause == true
     QCOMPARE(pausedSpy.count(), 0);
     QCOMPARE(modeSpy.count(), 1);
-    QCOMPARE(modeSpy.first().first().value<Timer::PauseCause>(),
-             Timer::PauseCause::LockResume);
+    QCOMPARE(modeSpy.first().first().value<TimeTracker::PauseCause>(),
+             TimeTracker::PauseCause::LockResume);
 }
 
 // Issue #1: committing an ongoing segment with a different type must align mode_.
@@ -1772,7 +1780,7 @@ void TimerTest::test_commit_ongoing_type_edit_changes_mode()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     // 1. Start in Activity mode.
     tracker.useTimerViaButton(Button::Start);
@@ -1823,7 +1831,7 @@ void TimerTest::test_commitEditedTimeline_mode_aligns_with_edited_ongoing_type()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     // Start in Activity mode.
     tracker.useTimerViaButton(Button::Start);
@@ -1863,8 +1871,8 @@ void TimerTest::test_disabled_history_stop_keeps_clean_state_no_warning()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 0));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
-    QSignalSpy warnSpy(&tracker, &Timer::userWarning);
+    TimeTracker tracker(settings, db);
+    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
 
     // Act: run and stop a session that produces a completed Activity segment.
     tracker.useTimerViaButton(Button::Start);
@@ -1889,7 +1897,7 @@ void TimerTest::test_disabled_history_commitEditedTimeline_succeeds()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 0));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
@@ -1920,7 +1928,7 @@ void TimerTest::test_commitEditedTimeline_clears_anchor_when_no_ongoing()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
@@ -1937,9 +1945,9 @@ void TimerTest::test_commitEditedTimeline_clears_anchor_when_no_ongoing()
     Timeline editedTimeline(completed, std::nullopt);
 
     // Set up spies: the clear path must emit only stopped(), never started()/paused().
-    QSignalSpy stoppedSpy(&tracker, &Timer::stopped);
-    QSignalSpy startedSpy(&tracker, &Timer::started);
-    QSignalSpy pausedSpy(&tracker, &Timer::paused);
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+    QSignalSpy startedSpy(&tracker, &TimeTracker::started);
+    QSignalSpy pausedSpy(&tracker, &TimeTracker::paused);
 
     // Act: commit a timeline with no ongoing segment while mode_ != None.
     const auto commitResult = tracker.commitEditedTimeline(editedTimeline);
@@ -1967,8 +1975,8 @@ void TimerTest::test_commitEditedTimeline_clears_anchor_when_no_ongoing()
 
     // stopped(EditApplied) was emitted exactly once; no started()/paused().
     QCOMPARE(stoppedSpy.count(), 1);
-    QCOMPARE(stoppedSpy.first().first().value<Timer::StopReason>(),
-             Timer::StopReason::EditApplied);
+    QCOMPARE(stoppedSpy.first().first().value<TimeTracker::StopReason>(),
+             TimeTracker::StopReason::EditApplied);
     QCOMPARE(startedSpy.count(), 0);
     QCOMPARE(pausedSpy.count(), 0);
 }
@@ -1981,7 +1989,7 @@ void TimerTest::test_commitEditedTimeline_clears_anchor_when_no_ongoing_from_pau
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
@@ -1997,9 +2005,9 @@ void TimerTest::test_commitEditedTimeline_clears_anchor_when_no_ongoing_from_pau
     completed.push_back(seg.value());
     Timeline editedTimeline(completed, std::nullopt);
 
-    QSignalSpy stoppedSpy(&tracker, &Timer::stopped);
-    QSignalSpy startedSpy(&tracker, &Timer::started);
-    QSignalSpy pausedSpy(&tracker, &Timer::paused);
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+    QSignalSpy startedSpy(&tracker, &TimeTracker::started);
+    QSignalSpy pausedSpy(&tracker, &TimeTracker::paused);
 
     // Act: commit a timeline with no ongoing segment while mode_ == Pause.
     const auto commitResult = tracker.commitEditedTimeline(editedTimeline);
@@ -2019,8 +2027,235 @@ void TimerTest::test_commitEditedTimeline_clears_anchor_when_no_ongoing_from_pau
 
     // stopped(EditApplied) was emitted exactly once; no started()/paused().
     QCOMPARE(stoppedSpy.count(), 1);
-    QCOMPARE(stoppedSpy.first().first().value<Timer::StopReason>(),
-             Timer::StopReason::EditApplied);
+    QCOMPARE(stoppedSpy.first().first().value<TimeTracker::StopReason>(),
+             TimeTracker::StopReason::EditApplied);
     QCOMPARE(startedSpy.count(), 0);
     QCOMPARE(pausedSpy.count(), 0);
+}
+
+// A14: commitEditedTimeline must not half-adopt an ongoing segment while the
+// engine is already stopped (mode_ == None). Adopting segment_id/start time
+// without also flipping mode_ would leave a state SessionState documents as
+// impossible (segment_id "Empty when the timer is stopped"). The fix refuses
+// the ongoing entirely: engine stays stopped, anchor stays clear, no signal.
+void TimerTest::test_commitEditedTimeline_ignores_ongoing_when_already_stopped()
+{
+    // Arrange: engine never started -- mode_ == None, no segment anchor.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime start(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(start);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    QVERIFY(tracker.isStopped());
+    QVERIFY(tracker.sessionState_dbg().segment_id.isEmpty());
+
+    // Build an edited timeline with an ongoing segment (as if HistoryDialog
+    // still held one from before the engine stopped), but mode_ is None now.
+    TimeDuration editedOngoing = TimeDuration::fromLiveSession(
+        DurationType::Activity, start, start.addSecs(600));
+
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+    QSignalSpy startedSpy(&tracker, &TimeTracker::started);
+    QSignalSpy pausedSpy(&tracker, &TimeTracker::paused);
+
+    // Act: commit while mode_ == None.
+    const auto result = tracker.commitEditedTimeline(Timeline({}, editedOngoing));
+
+    // Assert: commit still reports success; the ongoing segment is ignored.
+    QVERIFY(result.ok);
+    QVERIFY2(tracker.isStopped(), "engine must remain stopped, not half-started");
+    QVERIFY2(tracker.sessionState_dbg().segment_id.isEmpty(),
+             "segment_id must stay empty -- refused, not half-adopted");
+    QVERIFY2(!tracker.sessionState_dbg().segment_start_time.isValid(),
+             "segment_start_time must stay invalid -- refused, not half-adopted");
+    QVERIFY2(!tracker.getOngoingDuration().has_value(),
+             "getOngoingDuration() must return nullopt: mode_ == None");
+
+    // No mode-transition signal fires: the engine state did not change.
+    QCOMPARE(stoppedSpy.count(), 0);
+    QCOMPARE(startedSpy.count(), 0);
+    QCOMPARE(pausedSpy.count(), 0);
+}
+
+// Phase 2 clock-seam enabler: prove the injected now-provider fully controls the
+// engine's clock. Start the engine at a fixed fake instant, advance the fake
+// clock by 90 minutes with NO real sleep, and assert the ongoing duration is
+// computed from the fake clock (start/end/duration exact to the millisecond).
+void TimerTest::test_seam_fake_clock_drives_ongoing_duration()
+{
+    // Arrange: inject a controllable clock.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore db;
+    TimeTracker tracker(settings, db);
+
+    const QDateTime start(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(start);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Act: start the engine (segment anchored at the fake now), then jump ahead.
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    QCOMPARE(tracker.sessionState_dbg().segment_start_time, start);
+
+    const qint64 ninetyMinutesMs = 90ll * 60ll * 1000ll;
+    clock.advance(ninetyMinutesMs);
+
+    // Assert: the ongoing segment reflects the advanced fake clock — no sleeping.
+    const auto ongoing = tracker.getOngoingDuration();
+    QVERIFY(ongoing.has_value());
+    QCOMPARE(ongoing->startTime, start);
+    QCOMPARE(ongoing->endTime, start.addMSecs(ninetyMinutesMs));
+    QCOMPARE(ongoing->duration, ninetyMinutesMs);
+}
+
+void TimerTest::test_A2_backpause_anchors_at_lock_time_across_suspend()
+{
+    // Arrange: autopause on, 15 min threshold, fake clock.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/autopause_enabled", true);
+    writer.setValue("uTimer/autopause_threshold_minutes", 15); // 900s backpause
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore db;
+    TimeTracker tracker(settings, db);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Act: Activity from 09:00; desktop locks at 10:00.
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    const QDateTime lockInstant(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::LocalTime);
+    clock.setNow(lockInstant);
+    tracker.useTimerViaLockEvent(LockEvent::Lock, lockInstant);
+
+    // Machine suspends; LongOngoingLock only surfaces at 14:00 after resume,
+    // carrying the real lock instant (10:00).
+    const QDateTime resumeInstant(QDate(2025, 6, 1), QTime(14, 0, 0), Qt::LocalTime);
+    clock.setNow(resumeInstant);
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockInstant);
+
+    // Assert: Activity is exactly 09:00→10:00 (1h) and Pause 10:00→14:00 (4h);
+    // none of the suspended interval leaks into Activity.
+    QVERIFY(tracker.isPaused());
+    const auto& d = tracker.sessionState_dbg().durations;
+    const qint64 activeMs = sumDurations(d, DurationType::Activity);
+    const qint64 pauseMs  = sumDurations(d, DurationType::Pause);
+    QCOMPARE(activeMs, 60ll * 60ll * 1000ll);       // 1 hour
+    QCOMPARE(pauseMs,  4ll * 60ll * 60ll * 1000ll);  // 4 hours
+
+    // The Pause segment must start at the lock instant, not now−backpause.
+    bool foundPauseAtLock = false;
+    for (const auto& seg : d)
+        if (seg.type == DurationType::Pause && seg.startTime == lockInstant)
+            foundPauseAtLock = true;
+    QVERIFY(foundPauseAtLock);
+}
+
+void TimerTest::test_A2_display_total_matches_wallclock_across_suspend()
+{
+    // Arrange: fake clock; the monotonic timer_ will not advance with it.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore db;
+    TimeTracker tracker(settings, db);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Act: start Activity, then jump the wall clock two hours (simulated suspend).
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    const qint64 twoHoursMs = 2ll * 60ll * 60ll * 1000ll;
+    clock.advance(twoHoursMs);
+
+    // Assert: the displayed Active total tracks wall-clock elapsed, matching what
+    // persistence would compute from segment_start_time — not the frozen timer_.
+    QCOMPARE(tracker.getActiveTime(), twoHoursMs);
+    QCOMPARE(tracker.getPauseTime(), 0ll);
+}
+
+// Counts unfinalized (is_finalized = 0) checkpoint rows in the store's DB.
+static int countUnfinalizedRows(SqliteSessionStore& db)
+{
+    db.ensureOpen_dbg();
+    QSqlQuery q(db.rawDb_dbg());
+    q.exec("SELECT COUNT(*) FROM durations WHERE is_finalized = 0");
+    q.next();
+    return q.value(0).toInt();
+}
+
+void TimerTest::test_A3_watchdog_discard_deletes_checkpoint_row()
+{
+    // Arrange: real store so we can inspect checkpoint rows, plus a fake clock.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore db(settings);
+    TimeTracker tracker(settings, db);
+
+    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(preMidnight);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Start Activity and write a checkpoint before midnight.
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    clock.advance(5ll * 60ll * 1000ll); // 23:55
+    tracker.saveCheckpoint_locked_dbg(clock.now());
+    QCOMPARE(countUnfinalizedRows(db), 1);
+
+    // Act: cross midnight — the watchdog discards the in-flight segment.
+    const QDateTime postMidnight(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime);
+    clock.setNow(postMidnight);
+    QVERIFY(tracker.discardCrossMidnightOngoingAndStop_dbg(postMidnight));
+    QVERIFY(tracker.isStopped());
+
+    // Assert: the orphaned checkpoint row is gone — nothing for recovery to
+    // resurrect and nothing for the stale policy to silently drop.
+    QCOMPARE(countUnfinalizedRows(db), 0);
+}
+
+void TimerTest::test_A4_shutdown_called_cleared_on_fresh_session_start()
+{
+    // Arrange: timer with fake clock; call shutdown() to set shutdown_called_=true.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore db;
+    TimeTracker tracker(settings, db);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Act: start timer, stop it, then call shutdown().
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.isStopped());
+
+    // Verify the flag is set after shutdown.
+    tracker.shutdown();
+    QVERIFY(tracker.wasShutDown());
+
+    // Act: start a fresh session (None → Activity), which should emit started(false).
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+
+    // Assert: shutdown_called_ is now cleared, so wasShutDown() returns false.
+    QVERIFY(!tracker.wasShutDown());
 }

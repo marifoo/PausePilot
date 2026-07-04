@@ -204,5 +204,5 @@ void PersistenceContractTest::test_replaceAll_atomically_replaces_all_rows()
     QVERIFY(oldQ.next());
     QCOMPARE(oldQ.value(0).toInt(), 0);
 
-    db.lazyClose_dbg();
+    db.closeConnection_dbg();
 }

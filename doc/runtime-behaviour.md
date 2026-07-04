@@ -5,9 +5,9 @@ machine, the heartbeat that ticks it, how cross-midnight cases are handled,
 and how shutdown is orchestrated. For *what the components are*, see
 `architecture.md`; for *what is stored on disk*, see `persistence.md`.
 
-## Timer state machine
+## TimeTracker state machine
 
-`Timer` runs three modes: `None` (stopped), `Activity`, and `Pause`.
+`TimeTracker` runs three modes: `None` (stopped), `Activity`, and `Pause`.
 Transitions are driven by user buttons, lock events from
 `LockStateWatcher`, and the `DayBoundaryWatcher` at the day boundary.
 
@@ -24,19 +24,19 @@ stateDiagram-v2
     Pause --> None : Button::Stop<br/>DayBoundaryWatcher (scheduled / watchdog)
 ```
 
-Two enums on `Timer` annotate the transitions so the GUI can react without
+Two enums on `TimeTracker` annotate the transitions so the GUI can react without
 keeping its own state:
 
-- `Timer::StopReason` (`ButtonStop`, `MidnightScheduled`, `MidnightWatchdog`,
+- `TimeTracker::StopReason` (`ButtonStop`, `MidnightScheduled`, `MidnightWatchdog`,
   `Shutdown`, `EditApplied`) — carried by `stopped()`.
-- `Timer::PauseCause` (`UserAction`, `LockAutopause`, `LockResume`) —
+- `TimeTracker::PauseCause` (`UserAction`, `LockAutopause`, `LockResume`) —
   carried by `modeChanged()`. Lets `MainWin` distinguish user-driven pauses
   from lock-driven autopause.
 
 `Lock` (without "Long") does **not** transition the engine on its own; it
 suspends checkpoints (so checkpoints do not move while the user is away) and
 arms `LockStateWatcher`'s internal lock timer. Only `LongOngoingLock`
-crosses the threshold and triggers autopause inside `Timer`.
+crosses the threshold and triggers autopause inside `TimeTracker`.
 
 ## The 100 ms heartbeat
 
@@ -44,9 +44,9 @@ A single `QTimer` in `main.cpp` ticks every 100 ms. Three slots are wired to
 its `timeout()` signal:
 
 1. **`MainWin::update`** — refreshes the time labels and tooltips by reading
-   the current snapshot from `Timer`.
-2. **`Timer::onTick`** — calls `DayBoundaryWatcher::tick` (the cross-midnight
-   watchdog). This is the *only* path that runs `Timer` code from the
+   the current snapshot from `TimeTracker`.
+2. **`TimeTracker::onTick`** — calls `DayBoundaryWatcher::tick` (the cross-midnight
+   watchdog). This is the *only* path that runs `TimeTracker` code from the
    heartbeat; mode transitions are still driven exclusively by buttons and
    lock events.
 3. **`LockStateWatcher::update`** — polls the OS lock state, pushes the
@@ -59,23 +59,23 @@ not to register on a CPU profile.
 
 ## `SessionState`
 
-`Timer` groups its mutable per-session data into the `SessionState` struct
-(see `timer.h`). The rationale is documented in the header comment and is
+`TimeTracker` groups its mutable per-session data into the `SessionState` struct
+(see `timetracker.h`). The rationale is documented in the header comment and is
 worth quoting rather than restating: previously these fields were scattered
 as raw members, making it easy for code paths to mutate them as side-effects.
 Grouping them into a struct with explicit, named transition methods
 (`beginNewSegment`, `clearSegment`, `markUnsaved`, …) ensures every mutation
 is logged at debug level and is therefore traceable in the log output.
 
-The struct is owned by `Timer` and is not exposed to callers — `Timeline`
+The struct is owned by `TimeTracker` and is not exposed to callers — `Timeline`
 is the read-only view that `MainWin` and `HistoryDialog` consume via
-`Timer::snapshot()`.
+`TimeTracker::snapshot()`.
 
 ## Cross-midnight handling
 
 A session must never contain a segment that spans two dates: the persistence
 layer indexes by `start_date` and `end_date`, and downstream UI groups by
-date. `Timer` enforces this with a single dedicated subsystem:
+date. `TimeTracker` enforces this with a single dedicated subsystem:
 `DayBoundaryWatcher`. It uses two mechanisms together:
 
 1. **Scheduled stop** — a single-shot `QTimer` armed for **23:59:59.500**
@@ -87,7 +87,7 @@ date. `Timer` enforces this with a single dedicated subsystem:
    the engine into `None` and discards the in-flight segment, emitting
    `StopReason::MidnightWatchdog`.
 
-A last-line defence in `Timer::addDuration` silently discards any segment
+A last-line defence in `TimeTracker::addDuration` silently discards any segment
 whose `startTime.date() != endTime.date()`. In normal operation the two
 mechanisms above make that branch unreachable; it exists so that a logic
 bug elsewhere cannot poison the in-memory session or the database.
@@ -113,7 +113,7 @@ sequenceDiagram
     participant Caller
     participant MW as MainWin
     participant SC as ShutdownCoordinator
-    participant T as Timer
+    participant T as TimeTracker
     participant S as SessionStore
 
     Caller->>MW: onAboutToQuit() / shutdown(force_direct)
@@ -131,7 +131,7 @@ sequenceDiagram
 
 `ShutdownCoordinator::run` is idempotent (`shutdown_completed_` guard) so
 multiple triggers fire it exactly once. The clean-shutdown marker is only
-written when `Timer::canMarkCleanShutdown()` reports that the session was
+written when `TimeTracker::canMarkCleanShutdown()` reports that the session was
 fully drained — this is what lets the next startup distinguish "we left
 checkpoints behind because we crashed" from "we left checkpoints behind
 because we shut down before flushing"; see `persistence.md` for how that

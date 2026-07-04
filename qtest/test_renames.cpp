@@ -17,7 +17,7 @@ void RenamesTest::test_no_old_names_in_production_headers()
 
     // Production headers to check (excludes design docs and memory files)
     const QStringList headers = {
-        "timer.h",
+        "timetracker.h",
         "sessionstore.h",
         "sqlitesessionstore.h",
         "mainwin.h",
@@ -34,7 +34,6 @@ void RenamesTest::test_no_old_names_in_production_headers()
 
     // Old names that must not appear in any production header
     const QStringList bannedNames = {
-        "TimeTracker",
         "IDatabaseManager",
         "FakeDatabaseManager",
     };

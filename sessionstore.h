@@ -1,15 +1,15 @@
 /**
  * SessionStore — Abstract interface for time-duration persistence.
  *
- * Extracted from the concrete SqliteSessionStore class so that Timer
+ * Extracted from the concrete SqliteSessionStore class so that TimeTracker
  * (and anything else that needs DB access) can depend on an abstraction
  * rather than the SQLite implementation.  This enables:
  *
  *   - FakeSessionStore in tests: records every call, returns
  *     configurable success/failure, stores data in memory (no SQLite).
- *   - Easier reasoning about which DB operations Timer actually needs.
+ *   - Easier reasoning about which DB operations TimeTracker actually needs.
  *
- * Every public method that Timer calls on SqliteSessionStore is
+ * Every public method that TimeTracker calls on SqliteSessionStore is
  * represented here as a pure virtual.  Internal helpers (ensureOpen,
  * ensureSchema, createBackup, etc.) remain private implementation details
  * of the concrete class.
@@ -111,7 +111,7 @@ struct LoadResult {
  *
  *   ok == true  — recovery ran to completion (even if zero rows were finalized).
  *   ok == false — a critical store failure (e.g. marker read error) prevented
- *                 reconciliation; no rows were mutated.  Timer must treat
+ *                 reconciliation; no rows were mutated.  TimeTracker must treat
  *                 recovered_seconds as 0 and must NOT show a notification.
  *
  * When history storage is disabled (history_days_to_keep_ == 0) the store
@@ -170,6 +170,15 @@ public:
     /// @pre segmentId must be non-empty
     virtual SessionStoreResult saveCheckpoint(DurationType type, const QDateTime& startTime,
                                               const QDateTime& endTime, const SegmentId& segmentId) = 0;
+
+    /// Deletes the unfinalized checkpoint row(s) for segmentId (is_finalized = 0).
+    /// Called when the engine deliberately discards an in-flight segment (e.g. the
+    /// cross-midnight watchdog) so the orphaned checkpoint is neither resurrected
+    /// by startup recovery nor silently dropped by the stale-orphan policy.
+    /// Returns Disabled when history storage is off (no-op, not an error).
+    /// Returns TransientError/FatalError on DB failure.
+    /// @pre segmentId must be non-empty
+    virtual SessionStoreResult discardCheckpoint(const SegmentId& segmentId) = 0;
 
     virtual SchemaStatus checkSchemaOnStartup() = 0;
 

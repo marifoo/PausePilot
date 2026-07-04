@@ -1,5 +1,7 @@
 #include "test_healthmonitor.h"
 #include "healthmonitor.h"
+#include "timetracker.h"
+#include "fakesessionstore.h"
 #include <QtTest>
 #include <QSignalSpy>
 
@@ -121,4 +123,49 @@ void HealthMonitorTest::test_L_reset_rearms_warnings()
     monitor.check(kActivityThresholdMs + 1, 0);
     monitor.check(kNoPauseActivityMs + 1, kMinPauseMs - 1);
     QVERIFY(spy.count() >= 1);
+}
+
+// ============================================================================
+// Test M — warning re-fires per session (A13)
+// Mirrors MainWin's wiring: TimeTracker::stopped re-arms the HealthMonitor, so a
+// warning that fired in session 1 fires again in session 2 (not once per app
+// lifetime). MainWin is GUI/not in the test build, so we exercise the exact
+// connection MainWin makes.
+// ============================================================================
+
+void HealthMonitorTest::test_M_warning_refires_per_session()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QSettings seed(QDir(tempDir.path()).filePath("user-settings.ini"), QSettings::IniFormat);
+    seed.setValue("uTimer/show_warning_after_9h45min_activity", true);
+    seed.setValue("uTimer/show_warning_when_not_30min_pause_after_6h_activity", false);
+    seed.sync();
+    Settings settings(QDir(tempDir.path()).filePath("user-settings.ini"));
+
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    HealthMonitor monitor(settings);
+    monitor.reset();
+
+    // The connection under test — identical to mainwin.cpp.
+    QObject::connect(&tracker, &TimeTracker::stopped, &monitor, &HealthMonitor::reset);
+
+    QSignalSpy spy(&monitor, &HealthMonitor::warningTriggered);
+
+    // Session 1: cross the threshold → warning fires once.
+    tracker.useTimerViaButton(Button::Start);
+    monitor.check(kActivityThresholdMs + 1, 0);
+    QCOMPARE(spy.count(), 1);
+    // Still only once within the same session.
+    monitor.check(kActivityThresholdMs + 5000, 0);
+    QCOMPARE(spy.count(), 1);
+
+    // End session 1 → TimeTracker::stopped re-arms the monitor.
+    tracker.useTimerViaButton(Button::Stop);
+
+    // Session 2: the warning fires again.
+    tracker.useTimerViaButton(Button::Start);
+    monitor.check(kActivityThresholdMs + 1, 0);
+    QCOMPARE(spy.count(), 2);
 }

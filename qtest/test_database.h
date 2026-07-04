@@ -89,6 +89,7 @@ private slots:
     // flushToDisc durable heartbeat (Issue 2)
     void test_flushToDisc_writes_heartbeat_row();
     void test_flushToDisc_idempotent();
+    void test_flushToDisc_restores_synchronous_normal();
 
     // Step 2 (S1): saveDurations(Append) upserts on segment_id collision
     void test_database_saveDurations_append_upserts_existing_segment_id();
@@ -109,7 +110,7 @@ private slots:
     void test_schema_status_ready_creates_missing_app_settings_and_idx_segment_id();
     void test_schema_status_inaccessible_readonly_file();
 
-    // Timer::initializeFromStore isolation: no side effects before recovery is called
+    // TimeTracker::initializeFromStore isolation: no side effects before recovery is called
     void test_constructor_only_does_not_consume_marker();
     void test_outdated_schema_does_not_mutate_db();
 
@@ -123,6 +124,14 @@ private slots:
     void test_recoverStartupCheckpoints_marker_intact_on_reconcile_failure();
     // Finding 2: marker must survive orphan load failure
     void test_recoverStartupCheckpoints_marker_intact_on_load_failure();
+
+    // A11: notification compares marker against the newest finalized orphan
+    void test_recoverStartupCheckpoints_notifies_when_marker_covers_only_older_orphan();
+    // A12: empty segment_id rows are treated as corrupt at load
+    void test_loadDurations_skips_empty_segment_id_row();
+
+    // A14: a backward clock jump must not resurrect a future-dated orphan
+    void test_recoverStartupCheckpoints_drops_future_dated_orphan();
 };
 
 #endif // TEST_DATABASE_H

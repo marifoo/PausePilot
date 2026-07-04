@@ -39,6 +39,9 @@ private slots:
 
     // RAII guard: endExclusiveEdit called on destruction without accept/reject
     void test_raii_guard_resumes_on_destruction();
+
+    // A9: merge-save finalizes completed rows so a late crash-recovery keeps them
+    void test_merge_save_survives_late_crash_recovery();
 };
 
 #endif // TEST_HISTORY_COMMIT_H

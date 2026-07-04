@@ -1,6 +1,7 @@
 #include <QApplication>
 #include <QDebug>
 #include <QEvent>
+#include <QLockFile>
 #include <QMessageBox>
 #include <QStyleFactory>
 #include <QTimer>
@@ -16,7 +17,7 @@
 #include "settings.h"
 #include "mainwin.h"
 #include "shutdowncoordinator.h"
-#include "timer.h"
+#include "timetracker.h"
 #include "sqlitesessionstore.h"
 #include "lockstatewatcher.h"
 #include "logger.h"
@@ -78,7 +79,7 @@ static bool setupUnixSignalHandlers()
  * 3. Instantiate Core Components:
  *    - Settings (Configuration)
  *    - LockStateWatcher (Hardware abstraction)
- *    - Timer (Business Logic)
+ *    - TimeTracker (Business Logic)
  *    - MainWin (Presentation)
  * 4. Wire up Signals/Slots to connect the components.
  * 5. Start the main event loop.
@@ -90,7 +91,9 @@ int main(int argc, char *argv[])
 	QLoggingCategory::setFilterRules("kf.windowsystem=false");
 
 	// Set up Unix signal handlers before creating QApplication
-	setupUnixSignalHandlers();
+	if (!setupUnixSignalHandlers()) {
+		qWarning() << "Failed to set up Unix signal handlers; graceful shutdown on SIGTERM/SIGINT/SIGHUP will not work";
+	}
 #endif
 
 	QCoreApplication::setApplicationName("µTimer");
@@ -98,13 +101,32 @@ int main(int argc, char *argv[])
 	QApplication application(argc, argv);
 	application.setStyle(QStyleFactory::create("Fusion"));
 
+	// Refuse a second instance: two instances racing recoverStartupCheckpoints()
+	// against each other's live checkpoint row (and createBackup()'s close-copy-
+	// reopen against a concurrently-written file) can corrupt the database.
+	// QLockFile also detects and clears a stale lock left by a crashed process,
+	// so a crash does not lock the user out permanently.
+	QLockFile instanceLock(AppPaths::instanceLockFile());
+	if (!instanceLock.tryLock(100)) {
+		if (instanceLock.error() == QLockFile::LockFailedError) {
+			QMessageBox::critical(nullptr, "µTimer Already Running",
+				"Another instance of µTimer is already running.\n\n"
+				"Please close it before starting a new one.");
+			return 1;
+		}
+		// Any other error (e.g. the app directory is not writable) is not a
+		// second-instance conflict -- fall through and let the existing
+		// DB-writability check in checkSchemaOnStartup() report it accurately.
+		qWarning() << "Could not create instance lock file, error code:" << instanceLock.error();
+	}
+
 	QTimer timer;
 
 	Settings settings(AppPaths::settingsFile());
 	Logger::registerSettings(&settings);
 	LockStateWatcher lockstate_watcher(settings);
 	SqliteSessionStore session_store(settings);
-	Timer time_tracker(settings, session_store);
+	TimeTracker time_tracker(settings, session_store);
 
 	// Validate schema before any recovery or data access.
 	const SchemaStatus schemaStatus = session_store.checkSchemaOnStartup();
@@ -163,8 +185,8 @@ int main(int argc, char *argv[])
 	});
 
 	QObject::connect(&timer, SIGNAL(timeout()), &lockstate_watcher, SLOT(update()));
-	QObject::connect(&lockstate_watcher, SIGNAL(desktopLockEvent(LockEvent)),	&time_tracker, SLOT(useTimerViaLockEvent(LockEvent)));
-	QObject::connect(&time_tracker, &Timer::userWarning, &main_win, &MainWin::showUserWarning);
+	QObject::connect(&lockstate_watcher, SIGNAL(desktopLockEvent(LockEvent,QDateTime)),	&time_tracker, SLOT(useTimerViaLockEvent(LockEvent,QDateTime)));
+	QObject::connect(&time_tracker, &TimeTracker::userWarning, &main_win, &MainWin::showUserWarning);
 
 	QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, &main_win, &MainWin::onAboutToQuit);
 

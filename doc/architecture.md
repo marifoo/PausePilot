@@ -14,7 +14,7 @@ graph TD
     Settings["Settings"]
     LockWatcher["LockStateWatcher"]
     Store["SqliteSessionStore<br/><i>implements SessionStore</i>"]
-    Timer["Timer<br/>(engine)"]
+    TimeTracker["TimeTracker<br/>(engine)"]
     Shutdown["ShutdownCoordinator"]
     MainWin["MainWin"]
     Content["ContentWidget"]
@@ -22,28 +22,28 @@ graph TD
     History["HistoryDialog"]
 
     Heartbeat --> MainWin
-    Heartbeat --> Timer
+    Heartbeat --> TimeTracker
     Heartbeat --> LockWatcher
 
-    LockWatcher --> Timer
+    LockWatcher --> TimeTracker
     LockWatcher --> MainWin
 
-    Timer --> Store
-    Timer --> MainWin
+    TimeTracker --> Store
+    TimeTracker --> MainWin
 
-    MainWin --> Timer
+    MainWin --> TimeTracker
     MainWin --> Content
     MainWin --> Health
     MainWin --> History
     MainWin --> Shutdown
 
-    Shutdown --> Timer
+    Shutdown --> TimeTracker
     Shutdown --> Store
 
-    History --> Timer
+    History --> TimeTracker
     History --> Store
 
-    Settings -.read.-> Timer
+    Settings -.read.-> TimeTracker
     Settings -.read.-> Store
     Settings -.read.-> LockWatcher
     Settings -.read.-> MainWin
@@ -60,11 +60,11 @@ Each box in one or two lines:
   implementation `SqliteSessionStore` is the only one in the production binary;
   the test harness substitutes `FakeSessionStore` (see `qtest/`). See
   `persistence.md` for the storage model.
-- **`Timer`** — the timing engine and state machine. Owns the session in
+- **`TimeTracker`** — the timing engine and state machine. Owns the session in
   memory, drives checkpoints, talks to `SessionStore` for persistence, and
   emits `stopped`, `modeChanged`, `userWarning` for the GUI to follow.
 - **`ShutdownCoordinator`** — runs the shutdown sequence (see
-  `runtime-behaviour.md`). Holds references to `Timer` and `SessionStore`;
+  `runtime-behaviour.md`). Holds references to `TimeTracker` and `SessionStore`;
   does not depend on any GUI class.
 - **`MainWin`** — the top-level Qt window. Owns the tray icon, the
   `ContentWidget`, the `HealthMonitor`, and the `HistoryDialog` when open.
@@ -79,7 +79,7 @@ Each box in one or two lines:
 ## The `SessionStore` abstraction
 
 `SessionStore` (in `sessionstore.h`) is a pure-virtual interface listing every
-DB operation `Timer` actually calls. `Timer` holds a `SessionStore&` reference,
+DB operation `TimeTracker` actually calls. `TimeTracker` holds a `SessionStore&` reference,
 not a `SqliteSessionStore&`. The seam exists for one reason:
 **testability**. In `qtest/` the engine runs against an in-memory
 `FakeSessionStore` that records calls and lets tests inject failure modes
@@ -92,7 +92,7 @@ without touching disk or SQLite. The interface is small and chosen to expose
 
 | Module             | Hides from its callers                                                                              |
 | ------------------ | --------------------------------------------------------------------------------------------------- |
-| `Timer`            | The Activity/Pause/None FSM, the midnight policy, the checkpoint cadence, and `SessionState` mutations |
+| `TimeTracker`      | The Activity/Pause/None FSM, the midnight policy, the checkpoint cadence, and `SessionState` mutations |
 | `SessionStore`     | SQLite, transactions, the `is_finalized` flag, segment-id/orphan bookkeeping, backups, retention   |
 | `Timeline`         | Segment normalization, ordering, and the ongoing-segment splice in `activeMsec`/`pauseMsec`         |
 | `LockStateWatcher` | The OS API (`WTSSESSION_CHANGE` on Windows, several D-Bus backends on Linux) and the debounce buffer |
@@ -101,7 +101,7 @@ without touching disk or SQLite. The interface is small and chosen to expose
 
 ## Domain vs Qt-glue
 
-The application logic lives in **`Timer`**, **`SessionStore`**, **`Timeline`**,
+The application logic lives in **`TimeTracker`**, **`SessionStore`**, **`Timeline`**,
 and **`HealthMonitor`** — these compile and run without a `QApplication` and
 are exercised that way by the test harness. **`MainWin`** and
 **`ContentWidget`** are pure Qt glue: tray icon, layouts, widget signals,
@@ -115,10 +115,10 @@ straight to the owner:
 
 | Concern                                    | Owner                                |
 | ------------------------------------------ | ------------------------------------ |
-| Midnight policy (cross-day cutoff)         | `Timer` via `DayBoundaryWatcher`     |
-| Autopause / lock-driven auto-resume        | `Timer` (signalled via `modeChanged`)|
-| Checkpoint cadence                         | `Timer`                              |
-| Orphan checkpoint reconciliation           | `SessionStore` + `Timer` (decision)  |
+| Midnight policy (cross-day cutoff)         | `TimeTracker` via `DayBoundaryWatcher`     |
+| Autopause / lock-driven auto-resume        | `TimeTracker` (signalled via `modeChanged`)|
+| Checkpoint cadence                         | `TimeTracker`                        |
+| Orphan checkpoint reconciliation           | `SessionStore` + `TimeTracker` (decision)  |
 | Clean-shutdown marker                      | `ShutdownCoordinator` + `SessionStore` |
 | Database schema, migrations, retention     | `SqliteSessionStore`                 |
 | OS lock detection                          | `LockStateWatcher`                   |
@@ -138,7 +138,7 @@ heartbeat, runs the raw boolean through a 5-tick debounce buffer
 (`buffer_for_lock` / `buffer_for_unlock`), and emits one of
 `None`/`Unlock`/`Lock`/`LongOngoingLock`. `LongOngoingLock` is the
 "the lock has now been held long enough to be a real pause" signal, which is
-what triggers the backpause behaviour in `Timer`.
+what triggers the backpause behaviour in `TimeTracker`.
 
 ## Signal/slot wiring
 
@@ -150,7 +150,7 @@ sequenceDiagram
     participant QT as QTimer (100ms)
     participant LW as LockStateWatcher
     participant MW as MainWin
-    participant TT as Timer
+    participant TT as TimeTracker
     participant CW as ContentWidget
 
     QT->>MW: timeout → onTick()

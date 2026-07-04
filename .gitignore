@@ -8,6 +8,9 @@ uTimer.sqlite
 qtest/qtest
 qtest/*.log
 
+# Python
+__pycache__/
+
 
 # AI files
 .claude/

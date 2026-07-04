@@ -12,7 +12,7 @@
  *
  * Typical usage:
  *     FakeSessionStore fakeDb;
- *     Timer tracker(settings, fakeDb);
+ *     TimeTracker tracker(settings, fakeDb);
  *     // ... exercise tracker ...
  *     QCOMPARE(fakeDb.callLog.count("saveCheckpoint"), 1);
  *     QVERIFY(fakeDb.callLog.contains("commitSession"));
@@ -42,6 +42,7 @@ public:
     EntriesForDateResult hasEntriesForDate(const QDate& date) override;
     SessionStoreResult saveCheckpoint(DurationType type, const QDateTime& startTime,
                                       const QDateTime& endTime, const SegmentId& segmentId) override;
+    SessionStoreResult discardCheckpoint(const SegmentId& segmentId) override;
     SchemaStatus checkSchemaOnStartup() override;
     SessionStoreResult flushToDisc() override;
     SessionStoreResult setLastCleanShutdownMarker(const QDateTime& timestamp) override;

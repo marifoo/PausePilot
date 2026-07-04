@@ -1,5 +1,6 @@
 #include "test_integration.h"
 #include "fakesessionstore.h"
+#include "fakeclock.h"
 #include "shutdowncoordinator.h"
 #include "../historyeditsession.h"
 #include <QtTest>
@@ -45,18 +46,23 @@ void IntegrationTest::test_integration_checkpoint_recovery_on_restart()
         // First session: Start timer and save checkpoint
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        Timer tracker(settings, db);
-        
+        TimeTracker tracker(settings, db);
+
+        // Drive the clock via the seam: no real sleep needed to age the checkpoint
+        // past the 1 s minimum-recoverable-orphan threshold.
+        FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
         tracker.useTimerViaButton(Button::Start);
-        QTest::qWait(1200);
-        
+        clock.advance(1200);
+
         // Manually save checkpoint
-        tracker.saveCheckpointInternal_dbg(QDateTime::currentDateTime());
+        tracker.saveCheckpoint_locked_dbg(clock.now());
         QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
         orphanSegmentId = tracker.sessionState_dbg().segment_id;
 
         // Simulate an unclean shutdown: keep checkpoint row, skip graceful stop.
-        tracker.forceMode_dbg(Timer::Mode::None);
+        tracker.forceMode_dbg(TimeTracker::Mode::None);
         tracker.sessionState_dbg().segment_id = SegmentId{};
 
         // Simulate crash (tracker destroyed without stopping)
@@ -66,7 +72,7 @@ void IntegrationTest::test_integration_checkpoint_recovery_on_restart()
         // Second session: startup reconciliation finalizes orphan checkpoint
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        Timer tracker(settings, db);
+        TimeTracker tracker(settings, db);
         tracker.initializeFromStore();
         QVERIFY(tracker.getStartupRecoveredSeconds() > 0);
 
@@ -83,7 +89,7 @@ void IntegrationTest::test_integration_checkpoint_recovery_on_restart()
         QVERIFY(query.exec());
         QVERIFY(query.next());
         QCOMPARE(query.value(0).toInt(), 1);
-        db.lazyClose_dbg();
+        db.closeConnection_dbg();
     }
 }
 
@@ -97,19 +103,21 @@ void IntegrationTest::test_integration_orphan_reconciliation_is_idempotent()
     {
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        Timer tracker(settings, db);
+        TimeTracker tracker(settings, db);
+        FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.useTimerViaButton(Button::Start);
-        QTest::qWait(1200);
-        tracker.saveCheckpointInternal_dbg(QDateTime::currentDateTime());
+        clock.advance(1200);  // seam-driven aging, no real sleep
+        tracker.saveCheckpoint_locked_dbg(clock.now());
         QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
         tracker.sessionState_dbg().segment_id = SegmentId{};
-        tracker.forceMode_dbg(Timer::Mode::None);
+        tracker.forceMode_dbg(TimeTracker::Mode::None);
     }
 
     {
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        Timer tracker(settings, db);
+        TimeTracker tracker(settings, db);
         tracker.initializeFromStore();
         QCOMPARE(tracker.getStartupRecoveredSeconds() >= 1, true);
     }
@@ -117,7 +125,7 @@ void IntegrationTest::test_integration_orphan_reconciliation_is_idempotent()
     {
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        Timer tracker(settings, db);
+        TimeTracker tracker(settings, db);
         tracker.initializeFromStore();
         QCOMPARE(tracker.getStartupRecoveredSeconds(), static_cast<qint64>(0));
         SqliteSessionStore db2(settings);
@@ -169,10 +177,10 @@ void IntegrationTest::test_integration_orphan_reconciliation_drops_stale_and_too
         QVERIFY(insert.exec());
     }
 
-    db.lazyClose_dbg();
+    db.closeConnection_dbg();
 
     SqliteSessionStore db2(settings);
-    Timer tracker(settings, db2);
+    TimeTracker tracker(settings, db2);
     tracker.initializeFromStore();
     QCOMPARE(tracker.getStartupRecoveredSeconds(), static_cast<qint64>(0));
 
@@ -190,13 +198,15 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_present_is_s
     {
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        Timer tracker(settings, db);
+        TimeTracker tracker(settings, db);
+        FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.useTimerViaButton(Button::Start);
-        QTest::qWait(1200);
-        tracker.saveCheckpointInternal_dbg(QDateTime::currentDateTime());
+        clock.advance(1200);  // seam-driven aging, no real sleep
+        tracker.saveCheckpoint_locked_dbg(clock.now());
         QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
         tracker.sessionState_dbg().segment_id = SegmentId{};
-        tracker.forceMode_dbg(Timer::Mode::None);
+        tracker.forceMode_dbg(TimeTracker::Mode::None);
     }
 
     {
@@ -208,7 +218,7 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_present_is_s
     {
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        Timer tracker(settings, db);
+        TimeTracker tracker(settings, db);
         tracker.initializeFromStore();
         QVERIFY(tracker.getStartupRecoveredSeconds() > 0);
         QVERIFY(!tracker.shouldShowStartupRecoveryNotification());
@@ -225,19 +235,21 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_absent_shows
     {
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        Timer tracker(settings, db);
+        TimeTracker tracker(settings, db);
+        FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.useTimerViaButton(Button::Start);
-        QTest::qWait(1200);
-        tracker.saveCheckpointInternal_dbg(QDateTime::currentDateTime());
+        clock.advance(1200);  // seam-driven aging, no real sleep
+        tracker.saveCheckpoint_locked_dbg(clock.now());
         QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
         tracker.sessionState_dbg().segment_id = SegmentId{};
-        tracker.forceMode_dbg(Timer::Mode::None);
+        tracker.forceMode_dbg(TimeTracker::Mode::None);
     }
 
     {
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        Timer tracker(settings, db);
+        TimeTracker tracker(settings, db);
         tracker.initializeFromStore();
         QVERIFY(tracker.getStartupRecoveredSeconds() > 0);
         QVERIFY(tracker.shouldShowStartupRecoveryNotification());
@@ -251,7 +263,7 @@ void IntegrationTest::test_integration_memory_db_consistency()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     // Start -> Activity for 50ms
     tracker.useTimerViaButton(Button::Start);
@@ -259,7 +271,7 @@ void IntegrationTest::test_integration_memory_db_consistency()
     
     // Pause
     tracker.useTimerViaButton(Button::Pause);
-    auto memoryDurations = tracker.getCurrentDurations();
+    auto memoryDurations = tracker.completedTimeline();
     QVERIFY(memoryDurations.completed().size() >= 1);
     
     // Resume -> Activity for 50ms
@@ -267,7 +279,7 @@ void IntegrationTest::test_integration_memory_db_consistency()
     QTest::qWait(50);
     
     // Save checkpoint
-    tracker.saveCheckpointInternal_dbg(QDateTime::currentDateTime());
+    tracker.saveCheckpoint_locked_dbg(QDateTime::currentDateTime());
     QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
     
     // Stop
@@ -390,7 +402,7 @@ void IntegrationTest::test_F_shutdown_sequence_stop_flush_marker()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     // Start the timer so there is something to stop.
@@ -411,7 +423,7 @@ void IntegrationTest::test_F_shutdown_sequence_stop_flush_marker()
     QVERIFY(fakeDb.callLog.contains("flushToDisc"));
     QVERIFY(fakeDb.callLog.contains("setLastCleanShutdownMarker"));
 
-    // The clean-shutdown marker is written by Timer::shutdown() before the
+    // The clean-shutdown marker is written by TimeTracker::shutdown() before the
     // coordinator calls flushToDisc, so marker must precede flush.
     int flushIdx  = fakeDb.callLog.lastIndexOf("flushToDisc");
     int markerIdx = fakeDb.callLog.lastIndexOf("setLastCleanShutdownMarker");
@@ -433,7 +445,7 @@ void IntegrationTest::test_5_0a_normal_same_day_no_discard()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     // Start with a same-day segment_start_time (current real time is fine).
     tracker.useTimerViaButton(Button::Start);
@@ -460,7 +472,7 @@ void IntegrationTest::test_5_0a_cross_midnight_ongoing_discarded_completed_prese
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     // Arrange: start the timer, add a completed same-day segment manually,
     // then rewind segment_start_time to yesterday to simulate cross-midnight.
@@ -507,7 +519,7 @@ void IntegrationTest::test_5_0a_discard_is_idempotent()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -536,7 +548,7 @@ void IntegrationTest::test_5_0a_watchdog_helper_returns_false_when_not_crossed()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     // Stopped: must be false.
     QVERIFY(tracker.isStopped());
@@ -561,14 +573,14 @@ void IntegrationTest::test_integration_backpause_db_update()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     // Start activity
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(100);
     
     // Save checkpoint
-    tracker.saveCheckpointInternal_dbg(QDateTime::currentDateTime());
+    tracker.saveCheckpoint_locked_dbg(QDateTime::currentDateTime());
     SegmentId checkpointSegmentId = tracker.sessionState_dbg().segment_id;
     QVERIFY(!checkpointSegmentId.isEmpty());
 
@@ -609,7 +621,13 @@ void IntegrationTest::test_Y_engine_scheduled_stop_emits_MidnightScheduled()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
+
+    // Pin the engine clock to mid-day so Start's auto-armed 23:59:59.500 timer is
+    // hours away and cannot fire during the qWait() below — removes the tiny
+    // near-real-midnight flake while we exercise the explicitly-armed stop.
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     // Start the engine (Activity mode).
     tracker.useTimerViaButton(Button::Start);
@@ -623,7 +641,7 @@ void IntegrationTest::test_Y_engine_scheduled_stop_emits_MidnightScheduled()
     fakeDb.callLog.clear();
 
     // Spy on the stopped() signal.
-    QSignalSpy stoppedSpy(&tracker, &Timer::stopped);
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
     QVERIFY(stoppedSpy.isValid());
 
     // Arm the watcher with a time past 23:59:59.500 — timer fires in 1 ms.
@@ -635,8 +653,8 @@ void IntegrationTest::test_Y_engine_scheduled_stop_emits_MidnightScheduled()
 
     // Assert: exactly one stopped signal, with MidnightScheduled reason.
     QCOMPARE(stoppedSpy.count(), 1);
-    const auto reason = stoppedSpy.at(0).at(0).value<Timer::StopReason>();
-    QCOMPARE(reason, Timer::StopReason::MidnightScheduled);
+    const auto reason = stoppedSpy.at(0).at(0).value<TimeTracker::StopReason>();
+    QCOMPARE(reason, TimeTracker::StopReason::MidnightScheduled);
 
     // Engine must be stopped.
     QVERIFY(tracker.isStopped());
@@ -657,7 +675,7 @@ void IntegrationTest::test_Z_engine_watchdog_emits_MidnightWatchdog()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -665,7 +683,7 @@ void IntegrationTest::test_Z_engine_watchdog_emits_MidnightWatchdog()
     // Simulate sleep through midnight: backdate segment_start_time to yesterday.
     tracker.sessionState_dbg().segment_start_time = QDateTime::currentDateTime().addDays(-1);
 
-    QSignalSpy stoppedSpy(&tracker, &Timer::stopped);
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
     QVERIFY(stoppedSpy.isValid());
 
     // Simulate the 100 ms heartbeat with today's "now".
@@ -673,8 +691,8 @@ void IntegrationTest::test_Z_engine_watchdog_emits_MidnightWatchdog()
 
     // Engine must have stopped and emitted MidnightWatchdog.
     QCOMPARE(stoppedSpy.count(), 1);
-    const auto reason = stoppedSpy.at(0).at(0).value<Timer::StopReason>();
-    QCOMPARE(reason, Timer::StopReason::MidnightWatchdog);
+    const auto reason = stoppedSpy.at(0).at(0).value<TimeTracker::StopReason>();
+    QCOMPARE(reason, TimeTracker::StopReason::MidnightWatchdog);
     QVERIFY(tracker.isStopped());
 }
 
@@ -692,7 +710,12 @@ void IntegrationTest::test_AA_no_duplicate_stop_signal()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
+
+    // Pin the engine clock to mid-day so Start's auto-armed 23:59:59.500 timer is
+    // hours away and cannot fire during the qWait() below.
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -704,7 +727,7 @@ void IntegrationTest::test_AA_no_duplicate_stop_signal()
     // Backdate segment so the watchdog also wants to fire.
     tracker.sessionState_dbg().segment_start_time = QDateTime::currentDateTime().addDays(-1);
 
-    QSignalSpy stoppedSpy(&tracker, &Timer::stopped);
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
     QVERIFY(stoppedSpy.isValid());
 
     // Watchdog fires first (synchronous call).
@@ -793,7 +816,7 @@ void IntegrationTest::test_recoverStartupCheckpoints_overlap_rejected_not_counte
         q.bindValue(":e", bEndUtc.toString(Qt::ISODateWithMs));
         QVERIFY(q.exec());
     }
-    db.lazyClose_dbg();
+    db.closeConnection_dbg();
 
     // Use a 'now' far enough in the future that neither orphan is stale (>24h old).
     const QDateTime now = QDateTime(QDate(2025, 1, 1), QTime(13, 0, 0), Qt::UTC).toLocalTime();
@@ -862,7 +885,7 @@ void IntegrationTest::test_recoverStartupCheckpoints_reports_finalized_and_dropp
         q.bindValue(":e", bEndUtc.toString(Qt::ISODateWithMs));
         QVERIFY(q.exec());
     }
-    db.lazyClose_dbg();
+    db.closeConnection_dbg();
 
     const QDateTime now = QDateTime(QDate(2025, 1, 1), QTime(13, 0, 0), Qt::UTC).toLocalTime();
     StartupRecoveryResult result = db.recoverStartupCheckpoints(now);
@@ -874,9 +897,9 @@ void IntegrationTest::test_recoverStartupCheckpoints_reports_finalized_and_dropp
 }
 
 /**
- * Timer correctly uses recovered_seconds from recoverStartupCheckpoints.
+ * TimeTracker correctly uses recovered_seconds from recoverStartupCheckpoints.
  *
- * Verifies the Timer → store boundary: Timer passes the recovered_seconds
+ * Verifies the TimeTracker → store boundary: TimeTracker passes the recovered_seconds
  * from the store result directly to getStartupRecoveredSeconds().
  */
 void IntegrationTest::test_timer_startup_recovery_uses_store_recovered_seconds()
@@ -891,10 +914,10 @@ void IntegrationTest::test_timer_startup_recovery_uses_store_recovered_seconds()
     fakeDb.startupRecoveryResult.recovered_seconds = 60;
     fakeDb.startupRecoveryResult.notify_user = true;
 
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     tracker.initializeFromStore();
 
-    // Timer should report exactly what the store returned.
+    // TimeTracker should report exactly what the store returned.
     QCOMPARE(tracker.getStartupRecoveredSeconds(), (qint64)60);
     QVERIFY(tracker.shouldShowStartupRecoveryNotification());
 }
@@ -1060,10 +1083,14 @@ void IntegrationTest::test_A_toggle_ongoing_to_pause_crash_recovery_uses_refresh
         // Session 1: start timer, open "dialog", toggle type, commit, crash.
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        Timer tracker(settings, db);
+        TimeTracker tracker(settings, db);
+
+        // Seam-driven clock: advance instead of sleeping through the flow.
+        FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
         tracker.useTimerViaButton(Button::Start);
-        QTest::qWait(50);
+        clock.advance(50);  // ongoing becomes valid (segment_start < now)
 
         // Simulate dialog open: build the edit session (captures current snapshot).
         HistoryEditSession session;
@@ -1081,7 +1108,7 @@ void IntegrationTest::test_A_toggle_ongoing_to_pause_crash_recovery_uses_refresh
         // Advance clock so the refresh snapshot is clearly later than dialogOpenEnd,
         // and so the segment exceeds kMinRecoverableOrphanDurationMs (1 s) and is
         // finalized rather than dropped as too-short during recovery.
-        QTest::qWait(1200);
+        clock.advance(1200);
 
         // refreshOngoing() must advance end_utc while preserving the Pause type.
         session.refreshOngoing(tracker);
@@ -1103,7 +1130,7 @@ void IntegrationTest::test_A_toggle_ongoing_to_pause_crash_recovery_uses_refresh
 
         // Simulate crash: destroy tracker without calling Stop.
         // The unfinalized DB row retains the end_utc set by replaceAll.
-        tracker.forceMode_dbg(Timer::Mode::None);
+        tracker.forceMode_dbg(TimeTracker::Mode::None);
         tracker.sessionState_dbg().segment_id = SegmentId{};
     }
 
@@ -1149,6 +1176,6 @@ void IntegrationTest::test_A_toggle_ongoing_to_pause_crash_recovery_uses_refresh
                      "Recovered end_utc must be close to the refreshed end (within 500 ms)");
         }
 
-        db.lazyClose_dbg();
+        db.closeConnection_dbg();
     }
 }

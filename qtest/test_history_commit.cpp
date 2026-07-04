@@ -3,6 +3,7 @@
 #include <QMessageBox>
 
 #include "../historydialog.h"
+#include "../historyeditsession.h"
 
 using TestCommon::createSettingsFile;
 
@@ -43,7 +44,7 @@ void HistoryCommitTest::test_accept_stays_open_on_db_failure()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime now = QDateTime::currentDateTime();
     tracker.sessionState_dbg().durations.push_back(
@@ -54,6 +55,11 @@ void HistoryCommitTest::test_accept_stays_open_on_db_failure()
     QVERIFY(tracker.replaceAll(Timeline(dbDurations, std::nullopt), Timeline({}, std::nullopt)).ok());
 
     HistoryDialog dialog(tracker, settings);
+
+    // A10: an editless OK is a no-op, so make a genuine edit (toggle the DB row's
+    // type) to exercise the save path that must fail under the exclusive lock.
+    dialog.editSession_dbg().pendingTimelines()[0] =
+        dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(1, DurationType::Activity);
 
     // Hold an exclusive DB transaction to force replaceAll to fail.
     const QString lockConnName = "commit_test_db_lock";
@@ -79,7 +85,7 @@ void HistoryCommitTest::test_accept_stays_open_on_db_failure()
     // default (not QDialog::Accepted).
     QVERIFY(dialog.result() != QDialog::Accepted);
 
-    // Timer state must be unchanged.
+    // TimeTracker state must be unchanged.
     QCOMPARE(tracker.sessionState_dbg().durations.size(), static_cast<size_t>(1));
     QCOMPARE(tracker.sessionState_dbg().durations[0].type, DurationType::Activity);
 }
@@ -95,7 +101,7 @@ void HistoryCommitTest::test_accept_stays_open_on_merge_decline()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDate today = QDate::currentDate();
     const QDateTime dbStart(today, QTime(11, 0, 0), Qt::UTC);
@@ -110,6 +116,11 @@ void HistoryCommitTest::test_accept_stays_open_on_merge_decline()
 
     HistoryDialog dialog(tracker, settings);
 
+    // A10: an editless OK is a no-op. Make a genuine same-type edit — split the
+    // memory row into two Activity halves — so the save runs and the overlap
+    // merge confirmation is still triggered.
+    dialog.applySplit_dbg(0, 0, DurationType::Activity, DurationType::Activity);
+
     // Bypass QMessageBox::question() to avoid offscreen QPA propagateSizeHints() warnings.
     // Supplies "No" — same as user declining the merge — so accept() should not close the dialog.
     dialog.debugOverlapAnswer_ = QMessageBox::No;
@@ -118,7 +129,7 @@ void HistoryCommitTest::test_accept_stays_open_on_merge_decline()
     // Dialog must remain open (result still not Accepted).
     QVERIFY(dialog.result() != QDialog::Accepted);
 
-    // Timer session unchanged.
+    // TimeTracker session unchanged.
     QCOMPARE(tracker.sessionState_dbg().durations.size(), static_cast<size_t>(1));
 }
 
@@ -133,7 +144,7 @@ void HistoryCommitTest::test_accept_closes_on_success()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime now = QDateTime::currentDateTime();
     tracker.sessionState_dbg().durations.push_back(
@@ -163,7 +174,7 @@ void HistoryCommitTest::test_raii_guard_resumes_on_accept()
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(20);
@@ -201,7 +212,7 @@ void HistoryCommitTest::test_raii_guard_resumes_on_reject()
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(20);
@@ -239,7 +250,7 @@ void HistoryCommitTest::test_raii_guard_resumes_on_destruction()
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(20);
@@ -257,4 +268,54 @@ void HistoryCommitTest::test_raii_guard_resumes_on_destruction()
     QVERIFY(tracker.isCheckpointTimerActive_dbg());
 
     tracker.useTimerViaButton(Button::Stop);
+}
+
+// ---------------------------------------------------------------------------
+// A9: a merge-save must not demote finalized history rows to unfinalized, or a
+// crash + recovery >24 h later would delete them as stale orphans.  Completed
+// rows are finalized on save; only the ongoing row stays unfinalized.
+// ---------------------------------------------------------------------------
+
+void HistoryCommitTest::test_merge_save_survives_late_crash_recovery()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore db(settings);
+    TimeTracker tracker(settings, db);
+
+    // A finalized DB history row (today) 10:00–10:30.
+    const QDate today = QDate::currentDate();
+    const QDateTime dbStart(today, QTime(10, 0, 0), Qt::UTC);
+    const QDateTime dbEnd(today, QTime(10, 30, 0), Qt::UTC);
+    std::deque<TimeDuration> dbRows;
+    dbRows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, dbStart, dbEnd));
+    QVERIFY(tracker.replaceAll(Timeline(dbRows, std::nullopt), Timeline({}, std::nullopt)).ok());
+
+    // An in-memory session row 10:15–10:45 that overlaps the DB row → merge.
+    const QDateTime memStart(today, QTime(10, 15, 0), Qt::UTC);
+    const QDateTime memEnd(today, QTime(10, 45, 0), Qt::UTC);
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
+
+    // Build the save payload (normalization merges the two rows) and persist it,
+    // exactly as HistoryDialog::saveChanges() does.
+    HistoryEditSession session;
+    session.buildFromTimer(tracker);
+    const auto payload = session.buildSavePayload();
+    QVERIFY(payload.needsMergeConfirmation);
+    QVERIFY(tracker.replaceAll(payload.historyTimeline, payload.sessionTimeline).ok());
+
+    // Simulate a crash (no clean stop → no clean-shutdown marker) followed by a
+    // relaunch >24 h later.  Stale-orphan policy would drop any unfinalized row.
+    const QDateTime later = memEnd.addSecs(25 * 3600);
+    const StartupRecoveryResult res = db.recoverStartupCheckpoints(later);
+    QVERIFY(res.ok);
+
+    // The merged row must survive: it was finalized on save, not demoted.
+    const auto loaded = db.loadDurations();
+    QCOMPARE(static_cast<int>(loaded.size()), 1);
+    QCOMPARE(loaded.durations[0].startTime.toUTC().time(), QTime(10, 0, 0));
+    QCOMPARE(loaded.durations[0].endTime.toUTC().time(), QTime(10, 45, 0));
 }

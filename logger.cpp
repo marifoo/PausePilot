@@ -17,6 +17,30 @@ Logger::Logger()
     logfile_ = new QFile();
     logfile_->setFileName(AppPaths::logFile());
     logfile_->open(QIODevice::ReadWrite | QIODevice::Append | QIODevice::Text);
+
+    // Rotate on startup rather than in the destructor: the destructor never runs
+    // on a crash or a Windows WM_ENDSESSION termination, which would otherwise
+    // let the file grow unbounded across sessions that never exit cleanly.
+    logfile_->seek(0);
+    QTextStream in(logfile_);
+    in.setCodec("UTF-8");
+    QStringList lines;
+    while (!in.atEnd()) {
+        lines << in.readLine();
+    }
+    if (lines.size() > max_lines_) {
+        lines = lines.mid(lines.size() - max_lines_);
+        logfile_->resize(0);
+        logfile_->seek(0);
+        QTextStream out(logfile_);
+        out.setCodec("UTF-8");
+        for (const QString& l : lines) {
+            out << l << "\n";
+        }
+        out.flush();
+        logfile_->flush();
+    }
+
     log("uTimer Startup >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
 }
 
@@ -48,25 +72,6 @@ Logger::~Logger()
 
     if (logfile_ != nullptr) {
         logfile_->flush();
-        logfile_->seek(0);
-        QTextStream in(logfile_);
-        in.setCodec("UTF-8");
-        QStringList lines;
-        while (!in.atEnd()) {
-            lines << in.readLine();
-        }
-        if (lines.size() > max_lines_) {
-            lines = lines.mid(lines.size() - max_lines_);
-            logfile_->resize(0);
-            logfile_->seek(0);
-            QTextStream out2(logfile_);
-            out2.setCodec("UTF-8");
-            for (const QString& l : lines) {
-                out2 << l << "\n";
-            }
-            out2.flush();
-            logfile_->flush();  // Ensure rotated log is written to disk
-        }
         logfile_->close();
     }
 }

@@ -46,7 +46,7 @@ void HistoryDialogTest::test_historydialog_createPages_includes_current_db_ongoi
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     QDateTime now = QDateTime::currentDateTime();
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-120), now.addSecs(-60)));
@@ -77,7 +77,7 @@ void HistoryDialogTest::test_historydialog_createPages_dedups_db_row_with_small_
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime now = QDateTime::currentDateTime();
     const QDateTime memoryStart = now.addSecs(-40).addMSecs(2);
@@ -107,7 +107,7 @@ void HistoryDialogTest::test_historydialog_createPages_groups_unsplit_cross_midn
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDate yesterday = QDate::currentDate().addDays(-1);
     const QDateTime crossMidnightStart(yesterday, QTime(23, 59, 50));
@@ -173,7 +173,7 @@ void HistoryDialogTest::test_historydialog_checkbox_toggle_updates_pending_and_t
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     QDateTime now = QDateTime::currentDateTime();
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
@@ -196,7 +196,7 @@ void HistoryDialogTest::test_historydialog_saveChanges_updates_timetracker_and_d
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     QDateTime now = QDateTime::currentDateTime();
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-150)));
@@ -226,7 +226,7 @@ void HistoryDialogTest::test_historydialog_split_action_splits_row()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     QDateTime start = QDateTime::currentDateTime().addSecs(-10);
     QDateTime end = QDateTime::currentDateTime().addSecs(-4);
@@ -259,7 +259,7 @@ void HistoryDialogTest::test_historydialog_split_today_mixed_origins_routes_to_c
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime now = QDateTime::currentDateTime();
     const QDateTime memStart = now.addSecs(-20);
@@ -293,12 +293,18 @@ void HistoryDialogTest::test_historydialog_split_today_mixed_origins_routes_to_c
     QCOMPARE(tracker.sessionState_dbg().durations[1].endTime, memEnd);
     QCOMPARE(tracker.sessionState_dbg().durations[0].endTime, tracker.sessionState_dbg().durations[1].startTime);
 
+    // A9: all completed rows are finalized on save (the two memory-origin split
+    // halves plus the DB Pause row) — the DB now loads all three.
     SqliteSessionStore db2(settings);
     auto loaded = db2.loadDurations();
-    QCOMPARE(loaded.size(), static_cast<size_t>(1));
-    QCOMPARE(loaded[0].startTime, dbStart);
-    QCOMPARE(loaded[0].endTime, dbEnd);
-    QCOMPARE(loaded[0].type, DurationType::Pause);
+    QCOMPARE(loaded.size(), static_cast<size_t>(3));
+    bool foundDbPause = false;
+    for (size_t i = 0; i < loaded.size(); ++i) {
+        if (loaded[i].startTime == dbStart && loaded[i].endTime == dbEnd &&
+            loaded[i].type == DurationType::Pause)
+            foundDbPause = true;
+    }
+    QVERIFY(foundDbPause);
 }
 
 void HistoryDialogTest::test_historydialog_split_non_today_db_row_survives_save_roundtrip()
@@ -308,7 +314,7 @@ void HistoryDialogTest::test_historydialog_split_non_today_db_row_survives_save_
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 30));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime start(QDate::currentDate().addDays(-1), QTime(10, 0, 0));
     const QDateTime end = start.addSecs(8);
@@ -345,7 +351,7 @@ void HistoryDialogTest::test_historydialog_shows_load_reconciliation_banner()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     SqliteSessionStore manager(settings);
     QVERIFY(manager.ensureOpen_dbg());
@@ -368,7 +374,7 @@ void HistoryDialogTest::test_historydialog_shows_load_reconciliation_banner()
     query.bindValue(":start_utc", start.addSecs(10).toString(Qt::ISODateWithMs));
     query.bindValue(":end_utc", end.addSecs(10).toString(Qt::ISODateWithMs));
     QVERIFY(query.exec());
-    manager.lazyClose_dbg();
+    manager.closeConnection_dbg();
 
     HistoryDialog dialog(tracker, settings);
     const QString msg = dialog.getLoadReconciliationMessage();
@@ -391,7 +397,7 @@ void HistoryDialogTest::test_historydialog_save_unrelated_edit_preserves_row_and
 
     Settings settings(settingsPath);
     SqliteSessionStore db2(settings);
-    Timer tracker(settings, db2);
+    TimeTracker tracker(settings, db2);
 
     const QDateTime historicalStart(QDate::currentDate().addDays(-1), QTime(10, 0, 0));
     const QDateTime historicalEnd = historicalStart.addSecs(300);
@@ -465,7 +471,7 @@ void HistoryDialogTest::test_historydialog_pauses_checkpoint_timer_for_dialog_li
 
     Settings settings(settingsPath);
     SqliteSessionStore db2(settings);
-    Timer tracker(settings, db2);
+    TimeTracker tracker(settings, db2);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(20);
@@ -522,7 +528,7 @@ void HistoryDialogTest::test_historydialog_save_keeps_db_rows_for_history_plus_c
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime historicalStart(QDate::currentDate().addDays(-1), QTime(9, 0, 0));
     const QDateTime historicalEnd = historicalStart.addSecs(60);
@@ -534,12 +540,20 @@ void HistoryDialogTest::test_historydialog_save_keeps_db_rows_for_history_plus_c
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-30), now.addSecs(-20)));
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-20), now.addSecs(-10)));
 
-    const int expectedHistoryRows = 1;
-    const int expectedCurrentSessionRows = 2;
-
     HistoryDialog dialog(tracker, settings);
+
+    // A10: an editless OK is a no-op, so make a genuine edit (toggle the
+    // historical row's type on its page) to exercise the save path.
+    QVERIFY(dialog.editSession_dbg().pages().size() >= static_cast<size_t>(2));
+    dialog.editSession_dbg().pendingTimelines()[1] =
+        dialog.editSession_dbg().pendingTimelines()[1].withSegmentType(0, DurationType::Activity);
+
     dialog.done(QDialog::Accepted);
     dialog.saveChanges();
+
+    // A9: all completed rows are finalized on save (1 historical + 2 current
+    // session), and nothing stays unfinalized (there is no ongoing segment).
+    const int expectedRows = 3;
 
     const QString connName = "historydialog_t7_row_count";
     {
@@ -550,17 +564,17 @@ void HistoryDialogTest::test_historydialog_save_keeps_db_rows_for_history_plus_c
         QSqlQuery totalQuery(db);
         QVERIFY(totalQuery.exec("SELECT COUNT(*) FROM durations"));
         QVERIFY(totalQuery.next());
-        QCOMPARE(totalQuery.value(0).toInt(), expectedHistoryRows + expectedCurrentSessionRows);
+        QCOMPARE(totalQuery.value(0).toInt(), expectedRows);
 
         QSqlQuery finalizedQuery(db);
         QVERIFY(finalizedQuery.exec("SELECT COUNT(*) FROM durations WHERE is_finalized = 1"));
         QVERIFY(finalizedQuery.next());
-        QCOMPARE(finalizedQuery.value(0).toInt(), expectedHistoryRows);
+        QCOMPARE(finalizedQuery.value(0).toInt(), expectedRows);
 
         QSqlQuery unfinalizedQuery(db);
         QVERIFY(unfinalizedQuery.exec("SELECT COUNT(*) FROM durations WHERE is_finalized = 0"));
         QVERIFY(unfinalizedQuery.next());
-        QCOMPARE(unfinalizedQuery.value(0).toInt(), expectedCurrentSessionRows);
+        QCOMPARE(unfinalizedQuery.value(0).toInt(), 0);
 
         db.close();
     }
@@ -577,17 +591,21 @@ void HistoryDialogTest::test_historydialog_save_then_crash_reopen_retains_curren
     {
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
         const QDateTime now = QDateTime::currentDateTime();
         tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-15), now.addSecs(-5)));
 
         HistoryDialog dialog(tracker, settings);
+        // A10: an editless OK is a no-op, so make a genuine edit (toggle the
+        // row's type) to exercise the save path.
+        dialog.editSession_dbg().pendingTimelines()[0] =
+            dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause);
         dialog.done(QDialog::Accepted);
         dialog.saveChanges();
 
         // Simulate crash: skip graceful stop/finalize.
-        tracker.forceMode_dbg(Timer::Mode::None);
+        tracker.forceMode_dbg(TimeTracker::Mode::None);
         tracker.sessionState_dbg().segment_id = SegmentId{};
     }
 
@@ -595,15 +613,18 @@ void HistoryDialogTest::test_historydialog_save_then_crash_reopen_retains_curren
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
 
+        // A9: the completed current-session row is finalized on save, so nothing
+        // stays unfinalized (no ongoing segment).
         QVERIFY(db.ensureOpen_dbg());
         QSqlQuery unfinalizedQuery(db.rawDb_dbg());
         QVERIFY(unfinalizedQuery.exec("SELECT COUNT(*) FROM durations WHERE is_finalized = 0"));
         QVERIFY(unfinalizedQuery.next());
-        QCOMPARE(unfinalizedQuery.value(0).toInt(), 1);
-        db.lazyClose_dbg();
+        QCOMPARE(unfinalizedQuery.value(0).toInt(), 0);
+        db.closeConnection_dbg();
 
+        // The finalized row survives the crash + startup recovery.
         SqliteSessionStore db3(settings);
-        Timer reopened(settings, db3);
+        TimeTracker reopened(settings, db3);
         reopened.initializeFromStore();
         auto loaded = db.loadDurations();
         QCOMPARE(loaded.size(), static_cast<size_t>(1));
@@ -619,7 +640,7 @@ void HistoryDialogTest::test_historydialog_save_uses_ongoing_snapshot_endtime_af
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(30);
@@ -628,6 +649,15 @@ void HistoryDialogTest::test_historydialog_save_uses_ongoing_snapshot_endtime_af
     QVERIFY(dialog.editSession_dbg().pendingTimelines()[0].ongoing().has_value());
     const QDateTime snapshotEnd = dialog.editSession_dbg().pendingTimelines()[0].ongoing()->endTime;
     const QDateTime snapshotStart = dialog.editSession_dbg().pendingTimelines()[0].ongoing()->startTime;
+
+    // A10: an editless OK is a no-op, so make a genuine edit (toggle the ongoing
+    // type) to exercise the save path — the end-time refresh still applies.
+    {
+        auto ongoing = dialog.editSession_dbg().pendingTimelines()[0].ongoing().value();
+        ongoing.type = DurationType::Pause;
+        dialog.editSession_dbg().pendingTimelines()[0] =
+            Timeline(dialog.editSession_dbg().pendingTimelines()[0].completed(), ongoing);
+    }
 
     // Wait so the engine's ongoing end-time advances past snapshotEnd
     QTest::qWait(200);
@@ -671,7 +701,7 @@ void HistoryDialogTest::test_historydialog_save_failed_db_replace_keeps_runtime_
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime now = QDateTime::currentDateTime();
     const QDateTime memStart = now.addSecs(-30);
@@ -707,7 +737,7 @@ void HistoryDialogTest::test_historydialog_save_failed_db_replace_keeps_runtime_
 
         // Skip QMessageBox::critical() to avoid offscreen QPA propagateSizeHints() warnings.
         // The save failure is still tested: debugSkipCritical_ suppresses only the dialog pop-up,
-        // saveChanges() still returns false and leaves Timer state unchanged.
+        // saveChanges() still returns false and leaves TimeTracker state unchanged.
         dialog.debugSkipCritical_ = true;
         dialog.done(QDialog::Accepted);
         dialog.saveChanges();
@@ -818,7 +848,7 @@ void HistoryDialogTest::test_splitdialog_setters_affect_types()
 }
 
 // ============================================================================
-// Test R — round-trip type toggle via accept updates Timer
+// Test R — round-trip type toggle via accept updates TimeTracker
 // ============================================================================
 
 void HistoryDialogTest::test_R_round_trip_type_toggle_via_accept()
@@ -828,7 +858,7 @@ void HistoryDialogTest::test_R_round_trip_type_toggle_via_accept()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime now = QDateTime::currentDateTime();
     tracker.sessionState_dbg().durations.push_back(
@@ -846,9 +876,9 @@ void HistoryDialogTest::test_R_round_trip_type_toggle_via_accept()
         dialog.saveChanges();
     }
 
-    // Timer reflects the change
-    QCOMPARE(tracker.getCurrentDurations().completed().size(), static_cast<size_t>(1));
-    QCOMPARE(tracker.getCurrentDurations().completed()[0].type, DurationType::Pause);
+    // TimeTracker reflects the change
+    QCOMPARE(tracker.completedTimeline().completed().size(), static_cast<size_t>(1));
+    QCOMPARE(tracker.completedTimeline().completed()[0].type, DurationType::Pause);
 }
 
 // ============================================================================
@@ -862,7 +892,7 @@ void HistoryDialogTest::test_S_cancel_preserves_state()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime now = QDateTime::currentDateTime();
     tracker.sessionState_dbg().durations.push_back(
@@ -877,9 +907,9 @@ void HistoryDialogTest::test_S_cancel_preserves_state()
         dialog.saveChanges();  // saveChanges checks result() and returns early when Rejected
     }
 
-    // Timer is unchanged — still Activity
-    QCOMPARE(tracker.getCurrentDurations().completed().size(), static_cast<size_t>(1));
-    QCOMPARE(tracker.getCurrentDurations().completed()[0].type, DurationType::Activity);
+    // TimeTracker is unchanged — still Activity
+    QCOMPARE(tracker.completedTimeline().completed().size(), static_cast<size_t>(1));
+    QCOMPARE(tracker.completedTimeline().completed()[0].type, DurationType::Activity);
 }
 
 void HistoryDialogTest::test_saveChanges_deduplicates_cross_bucket_overlaps()
@@ -892,7 +922,7 @@ void HistoryDialogTest::test_saveChanges_deduplicates_cross_bucket_overlaps()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDate today = QDate::currentDate();
     const QDateTime dbStart(today, QTime(10, 0, 0), Qt::UTC);
@@ -909,6 +939,12 @@ void HistoryDialogTest::test_saveChanges_deduplicates_cross_bucket_overlaps()
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
 
     HistoryDialog dialog(tracker, settings);
+
+    // A10: an editless OK is a no-op. Make a genuine same-type edit — split the
+    // memory row into two Activity halves — so the save runs and normalization
+    // still merges the whole overlapping cluster into one 10:00-10:45 row.
+    dialog.applySplit_dbg(0, 0, DurationType::Activity, DurationType::Activity);
+
     dialog.done(QDialog::Accepted);
 
     // Bypass QMessageBox::question() to avoid offscreen QPA propagateSizeHints() warnings.
@@ -939,13 +975,18 @@ void HistoryDialogTest::test_saveChanges_deduplicates_cross_bucket_overlaps()
         QCOMPARE(savedStart.toUTC().time(), QTime(10, 0, 0));
         QCOMPARE(savedEnd.toUTC().time(), QTime(10, 45, 0));
 
-        // The merged row absorbed current-session time, so it must be written as unfinalized
-        // (current-session) in the DB — accepted side effect documented in plan01.md #6.
+        // A9: the merged completed row is finalized on save (nothing unfinalized).
         QSqlQuery unfinalizedQuery(sqlDb);
         QVERIFY(unfinalizedQuery.exec("SELECT COUNT(*) FROM durations WHERE is_finalized = 0 AND type = " +
             QString::number(static_cast<int>(DurationType::Activity))));
         QVERIFY(unfinalizedQuery.next());
-        QCOMPARE(unfinalizedQuery.value(0).toInt(), 1);
+        QCOMPARE(unfinalizedQuery.value(0).toInt(), 0);
+
+        QSqlQuery finalizedQuery(sqlDb);
+        QVERIFY(finalizedQuery.exec("SELECT COUNT(*) FROM durations WHERE is_finalized = 1 AND type = " +
+            QString::number(static_cast<int>(DurationType::Activity))));
+        QVERIFY(finalizedQuery.next());
+        QCOMPARE(finalizedQuery.value(0).toInt(), 1);
 
         sqlDb.close();
     }
@@ -962,13 +1003,16 @@ void HistoryDialogTest::test_saveChanges_deduplicates_cross_bucket_overlaps()
 
 void HistoryDialogTest::test_saveChanges_noop_save_unchanged()
 {
-    // Regression: non-overlapping data should be preserved exactly after a noop save.
+    // A10: an editless OK is a true no-op — it must not rewrite the DB. The
+    // pre-existing history row is left byte-for-byte untouched, and the unpersisted
+    // in-memory session row stays in the live session (it persists on stop, not
+    // via an editless dialog visit).
     resetDatabaseFile();
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDate today = QDate::currentDate();
     const QDateTime dbStart(today, QTime(8, 0, 0), Qt::UTC);
@@ -986,7 +1030,7 @@ void HistoryDialogTest::test_saveChanges_noop_save_unchanged()
     dialog.done(QDialog::Accepted);
     dialog.saveChanges();
 
-    // Both rows should still be present
+    // The DB is unchanged: only the original history Pause row, untouched.
     const QString connName = "historydialog_noop_save";
     {
         QSqlDatabase sqlDb = QSqlDatabase::addDatabase("QSQLITE", connName);
@@ -996,7 +1040,7 @@ void HistoryDialogTest::test_saveChanges_noop_save_unchanged()
         QSqlQuery countQuery(sqlDb);
         QVERIFY(countQuery.exec("SELECT COUNT(*) FROM durations"));
         QVERIFY(countQuery.next());
-        QCOMPARE(countQuery.value(0).toInt(), 2);
+        QCOMPARE(countQuery.value(0).toInt(), 1);
 
         QSqlQuery pauseQuery(sqlDb);
         QVERIFY(pauseQuery.exec("SELECT start_utc, end_utc FROM durations WHERE type = " +
@@ -1005,16 +1049,53 @@ void HistoryDialogTest::test_saveChanges_noop_save_unchanged()
         QCOMPARE(QDateTime::fromString(pauseQuery.value(0).toString(), Qt::ISODateWithMs).toUTC().time(), QTime(8, 0, 0));
         QCOMPARE(QDateTime::fromString(pauseQuery.value(1).toString(), Qt::ISODateWithMs).toUTC().time(), QTime(8, 30, 0));
 
-        QSqlQuery actQuery(sqlDb);
-        QVERIFY(actQuery.exec("SELECT start_utc, end_utc FROM durations WHERE type = " +
-            QString::number(static_cast<int>(DurationType::Activity))));
-        QVERIFY(actQuery.next());
-        QCOMPARE(QDateTime::fromString(actQuery.value(0).toString(), Qt::ISODateWithMs).toUTC().time(), QTime(9, 0, 0));
-        QCOMPARE(QDateTime::fromString(actQuery.value(1).toString(), Qt::ISODateWithMs).toUTC().time(), QTime(9, 30, 0));
-
         sqlDb.close();
     }
     QSqlDatabase::removeDatabase(connName);
+
+    // The in-memory session row is retained in the live session (unpersisted).
+    QCOMPARE(tracker.sessionState_dbg().durations.size(), static_cast<size_t>(1));
+    QCOMPARE(tracker.sessionState_dbg().durations[0].startTime.toUTC().time(), QTime(9, 0, 0));
+}
+
+// A10: an editless OK must be a true no-op. Two adjacent same-type DB rows with
+// a sub-500 ms gap (which normalization would merge) must survive an editless OK
+// byte-for-byte — no merge, no delete-all rewrite.
+void HistoryDialogTest::test_saveChanges_editless_ok_leaves_mergeable_rows_untouched()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 30));
+    SqliteSessionStore db(settings);
+    TimeTracker tracker(settings, db);
+
+    // Two adjacent Activity rows on a past day with a 100 ms gap (< 500 ms).
+    const QDate day = QDate::currentDate().addDays(-1);
+    const QDateTime aStart(day, QTime(10, 0, 0, 0), Qt::UTC);
+    const QDateTime aEnd(day, QTime(10, 0, 5, 0), Qt::UTC);
+    const QDateTime bStart(day, QTime(10, 0, 5, 100), Qt::UTC); // 100 ms gap
+    const QDateTime bEnd(day, QTime(10, 0, 10, 0), Qt::UTC);
+    std::deque<TimeDuration> dbRows;
+    dbRows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, aStart, aEnd));
+    dbRows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, bStart, bEnd));
+    QVERIFY(tracker.replaceAll(Timeline(dbRows, std::nullopt), Timeline({}, std::nullopt)).ok());
+
+    HistoryDialog dialog(tracker, settings);
+    dialog.done(QDialog::Accepted);
+    // If the no-op guard were absent, saveChanges() would normalize and merge,
+    // prompting for confirmation; supply "Yes" so that path would proceed.
+    dialog.debugOverlapAnswer_ = QMessageBox::Yes;
+    dialog.saveChanges();
+
+    // Both rows must survive byte-for-byte (no merge occurred).
+    SqliteSessionStore verify(settings);
+    auto loaded = verify.loadDurations();
+    QCOMPARE(loaded.size(), static_cast<size_t>(2));
+    QCOMPARE(loaded.durations[0].startTime.toUTC(), aStart);
+    QCOMPARE(loaded.durations[0].endTime.toUTC(), aEnd);
+    QCOMPARE(loaded.durations[1].startTime.toUTC(), bStart);
+    QCOMPARE(loaded.durations[1].endTime.toUTC(), bEnd);
 }
 
 void HistoryDialogTest::test_H3_ongoing_type_edit_preserved_when_engine_stops()
@@ -1027,7 +1108,7 @@ void HistoryDialogTest::test_H3_ongoing_type_edit_preserved_when_engine_stops()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(20);
@@ -1070,7 +1151,7 @@ void HistoryDialogTest::test_H4_overlap_cancel_aborts_save()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDate today = QDate::currentDate();
     const QDateTime dbStart(today, QTime(11, 0, 0), Qt::UTC);
@@ -1105,7 +1186,7 @@ void HistoryDialogTest::test_H4_overlap_cancel_aborts_save()
     }
     QSqlDatabase::removeDatabase(connName);
 
-    // Timer session unchanged: still has 1 memory row
+    // TimeTracker session unchanged: still has 1 memory row
     QCOMPARE(tracker.sessionState_dbg().durations.size(), static_cast<size_t>(1));
 }
 
@@ -1119,7 +1200,7 @@ void HistoryDialogTest::test_H2_midnight_crossing_shown_on_both_pages()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDate yesterday = QDate::currentDate().addDays(-1);
     const QDateTime segStart(yesterday, QTime(23, 30, 0));
@@ -1198,7 +1279,7 @@ void HistoryDialogTest::test_H14_cross_midnight_totals_and_counts()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDate yesterday = QDate::currentDate().addDays(-1);
     const QDateTime segStart(yesterday, QTime(23, 50, 0), Qt::LocalTime);
@@ -1270,7 +1351,7 @@ void HistoryDialogTest::test_H6_split_dialog_preset_from_source_row_type()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime now = QDateTime::currentDateTime();
     // Row 0 is Pause, row 1 is Activity — exercise both directions of the preset.

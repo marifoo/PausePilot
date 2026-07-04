@@ -3,9 +3,11 @@
 
 #include <QObject>
 #include <QElapsedTimer>
+#include <QDateTime>
 #include <deque>
 #include <optional>
 #include <memory>
+#include <functional>
 #include <QString>
 #include "settings.h"
 #include "types.h"
@@ -24,10 +26,19 @@ class LockStateWatcher : public QObject
 
 private:
 	const Settings & settings_;
-	QElapsedTimer lock_timer_;
+	/// Wall-clock instant of the most recent Lock, captured via now_provider_.
+	/// Recorded here as the injectable wall-clock lock-time source (the A2 seam).
+	QDateTime lock_time_;
+	/// Injectable lock-state probe. Defaults to isSessionLocked(); tests stub it
+	/// to script lock/unlock samples without touching DBus/WTS.
+	std::function<LockQueryResult()> query_provider_;
+	/// Injectable wall-clock source. Defaults to QDateTime::currentDateTime.
+	std::function<QDateTime()> now_provider_;
 	std::deque<LockQueryResult> lock_state_buffer_;
-	const std::deque<LockQueryResult> buffer_for_lock;
-	const std::deque<LockQueryResult> buffer_for_unlock;
+	/// Debounced lock level. Flips to true (Locked) only when the last 3 samples
+	/// are all Locked, and back to false when the last 3 are all Unlocked; the
+	/// flip is what emits Lock/Unlock. Starts Unlocked to match the initial buffer.
+	bool debounced_locked_ = false;
 
 #ifdef Q_OS_LINUX
 	enum class LinuxLockMethod {
@@ -55,10 +66,16 @@ public:
     LockEvent determineLockEvent_dbg(LockQueryResult result) { return determineLockEvent(result); }
     /// Exposes the long-lock maturation check for direct unit testing.
     bool shouldEmitLongLock_dbg(LockQueryResult latest, qint64 elapsedMs) const { return shouldEmitLongLock(latest, elapsedMs); }
+    /// Stubs the lock-state probe so update() can be driven with scripted samples.
+    void setQueryProvider_dbg(std::function<LockQueryResult()> provider) { query_provider_ = std::move(provider); }
+    /// Injects a controllable wall-clock source for the lock-time recording.
+    void setNowProvider_dbg(std::function<QDateTime()> provider) { now_provider_ = std::move(provider); }
+    /// Returns the wall-clock instant recorded at the last Lock (invalid if none).
+    QDateTime lockTime_dbg() const { return lock_time_; }
 #endif
 
 signals:
-	void desktopLockEvent(LockEvent event);
+	void desktopLockEvent(LockEvent event, const QDateTime& lockTime);
 
 public slots:
 	void update();

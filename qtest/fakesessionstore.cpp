@@ -11,6 +11,7 @@
  */
 
 #include "fakesessionstore.h"
+#include <algorithm>
 
 FakeSessionStore::FakeSessionStore()
     : startupRecoveryResult{}
@@ -80,7 +81,7 @@ SessionStoreResult FakeSessionStore::saveCheckpoint(DurationType type, const QDa
             }
         }
         // A segment_id that was finalized via commitSession must not also appear as a
-        // checkpoint (that would mean Timer submitted the same id to two separate paths).
+        // checkpoint (that would mean TimeTracker submitted the same id to two separate paths).
         Q_ASSERT_X(!committedSegmentIds.contains(segmentId.toString()),
                    "FakeSessionStore::saveCheckpoint",
                    "UNIQUE(segment_id) violation: segment_id already committed via commitSession");
@@ -88,6 +89,20 @@ SessionStoreResult FakeSessionStore::saveCheckpoint(DurationType type, const QDa
         savedCheckpoints.push_back({type, startTime, endTime, segmentId});
     }
     return saveCheckpointResult;
+}
+
+SessionStoreResult FakeSessionStore::discardCheckpoint(const SegmentId& segmentId)
+{
+    callLog.append("discardCheckpoint");
+    if (segmentId.isEmpty()) {
+        return SessionStoreResult::callerBug("empty segment_id");
+    }
+    // Mirror deleting the unfinalized rows: drop any recorded checkpoints for this id.
+    savedCheckpoints.erase(
+        std::remove_if(savedCheckpoints.begin(), savedCheckpoints.end(),
+                       [&](const CheckpointRecord& cp) { return cp.segmentId == segmentId; }),
+        savedCheckpoints.end());
+    return SessionStoreResult::success();
 }
 
 SchemaStatus FakeSessionStore::checkSchemaOnStartup()
