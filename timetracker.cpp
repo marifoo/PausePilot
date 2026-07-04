@@ -4,7 +4,7 @@
  * Architecture:
  * - State machine with three modes: Activity, Pause, None.
  * - Completed segments stored in session_.durations (deque); ongoing
- *   segment tracked by timer_.elapsed() and session_.segment_start_time.
+ *   segment tracked via wall-clock times (session_.segment_start_time and now).
  * - Checkpoints persist the ongoing Activity segment every 5 min.
  * - Thread-safe via QRecursiveMutex; per-session mutable state grouped
  *   in SessionState with explicit logged transitions.
@@ -775,6 +775,7 @@ void TimeTracker::useTimerViaLockEvent(LockEvent event, const QDateTime& lockTim
         if (dialog_open_) {
             // Unlock supersedes any pending LongOngoingLock
             pending_lock_event_ = LockEvent::None;
+            pending_lock_time_ = QDateTime();
             Logger::Log("[LOCK] suspended during history edit (Unlock)");
             return;
         }
@@ -787,6 +788,7 @@ void TimeTracker::useTimerViaLockEvent(LockEvent event, const QDateTime& lockTim
     if (event == LockEvent::LongOngoingLock) {
         if (dialog_open_) {
             pending_lock_event_ = LockEvent::LongOngoingLock;
+            pending_lock_time_ = lockTime;
             Logger::Log("[LOCK] suspended during history edit (LongOngoingLock)");
             return;
         }
@@ -1302,10 +1304,13 @@ void TimeTracker::endExclusiveEdit()
         stopTimer(now_provider_(), StopReason::MidnightScheduled);
     } else if (pending_lock_event_ == LockEvent::LongOngoingLock) {
         pending_lock_event_ = LockEvent::None;
+        QDateTime lockTime = pending_lock_time_;
+        pending_lock_time_ = QDateTime();
         Logger::Log("[LOCK] Replaying deferred LongOngoingLock after dialog close");
-        useTimerViaLockEvent(LockEvent::LongOngoingLock);
+        useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
     } else {
         pending_lock_event_ = LockEvent::None;
+        pending_lock_time_ = QDateTime();
     }
     // Restart checkpoint timer only after deferred events are replayed, so
     // stopTimer/backpauseTimer can set mode_ before we decide whether to arm.

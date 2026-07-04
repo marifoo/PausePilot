@@ -159,6 +159,7 @@ private:
     bool pending_midnight_stop_ = false;
     bool shutdown_called_ = false;  // Set once shutdown() has torn down the engine.
     LockEvent pending_lock_event_ = LockEvent::None;
+    QDateTime pending_lock_time_;   // Lock instant for deferred LongOngoingLock replay
     SessionStore& db_;
     mutable QRecursiveMutex mutex_;  // Protects state transitions from concurrent access
     QTimer checkpointTimer_;  // TimeTracker for periodic checkpoint saving

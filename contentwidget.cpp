@@ -133,7 +133,7 @@ void ContentWidget::setupButtonRows()
 	pintotop_button_->setToolTip("Keep this Window in Foreground");
 	autopause_button_ = new QPushButton("Auto-Pause");
 	autopause_button_->setFont(button_font);
-	autopause_tooltip1_ = "min after locking the PC:\nPause the TimeTracker and count these ";
+	autopause_tooltip1_ = "min after locking the PC:\nPause the Timer and count these ";
 	autopause_tooltip2_ = "min retroactively as a Pause";
 	autopause_button_->setToolTip(settings_.getAutopauseThresholdMinString() + autopause_tooltip1_ + settings_.getAutopauseThresholdMinString() + autopause_tooltip2_);
 	optionbutton_row_->addWidget(pintotop_button_);

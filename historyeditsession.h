@@ -51,7 +51,7 @@ public:
      */
     struct SavePayload {
         Timeline historyTimeline;        ///< finalized rows (non-current-session)
-        Timeline sessionTimeline;        ///< rows to save to DB as unfinalized (current-session + ongoing)
+        Timeline sessionTimeline;        ///< rows to save to DB as unfinalized (ongoing only)
         Timeline memoryTimeline;         ///< rows to commit into TimeTracker's live session (current-session + ongoing)
         bool needsMergeConfirmation;     ///< true iff normalization merged overlapping rows
     };
