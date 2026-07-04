@@ -2528,6 +2528,52 @@ void DatabaseTest::test_recoverStartupCheckpoints_notifies_when_marker_covers_on
 }
 
 /**
+ * A14: a backward clock jump between the checkpoint write and the restart
+ * makes `endTime.msecsTo(now)` negative, defeating the >24h stale check and
+ * letting a future-dated orphan pass through to be finalized. Seed an orphan
+ * whose endTime is well past `now` and confirm recoverStartupCheckpoints()
+ * drops it instead of resurrecting it.
+ */
+void DatabaseTest::test_recoverStartupCheckpoints_drops_future_dated_orphan()
+{
+    // Arrange: fresh DB with one orphan whose endTime is 2 hours after `now`
+    // (simulating a clock that jumped backward after the checkpoint was written).
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QVERIFY(manager.ensureOpen_dbg());
+
+    const QDateTime now         = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime futureStart = now.addSecs(60 * 60);       // now + 1h
+    const QDateTime futureEnd   = now.addSecs(2 * 60 * 60);   // now + 2h
+    const qint64 orphanId = seedOrphanRow(manager, futureStart, futureEnd);
+    QVERIFY(orphanId > 0);
+    manager.lazyClose_dbg();
+
+    // Act: recover at `now`, which is before the orphan's endTime.
+    StartupRecoveryResult res = manager.recoverStartupCheckpoints(now);
+
+    // Assert: recovery succeeded, but the future-dated orphan was dropped, not finalized.
+    // Outright drops are deleted from the table entirely (see
+    // reconcileUnfinalizedCheckpoints), so no row survives with is_finalized == 0.
+    QVERIFY(res.ok);
+    QCOMPARE(res.finalized_count, 0);
+    QCOMPARE(res.dropped_count, 1);
+
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery checkOrphan(manager.rawDb_dbg());
+    checkOrphan.prepare("SELECT COUNT(*) FROM durations WHERE id = :id");
+    checkOrphan.bindValue(":id", orphanId);
+    QVERIFY(checkOrphan.exec());
+    QVERIFY(checkOrphan.next());
+    QCOMPARE(checkOrphan.value(0).toInt(), 0);
+    manager.lazyClose_dbg();
+}
+
+/**
  * A12: an empty segment_id row must be treated as a corrupt row at load —
  * skipped (skipped++) rather than passed to SegmentId::fromString(), which
  * asserts non-empty in debug builds.  The same guard protects orphan loading.

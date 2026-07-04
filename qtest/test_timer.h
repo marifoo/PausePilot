@@ -129,6 +129,10 @@ private slots:
     void test_commitEditedTimeline_clears_anchor_when_no_ongoing();
     void test_commitEditedTimeline_clears_anchor_when_no_ongoing_from_pause();
 
+    // A14: commitEditedTimeline must refuse to half-adopt an ongoing segment
+    // while mode_ == None (engine already stopped).
+    void test_commitEditedTimeline_ignores_ongoing_when_already_stopped();
+
     // QF1: signal contract — started/paused/modeChanged emit counts
     void test_QF1_explicit_pause_emits_paused_not_modeChanged();
     void test_QF1_explicit_resume_emits_started_not_modeChanged();

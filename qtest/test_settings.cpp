@@ -85,3 +85,23 @@ void SettingsTest::test_settings_defaults_and_bounds()
     Settings capped(settingsPath);
     QCOMPARE(capped.getCheckpointIntervalMsec(), convMinToMsec(60));
 }
+
+// A14: boot_time_sec_ is the only numeric key without a qBound; a garbage/huge
+// value must be capped rather than silently voiding the boot credit.
+void SettingsTest::test_settings_boot_time_sec_bound()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = QDir(tempDir.path()).filePath("user-settings.ini");
+
+    // Arrange: seed a garbage (way-too-large) boot_time_seconds value.
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/boot_time_seconds", 999999u);
+    writer.sync();
+
+    // Act: red before the fix — getBootTimeSec() returned 999999 unbounded.
+    Settings capped(settingsPath);
+
+    // Assert: value is capped at 3600 seconds (1 hour).
+    QCOMPARE(capped.getBootTimeSec(), 3600u);
+}

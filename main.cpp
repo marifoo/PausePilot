@@ -1,6 +1,7 @@
 #include <QApplication>
 #include <QDebug>
 #include <QEvent>
+#include <QLockFile>
 #include <QMessageBox>
 #include <QStyleFactory>
 #include <QTimer>
@@ -97,6 +98,25 @@ int main(int argc, char *argv[])
 
 	QApplication application(argc, argv);
 	application.setStyle(QStyleFactory::create("Fusion"));
+
+	// Refuse a second instance: two instances racing recoverStartupCheckpoints()
+	// against each other's live checkpoint row (and createBackup()'s close-copy-
+	// reopen against a concurrently-written file) can corrupt the database.
+	// QLockFile also detects and clears a stale lock left by a crashed process,
+	// so a crash does not lock the user out permanently.
+	QLockFile instanceLock(AppPaths::instanceLockFile());
+	if (!instanceLock.tryLock(100)) {
+		if (instanceLock.error() == QLockFile::LockFailedError) {
+			QMessageBox::critical(nullptr, "µTimer Already Running",
+				"Another instance of µTimer is already running.\n\n"
+				"Please close it before starting a new one.");
+			return 1;
+		}
+		// Any other error (e.g. the app directory is not writable) is not a
+		// second-instance conflict -- fall through and let the existing
+		// DB-writability check in checkSchemaOnStartup() report it accurately.
+		qWarning() << "Could not create instance lock file, error code:" << instanceLock.error();
+	}
 
 	QTimer timer;
 

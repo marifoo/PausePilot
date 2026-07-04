@@ -23,6 +23,11 @@ numbers honest without you having to remember to press anything.
 
 ## Install
 
+µTimer is portable: its database, log, and settings files always live next
+to the executable. Run it from a folder you can write to (your user profile,
+Desktop, a USB stick, etc.) — **not** `Program Files`, `/usr/bin`, or another
+admin-protected location, or it will fail to start.
+
 ### Windows
 
 Grab the latest pre-built release from the

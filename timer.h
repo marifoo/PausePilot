@@ -310,6 +310,10 @@ public:
      *     or paused() so the UI reflects the new mode.
      *   - ongoing absent, mode_ was not None: emits stopped(EditApplied) so
      *     the tray/UI learns that tracking ended due to the edit.
+     *   - ongoing present but mode_ is already None: refused. Adopting the
+     *     segment identity would leave segment_id set while the engine stays
+     *     stopped — a state SessionState documents as impossible. The
+     *     ongoing segment is ignored; no signal emitted.
      *   - no mode change: no signal emitted.
      *
      * Returns EditCommitResult::failure if the checkpoint write fails;

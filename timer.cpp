@@ -927,7 +927,7 @@ Timer::EditCommitResult Timer::commitEditedTimeline(const Timeline& edited)
     session_.clearUnsaved();
 
     bool checkpointOk = true;
-    if (ongoing.has_value()) {
+    if (ongoing.has_value() && mode_ != Mode::None) {
         const TimeDuration& seg = ongoing.value();
         session_.adoptOngoingSegment(seg);
 
@@ -935,7 +935,7 @@ Timer::EditCommitResult Timer::commitEditedTimeline(const Timeline& edited)
         // the next checkpoint/stop reflect the user's choice rather than the
         // pre-edit mode. (adoptOngoingSegment intentionally ignores type.)
         const Mode desired = (seg.type == DurationType::Activity) ? Mode::Activity : Mode::Pause;
-        if (mode_ != Mode::None && mode_ != desired) {
+        if (mode_ != desired) {
             mode_ = desired;
             if (desired == Mode::Activity) {
                 checkpointTimer_.start();   // checkpoints run only in Activity
@@ -947,6 +947,13 @@ Timer::EditCommitResult Timer::commitEditedTimeline(const Timeline& edited)
         }
 
         checkpointOk = maybeReanchorCheckpoint(seg);
+    } else if (ongoing.has_value()) {
+        // mode_ == None: the engine is stopped. Adopting the segment identity
+        // here would set segment_id/segment_start_time while mode_ == None —
+        // the state SessionState documents as impossible (segment_id is
+        // "Empty when the timer is stopped"). Refuse the half-adopt: the
+        // ongoing segment is ignored and the engine stays stopped.
+        Logger::Log("[HISTORY] commitEditedTimeline: ignoring edited ongoing segment; engine is already stopped (mode_ == None)");
     } else if (mode_ != Mode::None) {
         // The edited timeline has no ongoing segment: the engine must stop.
         // Clear the anchor so no stale segment_id remains after the commit.

@@ -49,6 +49,12 @@ namespace {
 const char* kLastCleanShutdownKey = "last_clean_shutdown";
 constexpr qint64 kMinRecoverableOrphanDurationMs = 1000;
 constexpr qint64 kOrphanStaleAgeMs = 24LL * 60LL * 60LL * 1000LL;
+// A backward clock jump can make an orphan's endTime land after "now" at
+// recovery time (endTime.msecsTo(now) negative, defeating the stale check
+// below). A small slack tolerates normal timestamp/tick granularity without
+// misclassifying genuinely-fresh orphans; anything further in the future is
+// a clock-jump artifact and must be dropped, not resurrected.
+constexpr qint64 kOrphanFutureSlackMs = 60LL * 1000LL;
 
 static QString toUtcIso(const QDateTime& dt)
 {
@@ -1608,8 +1614,12 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
     for (const auto& orphan : orphans) {
         const bool tooShort = orphan.duration < kMinRecoverableOrphanDurationMs;
         const bool stale = orphan.endTime.isValid() && (orphan.endTime.msecsTo(now) > kOrphanStaleAgeMs);
+        // A backward clock jump since the checkpoint was written can leave the
+        // orphan's endTime after "now" (msecsTo(now) negative, passing the
+        // stale check above). Drop future-dated orphans instead of resurrecting them.
+        const bool futureDated = orphan.endTime.isValid() && (now.msecsTo(orphan.endTime) > kOrphanFutureSlackMs);
 
-        if (tooShort || stale) {
+        if (tooShort || stale || futureDated) {
             dropIds.push_back(orphan.id);
         } else {
             toFinalize.push_back(orphan);

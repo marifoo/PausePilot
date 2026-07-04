@@ -29,6 +29,12 @@ inline QString settingsFile()
     return QDir(dataDirectory()).filePath("user-settings.ini");
 }
 
+/// Single-instance guard file (see QLockFile in main()).
+inline QString instanceLockFile()
+{
+    return QDir(dataDirectory()).filePath("uTimer.lock");
+}
+
 } // namespace AppPaths
 
 #endif // APPPATHS_H

@@ -128,6 +128,9 @@ private slots:
     void test_recoverStartupCheckpoints_notifies_when_marker_covers_only_older_orphan();
     // A12: empty segment_id rows are treated as corrupt at load
     void test_loadDurations_skips_empty_segment_id_row();
+
+    // A14: a backward clock jump must not resurrect a future-dated orphan
+    void test_recoverStartupCheckpoints_drops_future_dated_orphan();
 };
 
 #endif // TEST_DATABASE_H

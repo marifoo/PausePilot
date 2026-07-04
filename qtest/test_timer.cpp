@@ -978,6 +978,10 @@ void TimerTest::test_startTimer_drops_cross_midnight_boot_time_entry()
 {
     // A boot_time_sec large enough that bootStart falls on the previous day.
     // addDuration should silently discard it and the user still enters Activity.
+    //
+    // A14: boot_time_sec_ is now capped at 3600s (1h), so the fake clock is
+    // parked shortly after midnight (00:30) rather than relying on a
+    // multi-hour boot time to reach across the day boundary.
 
     // Arrange
     resetDatabaseFile();
@@ -985,17 +989,19 @@ void TimerTest::test_startTimer_drops_cross_midnight_boot_time_entry()
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    // Use a large boot time that is guaranteed to reach back across midnight
-    writer.setValue("uTimer/boot_time_seconds", 90000); // 25 hours
+    // Boot time at the (post-A14) cap; combined with "now" just after midnight
+    // below, bootStart still lands on the previous day.
+    writer.setValue("uTimer/boot_time_seconds", 3600); // 1 hour (capped max)
     writer.sync();
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
     Timer tracker(settings, db);
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(0, 30, 0), Qt::LocalTime));
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     // Act
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
 
     // Assert: cross-midnight boot entry was dropped; no completed durations
     // (the ongoing segment is fresh from startTimer)
@@ -2023,6 +2029,55 @@ void TimerTest::test_commitEditedTimeline_clears_anchor_when_no_ongoing_from_pau
     QCOMPARE(stoppedSpy.count(), 1);
     QCOMPARE(stoppedSpy.first().first().value<Timer::StopReason>(),
              Timer::StopReason::EditApplied);
+    QCOMPARE(startedSpy.count(), 0);
+    QCOMPARE(pausedSpy.count(), 0);
+}
+
+// A14: commitEditedTimeline must not half-adopt an ongoing segment while the
+// engine is already stopped (mode_ == None). Adopting segment_id/start time
+// without also flipping mode_ would leave a state SessionState documents as
+// impossible (segment_id "Empty when the timer is stopped"). The fix refuses
+// the ongoing entirely: engine stays stopped, anchor stays clear, no signal.
+void TimerTest::test_commitEditedTimeline_ignores_ongoing_when_already_stopped()
+{
+    // Arrange: engine never started -- mode_ == None, no segment anchor.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    Timer tracker(settings, fakeDb);
+
+    const QDateTime start(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(start);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    QVERIFY(tracker.isStopped());
+    QVERIFY(tracker.sessionState_dbg().segment_id.isEmpty());
+
+    // Build an edited timeline with an ongoing segment (as if HistoryDialog
+    // still held one from before the engine stopped), but mode_ is None now.
+    TimeDuration editedOngoing = TimeDuration::fromLiveSession(
+        DurationType::Activity, start, start.addSecs(600));
+
+    QSignalSpy stoppedSpy(&tracker, &Timer::stopped);
+    QSignalSpy startedSpy(&tracker, &Timer::started);
+    QSignalSpy pausedSpy(&tracker, &Timer::paused);
+
+    // Act: commit while mode_ == None.
+    const auto result = tracker.commitEditedTimeline(Timeline({}, editedOngoing));
+
+    // Assert: commit still reports success; the ongoing segment is ignored.
+    QVERIFY(result.ok);
+    QVERIFY2(tracker.isStopped(), "engine must remain stopped, not half-started");
+    QVERIFY2(tracker.sessionState_dbg().segment_id.isEmpty(),
+             "segment_id must stay empty -- refused, not half-adopted");
+    QVERIFY2(!tracker.sessionState_dbg().segment_start_time.isValid(),
+             "segment_start_time must stay invalid -- refused, not half-adopted");
+    QVERIFY2(!tracker.getOngoingDuration().has_value(),
+             "getOngoingDuration() must return nullopt: mode_ == None");
+
+    // No mode-transition signal fires: the engine state did not change.
+    QCOMPARE(stoppedSpy.count(), 0);
     QCOMPARE(startedSpy.count(), 0);
     QCOMPARE(pausedSpy.count(), 0);
 }
