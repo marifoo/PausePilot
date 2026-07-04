@@ -2173,3 +2173,34 @@ void TimerTest::test_A3_watchdog_discard_deletes_checkpoint_row()
     // resurrect and nothing for the stale policy to silently drop.
     QCOMPARE(countUnfinalizedRows(db), 0);
 }
+
+void TimerTest::test_A4_shutdown_called_cleared_on_fresh_session_start()
+{
+    // Arrange: timer with fake clock; call shutdown() to set shutdown_called_=true.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore db;
+    Timer tracker(settings, db);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Act: start timer, stop it, then call shutdown().
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.isStopped());
+
+    // Verify the flag is set after shutdown.
+    tracker.shutdown();
+    QVERIFY(tracker.wasShutDown());
+
+    // Act: start a fresh session (None → Activity), which should emit started(false).
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+
+    // Assert: shutdown_called_ is now cleared, so wasShutDown() returns false.
+    QVERIFY(!tracker.wasShutDown());
+}

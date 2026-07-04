@@ -20,6 +20,18 @@ private slots:
 
     // Test J: pump actually drains queued events
     void test_J_pump_drains_queued_events();
+
+    // Test K: reset() re-arms the guard so a second shutdown flushes again (A4)
+    void test_K_reset_allows_second_shutdown();
+
+    // Test L: a re-entrant run() dispatched inside the pump flushes only once (A14)
+    void test_L_nested_run_during_pump_flushes_once();
+
+    // Test M: timer already stopped → coordinator writes the marker after flush
+    void test_M_marker_after_flush_when_already_stopped();
+
+    // Test N: a START click during the pump is re-stopped (A14 pump re-entrancy)
+    void test_N_restart_during_pump_is_restopped();
 };
 
 #endif // TEST_SHUTDOWNCOORDINATOR_H

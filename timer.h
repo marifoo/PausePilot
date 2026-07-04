@@ -157,6 +157,7 @@ private:
     bool is_locked_;     // Track if desktop is currently locked (to prevent checkpoints while locked)
     bool dialog_open_;   // True while HistoryDialog is open (suspends mutation)
     bool pending_midnight_stop_ = false;
+    bool shutdown_called_ = false;  // Set once shutdown() has torn down the engine.
     LockEvent pending_lock_event_ = LockEvent::None;
     SessionStore& db_;
     mutable QRecursiveMutex mutex_;  // Protects state transitions from concurrent access
@@ -254,6 +255,10 @@ public:
     bool isActive() const  { QMutexLocker lk(&mutex_); return mode_ == Mode::Activity; }
     bool isPaused() const  { QMutexLocker lk(&mutex_); return mode_ == Mode::Pause; }
     bool isStopped() const { QMutexLocker lk(&mutex_); return mode_ == Mode::None; }
+    /// True once shutdown() has run. Distinct from isStopped(): a normally
+    /// stopped engine is still editable, but a shut-down engine must not accept
+    /// a HistoryDialog save (it would re-write finalized rows as unfinalized).
+    bool wasShutDown() const { QMutexLocker lk(&mutex_); return shutdown_called_; }
 
     /**
      * Result returned by commitEditedTimeline().

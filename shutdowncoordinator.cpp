@@ -19,12 +19,22 @@ void ShutdownCoordinator::pumpEvents(int budgetMs)
         QCoreApplication::processEvents(QEventLoop::AllEvents, 30);
 }
 
+void ShutdownCoordinator::reset()
+{
+    Logger::Log("[TIMER] Shutdown guard reset (OS shutdown cancelled)");
+    shutdown_completed_ = false;
+}
+
 void ShutdownCoordinator::run(ShutdownMode mode)
 {
     if (shutdown_completed_) {
         Logger::Log("[TIMER] Shutdown already completed, skipping");
         return;
     }
+    // Set the guard immediately after the check: a re-entrant run() dispatched
+    // inside pumpEvents(150) below must be short-circuited by the guard above,
+    // otherwise it would flush (and pump) a second time.
+    shutdown_completed_ = true;
 
     Logger::Log(QString("[TIMER] Shutdown requested (mode=%1)")
                 .arg(mode == ShutdownMode::Direct ? "Direct" : "DrainEvents"));
@@ -35,6 +45,13 @@ void ShutdownCoordinator::run(ShutdownMode mode)
         // Normal shutdown: pump the event loop so connected signals
         // (GUI sync, checkpoint flush) can fire before we proceed.
         pumpEvents(150);
+        // Pump re-entrancy: a queued START click dispatched inside pumpEvents()
+        // can restart the timer after shutdown(). Re-check and re-stop so we
+        // never leave a live segment behind after shutdown.
+        if (!timetracker_.isStopped()) {
+            Logger::Log("[TIMER] Timer restarted during shutdown pump; re-stopping");
+            result = timetracker_.shutdown();
+        }
     }
 
     Logger::Log("[DB] Flushing database to disk before shutdown");
@@ -55,6 +72,4 @@ void ShutdownCoordinator::run(ShutdownMode mode)
     } else {
         Logger::Log("[TIMER] Shutdown completed successfully");
     }
-
-    shutdown_completed_ = true;
 }

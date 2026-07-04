@@ -121,6 +121,14 @@ bool HistoryDialog::saveChanges()
         return false;
     }
 
+    // If the engine was shut down while this dialog stayed open (e.g. a
+    // cancelled OS shutdown ran the save path), a save here would re-write the
+    // now-finalized rows as unfinalized into a stopped engine. Refuse it.
+    if (timetracker_.wasShutDown()) {
+        Logger::Log("[HISTORY] Engine was shut down; discarding changes");
+        return false;
+    }
+
     // Step 1: Refresh the ongoing segment's end-time from the engine.
     session_.refreshOngoing(timetracker_);
 

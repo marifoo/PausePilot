@@ -40,6 +40,10 @@ MainWin::MainWin(Settings& settings, Timer& timetracker, SessionStore& db,
 	setWindowFlags(windowFlags() &(~Qt::WindowMaximizeButtonHint));
 
 	connect(health_monitor_, &HealthMonitor::warningTriggered, this, &MainWin::showMsgBox);
+
+	// Re-arm the health warnings when a session ends so they can fire again in
+	// the next session (at most once per session, not once per app lifetime).
+	connect(&timetracker_, &Timer::stopped, health_monitor_, &HealthMonitor::reset);
 }
 
 void MainWin::setupCentralWidget(Settings& settings, Timer& timetracker)
@@ -240,9 +244,13 @@ bool MainWin::nativeEvent([[maybe_unused]]const QByteArray& eventType, void* mes
 			// Windows is actually shutting down - ensure timer is stopped
 			// shutdown() guard will skip if already done in WM_QUERYENDSESSION
 			shutdown(ShutdownMode::Direct);
+		} else {
+			// Shutdown was cancelled. WM_QUERYENDSESSION already ran the save
+			// path and consumed the shutdown guard; reset it so the next real
+			// shutdown runs the full save path again (the data saved earlier
+			// stays valid).
+			shutdown_coordinator_.reset();
 		}
-		// If session_ending is false, shutdown was cancelled - nothing to do
-		// (data was already saved in WM_QUERYENDSESSION, which is fine)
 
 		*result = 0;
 		return true;

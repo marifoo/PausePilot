@@ -149,6 +149,9 @@ private slots:
     // A3: the cross-midnight watchdog discard deletes the in-flight segment's
     // unfinalized checkpoint row so it cannot be resurrected or dropped as stale.
     void test_A3_watchdog_discard_deletes_checkpoint_row();
+
+    // A4: shutdown_called_ is cleared on fresh session start to prevent silent data loss
+    void test_A4_shutdown_called_cleared_on_fresh_session_start();
 };
 
 #endif // TEST_TIMER_H

@@ -18,6 +18,11 @@ public:
 
     void run(ShutdownMode mode = ShutdownMode::DrainEvents);
 
+    /// Re-arms the shutdown guard so a later run() executes the full save path
+    /// again. Called when an OS shutdown is cancelled (Windows WM_ENDSESSION
+    /// with wParam=FALSE) after WM_QUERYENDSESSION already ran the save path.
+    void reset();
+
 private:
     void pumpEvents(int budgetMs);
 

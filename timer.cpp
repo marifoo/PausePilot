@@ -526,6 +526,7 @@ void Timer::startTimer(const QDateTime& now)
         }
         day_boundary_watcher_.armScheduledStop(now);
         Logger::Log("[TIMER] >> Timer started");
+        shutdown_called_ = false;
         emit started(false);
         return;
     }
@@ -1031,6 +1032,7 @@ bool Timer::canMarkCleanShutdown() const
 Timer::ShutdownResult Timer::shutdown()
 {
     QMutexLocker locker(&mutex_);
+    shutdown_called_ = true;
     bool stopCalled = false;
     if (mode_ != Mode::None) {
         stopTimer(now_provider_(), StopReason::Shutdown);
