@@ -2479,3 +2479,117 @@ void DatabaseTest::test_recoverStartupCheckpoints_marker_intact_on_load_failure(
 
     manager.lazyClose_dbg();
 }
+
+/**
+ * A11: the crash-recovery notification must compare the clean-shutdown marker
+ * against the NEWEST finalized orphan's end, not the oldest.  Two orphans where
+ * the marker covers only the older one must still notify the user (the newer
+ * orphan represents genuinely unsaved work past the last clean shutdown).
+ */
+void DatabaseTest::test_recoverStartupCheckpoints_notifies_when_marker_covers_only_older_orphan()
+{
+    // Arrange: fresh DB with two valid unfinalized orphans and a marker that
+    // covers only the older orphan's end time.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QVERIFY(manager.ensureOpen_dbg());
+
+    // Older orphan ends at 10:30; newer orphan ends at 11:30.
+    const QDateTime oldStartUtc = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime oldEndUtc   = QDateTime(QDate(2025, 6, 1), QTime(10, 30, 0), Qt::UTC);
+    const QDateTime newStartUtc = QDateTime(QDate(2025, 6, 1), QTime(11, 0, 0), Qt::UTC);
+    const QDateTime newEndUtc   = QDateTime(QDate(2025, 6, 1), QTime(11, 30, 0), Qt::UTC);
+    const qint64 oldId = seedOrphanRow(manager, oldStartUtc, oldEndUtc);
+    const qint64 newId = seedOrphanRow(manager, newStartUtc, newEndUtc);
+    QVERIFY(oldId > 0 && newId > 0);
+
+    // Marker covers only the older orphan's end (10:30), not the newer (11:30).
+    QSqlQuery q(manager.rawDb_dbg());
+    QVERIFY(q.exec(
+        "INSERT OR REPLACE INTO app_settings (key, value) "
+        "VALUES ('last_clean_shutdown', '2025-06-01T10:30:00.000Z')"
+    ));
+    manager.lazyClose_dbg();
+
+    // Act: recover just after the newer orphan (both are recent, > 1 s → finalize).
+    const QDateTime now = QDateTime(QDate(2025, 6, 1), QTime(11, 40, 0), Qt::UTC);
+    StartupRecoveryResult res = manager.recoverStartupCheckpoints(now);
+
+    // Assert: recovery succeeded, both orphans finalized, and the user is notified
+    // because the newest finalized orphan ends after the marker.
+    QVERIFY(res.ok);
+    QCOMPARE(res.finalized_count, 2);
+    QVERIFY2(res.notify_user,
+             "must notify: newest finalized orphan ends after the clean-shutdown marker");
+}
+
+/**
+ * A12: an empty segment_id row must be treated as a corrupt row at load —
+ * skipped (skipped++) rather than passed to SegmentId::fromString(), which
+ * asserts non-empty in debug builds.  The same guard protects orphan loading.
+ */
+void DatabaseTest::test_loadDurations_skips_empty_segment_id_row()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 30000));
+    SqliteSessionStore manager(settings);
+
+    // A valid finalized row so we can confirm valid rows still load.
+    const QDateTime start = QDateTime::fromMSecsSinceEpoch(4'000'000, Qt::UTC);
+    const QDateTime end   = start.addSecs(10);
+    std::deque<TimeDuration> durations;
+    durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
+    QVERIFY(manager.updateDurationsById(durations).ok());
+
+    // Seed an empty segment_id FINALIZED row directly.  The
+    // CHECK(length(segment_id) > 0) constraint models a healthy DB, so bypass it
+    // (as an old/hand-edited DB would) to exercise the corrupt-row guard at load.
+    // Only one empty-id row can exist at a time (UNIQUE(segment_id)).
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery pragmaOn(manager.rawDb_dbg());
+    QVERIFY(pragmaOn.exec("PRAGMA ignore_check_constraints = ON"));
+
+    QSqlQuery finalizedEmpty(manager.rawDb_dbg());
+    finalizedEmpty.prepare(
+        "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+        "VALUES ('', :type, :start_utc, :end_utc, 1)"
+    );
+    finalizedEmpty.bindValue(":type", static_cast<int>(DurationType::Activity));
+    finalizedEmpty.bindValue(":start_utc", start.addSecs(100).toString(Qt::ISODateWithMs));
+    finalizedEmpty.bindValue(":end_utc", start.addSecs(110).toString(Qt::ISODateWithMs));
+    QVERIFY(finalizedEmpty.exec());
+    manager.lazyClose_dbg();
+
+    // loadDurations() must skip the empty-id finalized row (no assert abort).
+    auto loaded = manager.loadDurations();
+    QCOMPARE(static_cast<int>(loaded.size()), 1); // only the valid row survives
+    QCOMPARE(loaded.skipped, 1);                  // empty-id row counted as skipped
+
+    // Replace the empty-id row with an UNFINALIZED one to exercise the same guard
+    // in loadUnfinalizedCheckpoints() (UNIQUE forbids a second empty-id row).
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery del(manager.rawDb_dbg());
+    QVERIFY(del.exec("DELETE FROM durations WHERE segment_id = ''"));
+    QSqlQuery pragmaOn2(manager.rawDb_dbg());
+    QVERIFY(pragmaOn2.exec("PRAGMA ignore_check_constraints = ON"));
+    QSqlQuery unfinalizedEmpty(manager.rawDb_dbg());
+    unfinalizedEmpty.prepare(
+        "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+        "VALUES ('', :type, :start_utc, :end_utc, 0)"
+    );
+    unfinalizedEmpty.bindValue(":type", static_cast<int>(DurationType::Activity));
+    unfinalizedEmpty.bindValue(":start_utc", start.addSecs(200).toString(Qt::ISODateWithMs));
+    unfinalizedEmpty.bindValue(":end_utc", start.addSecs(210).toString(Qt::ISODateWithMs));
+    QVERIFY(unfinalizedEmpty.exec());
+    manager.lazyClose_dbg();
+
+    // loadUnfinalizedCheckpoints() must skip the empty-id orphan row (no assert).
+    auto orphans = manager.loadUnfinalizedCheckpoints_dbg();
+    QCOMPARE(orphans.size(), static_cast<size_t>(0));
+}

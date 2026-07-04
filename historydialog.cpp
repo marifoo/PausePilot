@@ -129,6 +129,13 @@ bool HistoryDialog::saveChanges()
         return false;
     }
 
+    // Step 0: If the user made no edits, the save is a true no-op. Skip it
+    // entirely so an editless OK never rewrites or merges untouched DB history.
+    if (!session_.hasEdits()) {
+        Logger::Log("[HISTORY] No edits; skipping save (no-op)");
+        return true;
+    }
+
     // Step 1: Refresh the ongoing segment's end-time from the engine.
     session_.refreshOngoing(timetracker_);
 

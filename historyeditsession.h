@@ -71,6 +71,13 @@ public:
     /// Does NOT perform the save — the caller (HistoryDialog::accept()) owns that.
     SavePayload buildSavePayload() const;
 
+    /// True iff the user changed any page's rows since the session was built
+    /// (type toggle, split, etc.). When false the save is a no-op and must be
+    /// skipped so an editless OK never rewrites or merges untouched DB history.
+    /// Compares the ongoing's type only (its end-time advances on its own and is
+    /// not a user edit).
+    bool hasEdits() const;
+
     // ---- Editing operations (pure; return new session state via mutation) ----
 
     /// Replaces the Timeline for page[pageIdx] (used by type-toggle checkboxes).
@@ -91,6 +98,7 @@ public:
 private:
     std::vector<Page> pages_;
     std::vector<Timeline> pendingTimelines_;
+    std::vector<Timeline> originalTimelines_; ///< snapshot of pendingTimelines_ at build (for hasEdits)
     QHash<QString, bool> originIsMemory_; ///< segment_id.toString() → true if memory row
     std::deque<TimeDuration> crossMidnightRows_; ///< cross-midnight rows preserved as-is through save
 };

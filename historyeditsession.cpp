@@ -149,6 +149,49 @@ void HistoryEditSession::buildFromTimer(Timer& timer)
         for (const auto& d : pages_[i].durations)
             originIsMemory_.insert(d.segment_id.toString(), false);
     }
+
+    // Snapshot the freshly built timelines so hasEdits() can detect whether the
+    // user changed anything before an OK-triggered save.
+    originalTimelines_ = pendingTimelines_;
+}
+
+namespace {
+
+// Compares the edit-relevant fields of two completed-row sequences. The ongoing
+// row is compared separately (its end-time advances on its own, so only its
+// existence and type are edit-relevant).
+bool sameCompleted(const std::deque<TimeDuration>& a, const std::deque<TimeDuration>& b)
+{
+    if (a.size() != b.size())
+        return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].segment_id != b[i].segment_id ||
+            a[i].type != b[i].type ||
+            a[i].startTime != b[i].startTime ||
+            a[i].endTime != b[i].endTime)
+            return false;
+    }
+    return true;
+}
+
+} // namespace
+
+bool HistoryEditSession::hasEdits() const
+{
+    if (pendingTimelines_.size() != originalTimelines_.size())
+        return true;
+    for (size_t i = 0; i < pendingTimelines_.size(); ++i) {
+        if (!sameCompleted(pendingTimelines_[i].completed(), originalTimelines_[i].completed()))
+            return true;
+        const auto& curOng  = pendingTimelines_[i].ongoing();
+        const auto& origOng = originalTimelines_[i].ongoing();
+        if (curOng.has_value() != origOng.has_value())
+            return true;
+        // Only the ongoing's type is a user edit; its end-time advances on its own.
+        if (curOng.has_value() && curOng->type != origOng->type)
+            return true;
+    }
+    return false;
 }
 
 void HistoryEditSession::refreshOngoing(Timer& timer)
@@ -210,9 +253,14 @@ HistoryEditSession::SavePayload HistoryEditSession::buildSavePayload() const
     const bool needsMergeConfirmation = (normalised.completed().size() < preNormalizeSize);
 
     // Re-split using originIsMemory_:
-    //   historyDurations    → finalized rows for DB
-    //   currentMemoryDurations → live session for Timer commit
-    //   currentSessionDurations → unfinalized rows for DB (session + ongoing)
+    //   historyDurations    → finalized rows for DB (all completed rows)
+    //   currentMemoryDurations → live session for Timer commit (memory-origin rows)
+    //   currentSessionDurations → unfinalized rows for DB (ongoing only)
+    //
+    // A9: completed rows are finalized on save regardless of origin. Writing a
+    // completed memory-origin row as unfinalized would let the stale-orphan
+    // policy delete it after a crash + relaunch >24 h later. Only the genuinely
+    // in-flight ongoing segment stays unfinalized (appended below).
     std::deque<TimeDuration> historyDurations;
     std::deque<TimeDuration> currentMemoryDurations;
     std::deque<TimeDuration> currentSessionDurations;
@@ -232,11 +280,11 @@ HistoryEditSession::SavePayload HistoryEditSession::buildSavePayload() const
                 }
             }
         }
+        // Every completed row is finalized in the DB; memory-origin rows also
+        // stay in the live session for Timer::commitEditedTimeline().
+        historyDurations.push_back(d);
         if (isMemory) {
             currentMemoryDurations.push_back(d);
-            currentSessionDurations.push_back(d);
-        } else {
-            historyDurations.push_back(d);
         }
     }
 

@@ -5,6 +5,7 @@
 #include "../timer.h"
 
 #include "fakesessionstore.h"
+#include "fakeclock.h"
 #include "testcommon.h"
 
 using TestCommon::createSettingsFile;
@@ -610,8 +611,10 @@ void HistoryEditSessionTest::test_toggle_pause_to_activity_payload_end_utc_advan
 
 void HistoryEditSessionTest::test_payload_history_vs_session_buckets()
 {
-    // DB row (yesterday): goes to historyTimeline (finalized).
-    // Memory row (today): goes to sessionTimeline (unfinalized).
+    // A9: completed rows are finalized on save regardless of origin.
+    // DB row (yesterday) and memory row (today) both go to historyTimeline
+    // (finalized). The session bucket stays empty when there is no ongoing.
+    // The memory row also appears in memoryTimeline (for the live-session commit).
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
@@ -633,11 +636,12 @@ void HistoryEditSessionTest::test_payload_history_vs_session_buckets()
 
     const auto payload = session.buildSavePayload();
 
-    // 1 history row, 1 session row (no ongoing here).
-    QCOMPARE(payload.historyTimeline.completed().size(), static_cast<size_t>(1));
-    QCOMPARE(payload.sessionTimeline.completed().size(), static_cast<size_t>(1));
-    QCOMPARE(payload.historyTimeline.completed()[0].startTime.toUTC().time(), QTime(10, 0, 0));
-    QCOMPARE(payload.sessionTimeline.completed()[0].startTime.toUTC().time(), QTime(9, 0, 0));
+    // Both completed rows are finalized; no unfinalized session rows (no ongoing).
+    QCOMPARE(payload.historyTimeline.completed().size(), static_cast<size_t>(2));
+    QCOMPARE(payload.sessionTimeline.completed().size(), static_cast<size_t>(0));
+    // The memory-origin row is still committed into the live session.
+    QCOMPARE(payload.memoryTimeline.completed().size(), static_cast<size_t>(1));
+    QCOMPARE(payload.memoryTimeline.completed()[0].startTime.toUTC().time(), QTime(9, 0, 0));
     QVERIFY(!payload.needsMergeConfirmation);
 }
 
@@ -668,18 +672,19 @@ void HistoryEditSessionTest::test_payload_memory_timeline_for_commit()
 
     const auto payload = session.buildSavePayload();
 
-    // memoryTimeline has only the memory row.
+    // memoryTimeline has only the memory row (for the live-session commit).
     QCOMPARE(payload.memoryTimeline.completed().size(), static_cast<size_t>(1));
     QCOMPARE(payload.memoryTimeline.completed()[0].startTime.toUTC().time(), QTime(9, 0, 0));
-    // historyTimeline has the DB row.
-    QCOMPARE(payload.historyTimeline.completed().size(), static_cast<size_t>(1));
+    // A9: both completed rows (DB + memory) are finalized in the history bucket.
+    QCOMPARE(payload.historyTimeline.completed().size(), static_cast<size_t>(2));
 }
 
 void HistoryEditSessionTest::test_payload_memory_absorbs_merged_memory_row()
 {
     // When a DB row and a memory row overlap and are merged during normalization,
-    // the merged row is placed into the session bucket (not history) because it
-    // absorbed current-session time.
+    // the merged row is finalized in the history bucket (A9: completed rows are
+    // finalized on save) while still being committed into the live session via
+    // memoryTimeline because it absorbed current-session time.
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
@@ -705,12 +710,58 @@ void HistoryEditSessionTest::test_payload_memory_absorbs_merged_memory_row()
 
     // After normalization: exactly 1 merged row covering 10:00–10:45.
     QVERIFY(payload.needsMergeConfirmation);
-    // The merged row absorbed memory time, so it must be in the session bucket.
-    QCOMPARE(payload.sessionTimeline.completed().size(), static_cast<size_t>(1));
-    QCOMPARE(payload.sessionTimeline.completed()[0].startTime.toUTC().time(), QTime(10, 0, 0));
-    QCOMPARE(payload.sessionTimeline.completed()[0].endTime.toUTC().time(), QTime(10, 45, 0));
-    // History bucket should be empty.
-    QCOMPARE(payload.historyTimeline.completed().size(), static_cast<size_t>(0));
-    // Memory timeline also has the merged row.
+    // The merged completed row is finalized in the history bucket.
+    QCOMPARE(payload.historyTimeline.completed().size(), static_cast<size_t>(1));
+    QCOMPARE(payload.historyTimeline.completed()[0].startTime.toUTC().time(), QTime(10, 0, 0));
+    QCOMPARE(payload.historyTimeline.completed()[0].endTime.toUTC().time(), QTime(10, 45, 0));
+    // No unfinalized session rows (no ongoing).
+    QCOMPARE(payload.sessionTimeline.completed().size(), static_cast<size_t>(0));
+    // Memory timeline still has the merged row (absorbed current-session time).
     QCOMPARE(payload.memoryTimeline.completed().size(), static_cast<size_t>(1));
+}
+
+// ---------------------------------------------------------------------------
+// A8: backward clock jump must not silently stop the engine on save
+// ---------------------------------------------------------------------------
+
+void HistoryEditSessionTest::test_backward_clock_jump_keeps_engine_running()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    Timer tracker(settings, fakeDb);
+
+    // Deterministic clock; start a running Activity session at 12:00.
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(12, 0, 0), Qt::LocalTime));
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(30000); // 12:00:30 — ongoing has a positive length at dialog-open
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker);
+    QVERIFY(session.pendingTimelines()[0].ongoing().has_value());
+
+    // The wall clock jumps backward 2 minutes (NTP/DST): now < segment_start.
+    clock.advance(-120000); // 11:58:30
+
+    QSignalSpy stoppedSpy(&tracker, &Timer::stopped);
+
+    // Drive the dialog-OK flow at the engine/session level (the editless no-op
+    // gate is A10's concern; here there is an in-flight save through commit).
+    session.refreshOngoing(tracker);
+    const auto payload = session.buildSavePayload();
+
+    // The pending ongoing must NOT be cleared by the backward jump.
+    QVERIFY(payload.memoryTimeline.ongoing().has_value());
+
+    tracker.commitEditedTimeline(payload.memoryTimeline);
+
+    // The engine must still be running — no stopped(EditApplied).
+    QVERIFY(!tracker.isStopped());
+    QCOMPARE(stoppedSpy.count(), 0);
+
+    // Cleanup: restore the clock ahead of the segment start before stopping.
+    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(12, 5, 0), Qt::LocalTime));
+    tracker.useTimerViaButton(Button::Stop);
 }

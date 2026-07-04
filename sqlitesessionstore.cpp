@@ -830,7 +830,16 @@ LoadResult SqliteSessionStore::loadDurations()
 
     // Parse each row and reconstruct TimeDuration objects
     while (query.next()) {
-        const SegmentId segmentId = SegmentId::fromString(query.value(0).toString());
+        // An empty segment_id is a corrupt row (SegmentId::fromString asserts
+        // non-empty in debug; the empty id would match every empty-id row on
+        // upsert in release). Treat it as a skipped corrupt row.
+        const QString segmentIdStr = query.value(0).toString();
+        if (segmentIdStr.isEmpty()) {
+            Logger::Log("[DB] Warning: Skipped row with empty segment_id");
+            result.skipped++;
+            continue;
+        }
+        const SegmentId segmentId = SegmentId::fromString(segmentIdStr);
         const int typeInt = query.value(1).toInt();
         const QDateTime startDateTime = QDateTime::fromString(query.value(2).toString(), Qt::ISODateWithMs).toLocalTime();
         const QDateTime endDateTime   = QDateTime::fromString(query.value(3).toString(), Qt::ISODateWithMs).toLocalTime();
@@ -1267,6 +1276,13 @@ std::optional<std::deque<SqliteSessionStore::OrphanCheckpoint>> SqliteSessionSto
     }
 
     while (query.next()) {
+        // An empty segment_id is a corrupt row (SegmentId::fromString asserts
+        // non-empty in debug). Skip it rather than assert-aborting.
+        const QString segmentIdStr = query.value(1).toString();
+        if (segmentIdStr.isEmpty()) {
+            Logger::Log("[DB] loadUnfinalizedCheckpoints: skipped row with empty segment_id");
+            continue;
+        }
         const int typeInt = query.value(2).toInt();
         if (typeInt != static_cast<int>(DurationType::Activity) &&
             typeInt != static_cast<int>(DurationType::Pause)) {
@@ -1625,7 +1641,7 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
 
     // Decide whether to notify the user.
     // If a valid clean-shutdown marker exists and its timestamp covers (is >= )
-    // the oldest finalized orphan's end time, the shutdown was clean — no notification.
+    // the newest finalized orphan's end time, the shutdown was clean — no notification.
     if (!reconcile.finalized.empty()) {
         bool showNotification = true;
 
@@ -1634,18 +1650,20 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
             && markerResult->timestamp.isValid();
         if (hasValidMarker) {
             const QDateTime markerUtc = markerResult->timestamp.toUTC();
-            QDateTime oldestFinalizedOrphanEndUtc;
+            QDateTime newestFinalizedOrphanEndUtc;
             for (const auto& orphan : orphans) {
                 if (std::find(reconcile.finalized.begin(), reconcile.finalized.end(), orphan.id)
                         == reconcile.finalized.end()) {
                     continue;
                 }
                 const QDateTime orphanEndUtc = orphan.endTime.toUTC();
-                if (!oldestFinalizedOrphanEndUtc.isValid() || orphanEndUtc < oldestFinalizedOrphanEndUtc) {
-                    oldestFinalizedOrphanEndUtc = orphanEndUtc;
+                if (!newestFinalizedOrphanEndUtc.isValid() || orphanEndUtc > newestFinalizedOrphanEndUtc) {
+                    newestFinalizedOrphanEndUtc = orphanEndUtc;
                 }
             }
-            if (oldestFinalizedOrphanEndUtc.isValid() && markerUtc >= oldestFinalizedOrphanEndUtc) {
+            // Suppress only when the marker covers the NEWEST finalized orphan;
+            // notify iff any finalized orphan ends after the marker.
+            if (newestFinalizedOrphanEndUtc.isValid() && markerUtc >= newestFinalizedOrphanEndUtc) {
                 showNotification = false;
             }
         }

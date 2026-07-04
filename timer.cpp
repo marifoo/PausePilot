@@ -998,16 +998,24 @@ std::optional<TimeDuration> Timer::getOngoingDuration() const
 std::optional<TimeDuration> Timer::getOngoingDuration_locked() const
 {
     if (mode_ == Mode::None) return std::nullopt;
+    if (!session_.segment_start_time.isValid()) return std::nullopt;
     const QDateTime now = now_provider_();
-    if (!session_.segment_start_time.isValid() || session_.segment_start_time >= now) {
-        return std::nullopt;
+    const DurationType type = (mode_ == Mode::Activity) ? DurationType::Activity : DurationType::Pause;
+    if (session_.segment_start_time >= now) {
+        // A8: the wall clock jumped backward (NTP/DST step-back), so the running
+        // segment appears to start in the "future". The engine is NOT stopped —
+        // expose a zero-length ongoing capped at the start rather than nullopt,
+        // so a history-edit save re-anchors the live segment instead of ending
+        // the session and dropping the in-flight time. (Cross-midnight, handled
+        // below, stays hidden — the watchdog owns force-stopping it.)
+        return TimeDuration::fromLiveSession(type, session_.segment_start_time,
+                                             session_.segment_start_time, session_.segment_id);
     }
     if (isCrossMidnight(session_.segment_start_time, now)) {
         // Cross-midnight ongoing — about to be force-stopped by the
         // watchdog within ~100 ms. Don't expose this transient state.
         return std::nullopt;
     }
-    DurationType type = (mode_ == Mode::Activity) ? DurationType::Activity : DurationType::Pause;
     return TimeDuration::fromLiveSession(type, session_.segment_start_time, now, session_.segment_id);
 }
 

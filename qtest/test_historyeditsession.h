@@ -60,6 +60,9 @@ private slots:
     void test_payload_history_vs_session_buckets();
     void test_payload_memory_timeline_for_commit();
     void test_payload_memory_absorbs_merged_memory_row();
+
+    // A8: a backward clock jump during a running session must not stop the engine
+    void test_backward_clock_jump_keeps_engine_running();
 };
 
 #endif // TEST_HISTORYEDITSESSION_H

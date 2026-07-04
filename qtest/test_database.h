@@ -123,6 +123,11 @@ private slots:
     void test_recoverStartupCheckpoints_marker_intact_on_reconcile_failure();
     // Finding 2: marker must survive orphan load failure
     void test_recoverStartupCheckpoints_marker_intact_on_load_failure();
+
+    // A11: notification compares marker against the newest finalized orphan
+    void test_recoverStartupCheckpoints_notifies_when_marker_covers_only_older_orphan();
+    // A12: empty segment_id rows are treated as corrupt at load
+    void test_loadDurations_skips_empty_segment_id_row();
 };
 
 #endif // TEST_DATABASE_H
