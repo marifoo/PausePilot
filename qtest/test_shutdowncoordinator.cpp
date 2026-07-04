@@ -15,7 +15,7 @@ void ShutdownCoordinatorTest::test_G_happy_path_stop_flush_marker()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
@@ -47,7 +47,7 @@ void ShutdownCoordinatorTest::test_H_idempotent_second_run_is_noop()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
@@ -73,7 +73,7 @@ void ShutdownCoordinatorTest::test_J_pump_drains_queued_events()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     // Queue a zero-delay slot; it only fires if the event loop is pumped.
@@ -96,7 +96,7 @@ void ShutdownCoordinatorTest::test_I_force_direct_skips_retry_loop()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
@@ -131,7 +131,7 @@ void ShutdownCoordinatorTest::test_K_reset_allows_second_shutdown()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
@@ -165,7 +165,7 @@ void ShutdownCoordinatorTest::test_L_nested_run_during_pump_flushes_once()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
@@ -194,10 +194,10 @@ void ShutdownCoordinatorTest::test_M_marker_after_flush_when_already_stopped()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
-    // Timer never started → already in Mode::None. shutdown() does not call
+    // TimeTracker never started → already in Mode::None. shutdown() does not call
     // stopTimer, so the coordinator's own marker branch fires.
     fakeDb.callLog.clear();
 
@@ -220,7 +220,7 @@ void ShutdownCoordinatorTest::test_N_restart_during_pump_is_restopped()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);

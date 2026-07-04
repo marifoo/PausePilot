@@ -81,7 +81,7 @@ SessionStoreResult FakeSessionStore::saveCheckpoint(DurationType type, const QDa
             }
         }
         // A segment_id that was finalized via commitSession must not also appear as a
-        // checkpoint (that would mean Timer submitted the same id to two separate paths).
+        // checkpoint (that would mean TimeTracker submitted the same id to two separate paths).
         Q_ASSERT_X(!committedSegmentIds.contains(segmentId.toString()),
                    "FakeSessionStore::saveCheckpoint",
                    "UNIQUE(segment_id) violation: segment_id already committed via commitSession");

@@ -7,7 +7,7 @@
  * HistoryEditSessionTest — non-widget unit tests for HistoryEditSession.
  *
  * These tests run with QT_QPA_PLATFORM=offscreen and must produce ZERO QWARN.
- * No QWidget is constructed; all test state is HistoryEditSession + Timer + DB.
+ * No QWidget is constructed; all test state is HistoryEditSession + TimeTracker + DB.
  */
 class HistoryEditSessionTest : public QObject
 {

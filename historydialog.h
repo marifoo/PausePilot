@@ -6,7 +6,7 @@
 #include <QMessageBox>
 #include <optional>
 #include "types.h"
-#include "timer.h"
+#include "timetracker.h"
 #include "timeline.h"
 #include "splitdialog.h"
 #include "historyeditsession.h"
@@ -16,14 +16,14 @@ class QTableWidget;
 class QPushButton;
 
 /**
- * TimerExclusiveEditGuard — RAII guard for Timer::beginExclusiveEdit / endExclusiveEdit.
+ * TimerExclusiveEditGuard — RAII guard for TimeTracker::beginExclusiveEdit / endExclusiveEdit.
  *
  * Calls beginExclusiveEdit() on construction and endExclusiveEdit() on destruction,
  * so resume cannot be forgotten on accept, reject, or early-return paths.
  */
 class TimerExclusiveEditGuard {
 public:
-    explicit TimerExclusiveEditGuard(Timer& timer) : timer_(timer) {
+    explicit TimerExclusiveEditGuard(TimeTracker& timer) : timer_(timer) {
         timer_.beginExclusiveEdit();
     }
     ~TimerExclusiveEditGuard() {
@@ -34,7 +34,7 @@ public:
     TimerExclusiveEditGuard& operator=(const TimerExclusiveEditGuard&) = delete;
 
 private:
-    Timer& timer_;
+    TimeTracker& timer_;
 };
 
 class HistoryDialog : public QDialog
@@ -42,7 +42,7 @@ class HistoryDialog : public QDialog
     Q_OBJECT
 
 private:
-    Timer& timetracker_;
+    TimeTracker& timetracker_;
     const Settings& settings_;
 
     /// RAII guard: beginExclusiveEdit on construction, endExclusiveEdit on destruction.
@@ -76,7 +76,7 @@ private slots:
     void onSplitRow();
 
 public:
-    explicit HistoryDialog(Timer& timetracker, const Settings& settings, QWidget* parent = nullptr);
+    explicit HistoryDialog(TimeTracker& timetracker, const Settings& settings, QWidget* parent = nullptr);
     ~HistoryDialog() override;
     QString getLoadReconciliationMessage() const;
 
@@ -115,7 +115,7 @@ public:
 #endif
 
     /**
-     * Commits pending edits to the database and Timer. Returns true on success.
+     * Commits pending edits to the database and TimeTracker. Returns true on success.
      * Returns false (and keeps the dialog open / exits early) if:
      *   - The dialog result is not Accepted (cancelled path).
      *   - A merge confirmation was declined by the user.

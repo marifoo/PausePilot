@@ -1,12 +1,12 @@
 /**
- * MainWin — Application entry point and orchestrator.
+ * MainWin — the top-level Qt window.
  *
  * Responsibilities:
  * - Window management (System Tray, Always-on-Top, minimize behaviors)
  * - Global event handling (Shutdown, Sleep/Wake)
  * - User warning system (Health checks for too much work / no pause)
  *
- * Day-boundary policy: owned by Timer::DayBoundaryWatcher.
+ * Day-boundary policy: owned by TimeTracker::DayBoundaryWatcher.
  * MainWin only syncs the GUI when it observes the engine has stopped.
  */
 
@@ -26,7 +26,7 @@
 #endif
 
 
-MainWin::MainWin(Settings& settings, Timer& timetracker, SessionStore& db,
+MainWin::MainWin(Settings& settings, TimeTracker& timetracker, SessionStore& db,
 	             ShutdownCoordinator& shutdown_coordinator, QWidget *parent)
 	: QMainWindow(parent), settings_(settings), timetracker_(timetracker), db_(db),
 	  shutdown_coordinator_(shutdown_coordinator),
@@ -43,18 +43,18 @@ MainWin::MainWin(Settings& settings, Timer& timetracker, SessionStore& db,
 
 	// Re-arm the health warnings when a session ends so they can fire again in
 	// the next session (at most once per session, not once per app lifetime).
-	connect(&timetracker_, &Timer::stopped, health_monitor_, &HealthMonitor::reset);
+	connect(&timetracker_, &TimeTracker::stopped, health_monitor_, &HealthMonitor::reset);
 }
 
-void MainWin::setupCentralWidget(Settings& settings, Timer& timetracker)
+void MainWin::setupCentralWidget(Settings& settings, TimeTracker& timetracker)
 {
 	content_widget_ = new ContentWidget(settings, timetracker, this);
 
 	setCentralWidget(content_widget_);
 	QObject::connect(content_widget_, &ContentWidget::startPausePressed,
-		&timetracker, &Timer::onStartPausePressed);
+		&timetracker, &TimeTracker::onStartPausePressed);
 	QObject::connect(content_widget_, &ContentWidget::stopPressed,
-		&timetracker, &Timer::onStopPressed);
+		&timetracker, &TimeTracker::onStopPressed);
 	QObject::connect(content_widget_, &ContentWidget::historyLoadReconciliationAvailable,
 		this, &MainWin::showHistoryLoadReconciliation);
 	QObject::connect(content_widget_, SIGNAL(minToTray()), this, SLOT(minToTray()));
@@ -188,12 +188,7 @@ void MainWin::start()
 }
 
 /**
- * Handles application shutdown sequence.
- *
- * Critical for data integrity:
- * 1. Stops the timer (forcing a DB save of the current session)
- * 2. Waits for events to process (ensures DB writes complete)
- * 3. Handles both graceful (Quit) and forced (System Shutdown) paths
+ * Delegates the application shutdown sequence to ShutdownCoordinator.
  *
  * @param mode DrainEvents for normal quit; Direct for OS-restricted paths
  *             (Windows WM_QUERYENDSESSION / WM_ENDSESSION).

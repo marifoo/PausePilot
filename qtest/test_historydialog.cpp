@@ -46,7 +46,7 @@ void HistoryDialogTest::test_historydialog_createPages_includes_current_db_ongoi
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     QDateTime now = QDateTime::currentDateTime();
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-120), now.addSecs(-60)));
@@ -77,7 +77,7 @@ void HistoryDialogTest::test_historydialog_createPages_dedups_db_row_with_small_
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime now = QDateTime::currentDateTime();
     const QDateTime memoryStart = now.addSecs(-40).addMSecs(2);
@@ -107,7 +107,7 @@ void HistoryDialogTest::test_historydialog_createPages_groups_unsplit_cross_midn
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDate yesterday = QDate::currentDate().addDays(-1);
     const QDateTime crossMidnightStart(yesterday, QTime(23, 59, 50));
@@ -173,7 +173,7 @@ void HistoryDialogTest::test_historydialog_checkbox_toggle_updates_pending_and_t
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     QDateTime now = QDateTime::currentDateTime();
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
@@ -196,7 +196,7 @@ void HistoryDialogTest::test_historydialog_saveChanges_updates_timetracker_and_d
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     QDateTime now = QDateTime::currentDateTime();
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-150)));
@@ -226,7 +226,7 @@ void HistoryDialogTest::test_historydialog_split_action_splits_row()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     QDateTime start = QDateTime::currentDateTime().addSecs(-10);
     QDateTime end = QDateTime::currentDateTime().addSecs(-4);
@@ -259,7 +259,7 @@ void HistoryDialogTest::test_historydialog_split_today_mixed_origins_routes_to_c
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime now = QDateTime::currentDateTime();
     const QDateTime memStart = now.addSecs(-20);
@@ -314,7 +314,7 @@ void HistoryDialogTest::test_historydialog_split_non_today_db_row_survives_save_
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 30));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime start(QDate::currentDate().addDays(-1), QTime(10, 0, 0));
     const QDateTime end = start.addSecs(8);
@@ -351,7 +351,7 @@ void HistoryDialogTest::test_historydialog_shows_load_reconciliation_banner()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     SqliteSessionStore manager(settings);
     QVERIFY(manager.ensureOpen_dbg());
@@ -374,7 +374,7 @@ void HistoryDialogTest::test_historydialog_shows_load_reconciliation_banner()
     query.bindValue(":start_utc", start.addSecs(10).toString(Qt::ISODateWithMs));
     query.bindValue(":end_utc", end.addSecs(10).toString(Qt::ISODateWithMs));
     QVERIFY(query.exec());
-    manager.lazyClose_dbg();
+    manager.closeConnection_dbg();
 
     HistoryDialog dialog(tracker, settings);
     const QString msg = dialog.getLoadReconciliationMessage();
@@ -397,7 +397,7 @@ void HistoryDialogTest::test_historydialog_save_unrelated_edit_preserves_row_and
 
     Settings settings(settingsPath);
     SqliteSessionStore db2(settings);
-    Timer tracker(settings, db2);
+    TimeTracker tracker(settings, db2);
 
     const QDateTime historicalStart(QDate::currentDate().addDays(-1), QTime(10, 0, 0));
     const QDateTime historicalEnd = historicalStart.addSecs(300);
@@ -471,7 +471,7 @@ void HistoryDialogTest::test_historydialog_pauses_checkpoint_timer_for_dialog_li
 
     Settings settings(settingsPath);
     SqliteSessionStore db2(settings);
-    Timer tracker(settings, db2);
+    TimeTracker tracker(settings, db2);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(20);
@@ -528,7 +528,7 @@ void HistoryDialogTest::test_historydialog_save_keeps_db_rows_for_history_plus_c
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime historicalStart(QDate::currentDate().addDays(-1), QTime(9, 0, 0));
     const QDateTime historicalEnd = historicalStart.addSecs(60);
@@ -591,7 +591,7 @@ void HistoryDialogTest::test_historydialog_save_then_crash_reopen_retains_curren
     {
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
         const QDateTime now = QDateTime::currentDateTime();
         tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-15), now.addSecs(-5)));
@@ -605,7 +605,7 @@ void HistoryDialogTest::test_historydialog_save_then_crash_reopen_retains_curren
         dialog.saveChanges();
 
         // Simulate crash: skip graceful stop/finalize.
-        tracker.forceMode_dbg(Timer::Mode::None);
+        tracker.forceMode_dbg(TimeTracker::Mode::None);
         tracker.sessionState_dbg().segment_id = SegmentId{};
     }
 
@@ -620,11 +620,11 @@ void HistoryDialogTest::test_historydialog_save_then_crash_reopen_retains_curren
         QVERIFY(unfinalizedQuery.exec("SELECT COUNT(*) FROM durations WHERE is_finalized = 0"));
         QVERIFY(unfinalizedQuery.next());
         QCOMPARE(unfinalizedQuery.value(0).toInt(), 0);
-        db.lazyClose_dbg();
+        db.closeConnection_dbg();
 
         // The finalized row survives the crash + startup recovery.
         SqliteSessionStore db3(settings);
-        Timer reopened(settings, db3);
+        TimeTracker reopened(settings, db3);
         reopened.initializeFromStore();
         auto loaded = db.loadDurations();
         QCOMPARE(loaded.size(), static_cast<size_t>(1));
@@ -640,7 +640,7 @@ void HistoryDialogTest::test_historydialog_save_uses_ongoing_snapshot_endtime_af
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(30);
@@ -701,7 +701,7 @@ void HistoryDialogTest::test_historydialog_save_failed_db_replace_keeps_runtime_
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime now = QDateTime::currentDateTime();
     const QDateTime memStart = now.addSecs(-30);
@@ -737,7 +737,7 @@ void HistoryDialogTest::test_historydialog_save_failed_db_replace_keeps_runtime_
 
         // Skip QMessageBox::critical() to avoid offscreen QPA propagateSizeHints() warnings.
         // The save failure is still tested: debugSkipCritical_ suppresses only the dialog pop-up,
-        // saveChanges() still returns false and leaves Timer state unchanged.
+        // saveChanges() still returns false and leaves TimeTracker state unchanged.
         dialog.debugSkipCritical_ = true;
         dialog.done(QDialog::Accepted);
         dialog.saveChanges();
@@ -848,7 +848,7 @@ void HistoryDialogTest::test_splitdialog_setters_affect_types()
 }
 
 // ============================================================================
-// Test R — round-trip type toggle via accept updates Timer
+// Test R — round-trip type toggle via accept updates TimeTracker
 // ============================================================================
 
 void HistoryDialogTest::test_R_round_trip_type_toggle_via_accept()
@@ -858,7 +858,7 @@ void HistoryDialogTest::test_R_round_trip_type_toggle_via_accept()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime now = QDateTime::currentDateTime();
     tracker.sessionState_dbg().durations.push_back(
@@ -876,9 +876,9 @@ void HistoryDialogTest::test_R_round_trip_type_toggle_via_accept()
         dialog.saveChanges();
     }
 
-    // Timer reflects the change
-    QCOMPARE(tracker.getCurrentDurations().completed().size(), static_cast<size_t>(1));
-    QCOMPARE(tracker.getCurrentDurations().completed()[0].type, DurationType::Pause);
+    // TimeTracker reflects the change
+    QCOMPARE(tracker.completedTimeline().completed().size(), static_cast<size_t>(1));
+    QCOMPARE(tracker.completedTimeline().completed()[0].type, DurationType::Pause);
 }
 
 // ============================================================================
@@ -892,7 +892,7 @@ void HistoryDialogTest::test_S_cancel_preserves_state()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime now = QDateTime::currentDateTime();
     tracker.sessionState_dbg().durations.push_back(
@@ -907,9 +907,9 @@ void HistoryDialogTest::test_S_cancel_preserves_state()
         dialog.saveChanges();  // saveChanges checks result() and returns early when Rejected
     }
 
-    // Timer is unchanged — still Activity
-    QCOMPARE(tracker.getCurrentDurations().completed().size(), static_cast<size_t>(1));
-    QCOMPARE(tracker.getCurrentDurations().completed()[0].type, DurationType::Activity);
+    // TimeTracker is unchanged — still Activity
+    QCOMPARE(tracker.completedTimeline().completed().size(), static_cast<size_t>(1));
+    QCOMPARE(tracker.completedTimeline().completed()[0].type, DurationType::Activity);
 }
 
 void HistoryDialogTest::test_saveChanges_deduplicates_cross_bucket_overlaps()
@@ -922,7 +922,7 @@ void HistoryDialogTest::test_saveChanges_deduplicates_cross_bucket_overlaps()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDate today = QDate::currentDate();
     const QDateTime dbStart(today, QTime(10, 0, 0), Qt::UTC);
@@ -1012,7 +1012,7 @@ void HistoryDialogTest::test_saveChanges_noop_save_unchanged()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDate today = QDate::currentDate();
     const QDateTime dbStart(today, QTime(8, 0, 0), Qt::UTC);
@@ -1068,7 +1068,7 @@ void HistoryDialogTest::test_saveChanges_editless_ok_leaves_mergeable_rows_untou
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 30));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     // Two adjacent Activity rows on a past day with a 100 ms gap (< 500 ms).
     const QDate day = QDate::currentDate().addDays(-1);
@@ -1108,7 +1108,7 @@ void HistoryDialogTest::test_H3_ongoing_type_edit_preserved_when_engine_stops()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(20);
@@ -1151,7 +1151,7 @@ void HistoryDialogTest::test_H4_overlap_cancel_aborts_save()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDate today = QDate::currentDate();
     const QDateTime dbStart(today, QTime(11, 0, 0), Qt::UTC);
@@ -1186,7 +1186,7 @@ void HistoryDialogTest::test_H4_overlap_cancel_aborts_save()
     }
     QSqlDatabase::removeDatabase(connName);
 
-    // Timer session unchanged: still has 1 memory row
+    // TimeTracker session unchanged: still has 1 memory row
     QCOMPARE(tracker.sessionState_dbg().durations.size(), static_cast<size_t>(1));
 }
 
@@ -1200,7 +1200,7 @@ void HistoryDialogTest::test_H2_midnight_crossing_shown_on_both_pages()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDate yesterday = QDate::currentDate().addDays(-1);
     const QDateTime segStart(yesterday, QTime(23, 30, 0));
@@ -1279,7 +1279,7 @@ void HistoryDialogTest::test_H14_cross_midnight_totals_and_counts()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDate yesterday = QDate::currentDate().addDays(-1);
     const QDateTime segStart(yesterday, QTime(23, 50, 0), Qt::LocalTime);
@@ -1351,7 +1351,7 @@ void HistoryDialogTest::test_H6_split_dialog_preset_from_source_row_type()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime now = QDateTime::currentDateTime();
     // Row 0 is Pause, row 1 is Activity — exercise both directions of the preset.

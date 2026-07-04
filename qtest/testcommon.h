@@ -15,7 +15,7 @@
 #include <QTemporaryDir>
 #include <QtDebug>
 
-#include "timer.h"
+#include "timetracker.h"
 #include "lockstatewatcher.h"
 #include "sqlitesessionstore.h"
 

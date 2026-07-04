@@ -132,7 +132,7 @@
     <ClCompile Include="..\historydialog.cpp" />
     <ClCompile Include="..\historyeditsession.cpp" />
     <ClCompile Include="..\shutdowncoordinator.cpp" />
-    <ClCompile Include="..\timer.cpp" />
+    <ClCompile Include="..\timetracker.cpp" />
     <ClCompile Include="..\lockstatewatcher.cpp" />
     <ClCompile Include="..\sqlitesessionstore.cpp" />
     <ClCompile Include="..\timeformat.cpp" />
@@ -161,7 +161,7 @@
     <QtMoc Include="..\healthmonitor.h" />
     <QtMoc Include="..\splitdialog.h" />
     <QtMoc Include="..\historydialog.h" />
-    <QtMoc Include="..\timer.h" />
+    <QtMoc Include="..\timetracker.h" />
     <QtMoc Include="..\lockstatewatcher.h" />
     <QtMoc Include="..\sqlitesessionstore.h" />
     <ClInclude Include="testcommon.h" />

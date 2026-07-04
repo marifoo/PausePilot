@@ -9,7 +9,7 @@
 #include <QPushButton>
 #include "settings.h"
 #include "types.h"
-#include "timer.h"
+#include "timetracker.h"
 
 
 class ContentWidget : public QWidget
@@ -18,7 +18,7 @@ class ContentWidget : public QWidget
 
 private:
 	Settings &settings_;
-	Timer &timetracker_;
+	TimeTracker &timetracker_;
 
 	QVBoxLayout *rows_;
 	QHBoxLayout *activity_row_;
@@ -54,8 +54,8 @@ private:
 	void manageTooltipsForActivity(bool wasPaused);
 
 public:
-	explicit ContentWidget(Settings &settings, Timer& timetracker, QWidget *parent = nullptr);
-	/// Polls Timer for active/pause time and refreshes labels. Called every 100ms.
+	explicit ContentWidget(Settings &settings, TimeTracker& timetracker, QWidget *parent = nullptr);
+	/// Polls TimeTracker for active/pause time and refreshes labels. Called every 100ms.
 	void updateTimes();
 	/// Returns tray icon tooltip reflecting current timer state. Polled by MainWin::onTick().
 	QString getTooltip();
@@ -63,7 +63,7 @@ public:
 signals:
 	void minToTray();
 	void toggleAlwaysOnTop();
-	/// Emitted when the start/pause button is pressed; Timer decides start vs. pause.
+	/// Emitted when the start/pause button is pressed; TimeTracker decides start vs. pause.
 	void startPausePressed();
 	/// Emitted when the stop button is pressed.
 	void stopPressed();

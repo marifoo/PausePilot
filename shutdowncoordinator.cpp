@@ -1,22 +1,21 @@
 #include "shutdowncoordinator.h"
-#include "timer.h"
+#include "timetracker.h"
 #include "sessionstore.h"
 #include "logger.h"
 #include <QDateTime>
-#include <QElapsedTimer>
-#include <QCoreApplication>
+#include <QEventLoop>
+#include <QTimer>
 
-ShutdownCoordinator::ShutdownCoordinator(Timer& timetracker, SessionStore& db)
+ShutdownCoordinator::ShutdownCoordinator(TimeTracker& timetracker, SessionStore& db)
     : timetracker_(timetracker), db_(db), shutdown_completed_(false)
 {
 }
 
 void ShutdownCoordinator::pumpEvents(int budgetMs)
 {
-    QElapsedTimer t;
-    t.start();
-    while (t.elapsed() < budgetMs)
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 30);
+    QEventLoop loop;
+    QTimer::singleShot(budgetMs, &loop, &QEventLoop::quit);
+    loop.exec();
 }
 
 void ShutdownCoordinator::reset()
@@ -49,7 +48,7 @@ void ShutdownCoordinator::run(ShutdownMode mode)
         // can restart the timer after shutdown(). Re-check and re-stop so we
         // never leave a live segment behind after shutdown.
         if (!timetracker_.isStopped()) {
-            Logger::Log("[TIMER] Timer restarted during shutdown pump; re-stopping");
+            Logger::Log("[TIMER] TimeTracker restarted during shutdown pump; re-stopping");
             result = timetracker_.shutdown();
         }
     }
@@ -68,7 +67,7 @@ void ShutdownCoordinator::run(ShutdownMode mode)
     }
 
     if (!result.stopped) {
-        Logger::Log("[TIMER] Error: Timer did not stop correctly during shutdown");
+        Logger::Log("[TIMER] Error: TimeTracker did not stop correctly during shutdown");
     } else {
         Logger::Log("[TIMER] Shutdown completed successfully");
     }

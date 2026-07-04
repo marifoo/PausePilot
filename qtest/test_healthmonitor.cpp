@@ -1,6 +1,6 @@
 #include "test_healthmonitor.h"
 #include "healthmonitor.h"
-#include "timer.h"
+#include "timetracker.h"
 #include "fakesessionstore.h"
 #include <QtTest>
 #include <QSignalSpy>
@@ -127,7 +127,7 @@ void HealthMonitorTest::test_L_reset_rearms_warnings()
 
 // ============================================================================
 // Test M — warning re-fires per session (A13)
-// Mirrors MainWin's wiring: Timer::stopped re-arms the HealthMonitor, so a
+// Mirrors MainWin's wiring: TimeTracker::stopped re-arms the HealthMonitor, so a
 // warning that fired in session 1 fires again in session 2 (not once per app
 // lifetime). MainWin is GUI/not in the test build, so we exercise the exact
 // connection MainWin makes.
@@ -144,12 +144,12 @@ void HealthMonitorTest::test_M_warning_refires_per_session()
     Settings settings(QDir(tempDir.path()).filePath("user-settings.ini"));
 
     FakeSessionStore fakeDb;
-    Timer tracker(settings, fakeDb);
+    TimeTracker tracker(settings, fakeDb);
     HealthMonitor monitor(settings);
     monitor.reset();
 
     // The connection under test — identical to mainwin.cpp.
-    QObject::connect(&tracker, &Timer::stopped, &monitor, &HealthMonitor::reset);
+    QObject::connect(&tracker, &TimeTracker::stopped, &monitor, &HealthMonitor::reset);
 
     QSignalSpy spy(&monitor, &HealthMonitor::warningTriggered);
 
@@ -161,7 +161,7 @@ void HealthMonitorTest::test_M_warning_refires_per_session()
     monitor.check(kActivityThresholdMs + 5000, 0);
     QCOMPARE(spy.count(), 1);
 
-    // End session 1 → Timer::stopped re-arms the monitor.
+    // End session 1 → TimeTracker::stopped re-arms the monitor.
     tracker.useTimerViaButton(Button::Stop);
 
     // Session 2: the warning fires again.

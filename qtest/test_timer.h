@@ -23,7 +23,7 @@ private slots:
     void initTestCase();
     void cleanupTestCase();
     
-    // Existing Timer tests
+    // Existing TimeTracker tests
     void test_timer_start_pause_resume_stop_and_checkpoints();
     void test_timer_backpause_resets_checkpoint_and_splits();
     void test_timer_lock_events_checkpoint_and_resume();
@@ -44,7 +44,7 @@ private slots:
     void test_replaceAll_success_clears_unsaved_cache();
     void test_replaceAll_failure_keeps_unsaved_cache();
 
-    // State transition tests for public Timer methods
+    // State transition tests for public TimeTracker methods
     void test_session_state_start_to_pause_transition();
     void test_session_state_pause_to_activity_transition();
     void test_session_state_stop_clears_segment();
@@ -73,7 +73,7 @@ private slots:
 
     void test_useTimerViaLockEvent_unlock_does_not_restart_after_cross_midnight_discard();
 
-    void test_saveCheckpointInternal_does_not_write_cross_midnight_row();
+    void test_saveCheckpoint_locked_does_not_write_cross_midnight_row();
 
     void test_stop_clears_was_active_before_autopause();
 
@@ -81,7 +81,7 @@ private slots:
 
     void test_getOngoingDuration_returns_nullopt_when_cross_midnight();
 
-    // Timer public surface regression guard and initializeFromStore tests
+    // TimeTracker public surface regression guard and initializeFromStore tests
     void test_D_timetracker_public_surface_regression();
     // Boot-time gate via FakeSessionStore for each tri-state hasEntriesForDate result.
     void test_E_boot_time_gate_entries_yes_skips_boot_time();

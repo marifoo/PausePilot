@@ -18,7 +18,7 @@ private slots:
     // Test L: reset re-arms both warnings
     void test_L_reset_rearms_warnings();
 
-    // Test M: warning re-fires per session when wired to Timer::stopped (A13)
+    // Test M: warning re-fires per session when wired to TimeTracker::stopped (A13)
     void test_M_warning_refires_per_session();
 };
 

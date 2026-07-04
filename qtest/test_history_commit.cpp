@@ -44,7 +44,7 @@ void HistoryCommitTest::test_accept_stays_open_on_db_failure()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime now = QDateTime::currentDateTime();
     tracker.sessionState_dbg().durations.push_back(
@@ -85,7 +85,7 @@ void HistoryCommitTest::test_accept_stays_open_on_db_failure()
     // default (not QDialog::Accepted).
     QVERIFY(dialog.result() != QDialog::Accepted);
 
-    // Timer state must be unchanged.
+    // TimeTracker state must be unchanged.
     QCOMPARE(tracker.sessionState_dbg().durations.size(), static_cast<size_t>(1));
     QCOMPARE(tracker.sessionState_dbg().durations[0].type, DurationType::Activity);
 }
@@ -101,7 +101,7 @@ void HistoryCommitTest::test_accept_stays_open_on_merge_decline()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDate today = QDate::currentDate();
     const QDateTime dbStart(today, QTime(11, 0, 0), Qt::UTC);
@@ -129,7 +129,7 @@ void HistoryCommitTest::test_accept_stays_open_on_merge_decline()
     // Dialog must remain open (result still not Accepted).
     QVERIFY(dialog.result() != QDialog::Accepted);
 
-    // Timer session unchanged.
+    // TimeTracker session unchanged.
     QCOMPARE(tracker.sessionState_dbg().durations.size(), static_cast<size_t>(1));
 }
 
@@ -144,7 +144,7 @@ void HistoryCommitTest::test_accept_closes_on_success()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     const QDateTime now = QDateTime::currentDateTime();
     tracker.sessionState_dbg().durations.push_back(
@@ -174,7 +174,7 @@ void HistoryCommitTest::test_raii_guard_resumes_on_accept()
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(20);
@@ -212,7 +212,7 @@ void HistoryCommitTest::test_raii_guard_resumes_on_reject()
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(20);
@@ -250,7 +250,7 @@ void HistoryCommitTest::test_raii_guard_resumes_on_destruction()
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(20);
@@ -283,7 +283,7 @@ void HistoryCommitTest::test_merge_save_survives_late_crash_recovery()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    Timer tracker(settings, db);
+    TimeTracker tracker(settings, db);
 
     // A finalized DB history row (today) 10:00–10:30.
     const QDate today = QDate::currentDate();

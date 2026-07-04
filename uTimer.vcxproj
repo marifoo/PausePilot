@@ -202,7 +202,7 @@
     <ClCompile Include="sqlitesessionstore.cpp" />
     <ClCompile Include="timeformat.cpp" />
     <ClCompile Include="timeline.cpp" />
-    <ClCompile Include="timer.cpp" />
+    <ClCompile Include="timetracker.cpp" />
   </ItemGroup>
   <ItemGroup>
     <QtMoc Include="contentwidget.h" />
@@ -212,7 +212,7 @@
     <QtMoc Include="mainwin.h" />
     <QtMoc Include="splitdialog.h" />
     <QtMoc Include="sqlitesessionstore.h" />
-    <QtMoc Include="timer.h" />
+    <QtMoc Include="timetracker.h" />
     <ClInclude Include="apppaths.h" />
     <ClInclude Include="historyeditsession.h" />
     <ClInclude Include="logger.h" />

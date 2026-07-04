@@ -236,7 +236,7 @@ void ContractMatrixTest::test_saveCheckpoint_success_inserts_row()
     QVERIFY(q.exec());
     QVERIFY(q.next());
     QCOMPARE(q.value(0).toInt(), 1);
-    db.lazyClose_dbg();
+    db.closeConnection_dbg();
 }
 
 // Disabled: returns Disabled, no row written.

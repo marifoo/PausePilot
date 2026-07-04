@@ -1,5 +1,5 @@
 #include "historyeditsession.h"
-#include "timer.h"
+#include "timetracker.h"
 #include "logger.h"
 #include <QSet>
 #include <algorithm>
@@ -15,7 +15,7 @@ bool isSameSegmentId(const TimeDuration& a, const TimeDuration& b)
 
 } // namespace
 
-void HistoryEditSession::buildFromTimer(Timer& timer)
+void HistoryEditSession::buildFromTimer(TimeTracker& timer)
 {
     Timeline sessionSnapshot = timer.snapshot();
     const auto& currentDurations = sessionSnapshot.completed();
@@ -50,7 +50,7 @@ void HistoryEditSession::buildFromTimer(Timer& timer)
 
         if (isCrossMidnight(d.startTime, d.endTime)) {
             // Segments spanning more than one calendar boundary cannot occur in
-            // normal Timer operation — skip them entirely.
+            // normal TimeTracker operation — skip them entirely.
             if (d.endTime.toLocalTime().date() > d.startTime.toLocalTime().date().addDays(1)) {
                 qWarning("[HISTORY] buildFromTimer: skipping segment spanning >1 calendar boundary (segment_id: %s)",
                          qPrintable(d.segment_id.toString()));
@@ -194,7 +194,7 @@ bool HistoryEditSession::hasEdits() const
     return false;
 }
 
-void HistoryEditSession::refreshOngoing(Timer& timer)
+void HistoryEditSession::refreshOngoing(TimeTracker& timer)
 {
     if (pendingTimelines_.empty() || !pages_[0].isCurrent)
         return;
@@ -254,7 +254,7 @@ HistoryEditSession::SavePayload HistoryEditSession::buildSavePayload() const
 
     // Re-split using originIsMemory_:
     //   historyDurations    → finalized rows for DB (all completed rows)
-    //   currentMemoryDurations → live session for Timer commit (memory-origin rows)
+    //   currentMemoryDurations → live session for TimeTracker commit (memory-origin rows)
     //   currentSessionDurations → unfinalized rows for DB (ongoing only)
     //
     // A9: completed rows are finalized on save regardless of origin. Writing a
@@ -281,7 +281,7 @@ HistoryEditSession::SavePayload HistoryEditSession::buildSavePayload() const
             }
         }
         // Every completed row is finalized in the DB; memory-origin rows also
-        // stay in the live session for Timer::commitEditedTimeline().
+        // stay in the live session for TimeTracker::commitEditedTimeline().
         historyDurations.push_back(d);
         if (isMemory) {
             currentMemoryDurations.push_back(d);

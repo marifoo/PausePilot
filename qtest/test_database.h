@@ -89,6 +89,7 @@ private slots:
     // flushToDisc durable heartbeat (Issue 2)
     void test_flushToDisc_writes_heartbeat_row();
     void test_flushToDisc_idempotent();
+    void test_flushToDisc_restores_synchronous_normal();
 
     // Step 2 (S1): saveDurations(Append) upserts on segment_id collision
     void test_database_saveDurations_append_upserts_existing_segment_id();
@@ -109,7 +110,7 @@ private slots:
     void test_schema_status_ready_creates_missing_app_settings_and_idx_segment_id();
     void test_schema_status_inaccessible_readonly_file();
 
-    // Timer::initializeFromStore isolation: no side effects before recovery is called
+    // TimeTracker::initializeFromStore isolation: no side effects before recovery is called
     void test_constructor_only_does_not_consume_marker();
     void test_outdated_schema_does_not_mutate_db();
 

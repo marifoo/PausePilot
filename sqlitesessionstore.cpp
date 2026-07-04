@@ -123,7 +123,7 @@ SqliteSessionStore::SqliteSessionStore(const Settings& settings, QObject *parent
 
 SqliteSessionStore::~SqliteSessionStore()
 {
-    lazyClose();
+    closeConnection();
     
     QString connName = db.connectionName();
     db = QSqlDatabase();
@@ -228,7 +228,7 @@ bool SqliteSessionStore::ensureSchema()
     return true;
 }
 
-void SqliteSessionStore::lazyClose()
+void SqliteSessionStore::closeConnection()
 {
     if (db.isOpen()) {
         db.close();
@@ -642,7 +642,7 @@ bool SqliteSessionStore::saveDurations(const std::deque<TimeDuration>& durations
         return true;
     }
 
-    // Validate connection first (S5: ensureOpen before createBackup so we don't
+    // Validate connection first (ensureOpen before createBackup so we don't
     // create a backup for a DB we can't open).
     if (!ensureOpen()) {
         Logger::Log("[DB] Could not open DB to save Durations");
@@ -914,6 +914,10 @@ EntriesForDateResult SqliteSessionStore::hasEntriesForDate(const QDate& date)
 {
     QMutexLocker locker(&db_mutex_);
 
+    if (history_days_to_keep_ == 0) {
+        return EntriesForDateResult::Unknown;
+    }
+
     if (!ensureOpen()) {
         Logger::Log("[DB] Could not open DB to check entries for date");
         return EntriesForDateResult::Unknown;
@@ -955,7 +959,7 @@ EntriesForDateResult SqliteSessionStore::hasEntriesForDate(const QDate& date)
  * - Uses segment_id to update existing row instead of inserting new one
  * - Stores the actual segment_start_time_ (preserves original start, only updates end/duration)
  *
- * The caller (Timer) rotates session_.segment_id on mode changes,
+ * The caller (TimeTracker) rotates session_.segment_id on mode changes,
  * causing the next checkpoint to create a new row for the new segment.
  */
 SessionStoreResult SqliteSessionStore::saveCheckpoint(DurationType type, const QDateTime& startTime, const QDateTime& endTime, const SegmentId& segmentId)
@@ -1237,6 +1241,7 @@ SessionStoreResult SqliteSessionStore::flushToDisc()
 
     if (!db.transaction()) {
         Logger::Log("[DB] flushToDisc: could not begin transaction");
+        pragma.exec("PRAGMA synchronous=NORMAL");
         return SessionStoreResult::transient("Failed to start flush transaction: " + db.lastError().text());
     }
 
@@ -1248,15 +1253,18 @@ SessionStoreResult SqliteSessionStore::flushToDisc()
     if (!query.exec()) {
         Logger::Log("[DB] flushToDisc: write failed: " + query.lastError().text());
         db.rollback();
+        pragma.exec("PRAGMA synchronous=NORMAL");
         return SessionStoreResult::transient("Flush write failed: " + query.lastError().text());
     }
     if (!db.commit()) {
         Logger::Log("[DB] flushToDisc: commit failed: " + db.lastError().text());
         db.rollback();
+        pragma.exec("PRAGMA synchronous=NORMAL");
         return SessionStoreResult::transient("Flush commit failed: " + db.lastError().text());
     }
 
     Logger::Log("[DB] flushToDisc: durable heartbeat committed");
+    pragma.exec("PRAGMA synchronous=NORMAL");
     return SessionStoreResult::success();
 }
 
@@ -1574,7 +1582,7 @@ bool SqliteSessionStore::deleteLastCleanShutdownMarker()
  * qualifying rows, and decides whether the user needs to be notified.
  *
  * All internal mechanics (row ids, finalize/drop lists, marker timestamps) stay
- * inside this method.  Timer receives only domain facts via StartupRecoveryResult.
+ * inside this method.  TimeTracker receives only domain facts via StartupRecoveryResult.
  */
 StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateTime& now)
 {

@@ -3,10 +3,10 @@
  *
  * Owns the UI elements (buttons, labels) and handles user interactions:
  * button presses write settings, launch HistoryDialog, and build tooltips.
- * Timer state changes propagate here via signal connections
+ * TimeTracker state changes propagate here via signal connections
  * (started/stopped/paused/modeChanged) to update the visual state.
  * updateTimes() is called by the main loop (MainWin::onTick) to refresh the
- * time display labels by polling Timer.
+ * time display labels by polling TimeTracker.
  */
 
 #include "contentwidget.h"
@@ -34,7 +34,7 @@ static void toggleButtonColor(QPushButton* const button, const QColor& color)
         button->setStyleSheet("");
 }
 
-ContentWidget::ContentWidget(Settings & settings, Timer &timetracker, QWidget *parent)
+ContentWidget::ContentWidget(Settings & settings, TimeTracker &timetracker, QWidget *parent)
 	: QWidget(parent), settings_(settings), timetracker_(timetracker), button_hold_color_(QColor(180,216,228,255))
 {
 	setupGUI();
@@ -46,15 +46,15 @@ ContentWidget::ContentWidget(Settings & settings, Timer &timetracker, QWidget *p
 	QObject::connect(autopause_button_, SIGNAL(clicked()), this, SLOT(pressedAutoPauseButton()));
 	QObject::connect(show_history_button_, SIGNAL(clicked()), this, SLOT(pressedShowHistoryButton()));
 
-	connect(&timetracker_, &Timer::stopped,
-	        this, [this](Timer::StopReason) { setGUItoStop(); });
-	connect(&timetracker_, &Timer::started,
+	connect(&timetracker_, &TimeTracker::stopped,
+	        this, [this](TimeTracker::StopReason) { setGUItoStop(); });
+	connect(&timetracker_, &TimeTracker::started,
 	        this, [this](bool fromPause) { setGUItoActivity(fromPause); });
-	connect(&timetracker_, &Timer::paused,
+	connect(&timetracker_, &TimeTracker::paused,
 	        this, [this]() { setGUItoPause(); });
-	connect(&timetracker_, &Timer::modeChanged,
-	        this, [this](Timer::PauseCause cause) {
-		if (cause == Timer::PauseCause::LockAutopause)
+	connect(&timetracker_, &TimeTracker::modeChanged,
+	        this, [this](TimeTracker::PauseCause cause) {
+		if (cause == TimeTracker::PauseCause::LockAutopause)
 			setGUItoPause();
 	});
 }
@@ -133,7 +133,7 @@ void ContentWidget::setupButtonRows()
 	pintotop_button_->setToolTip("Keep this Window in Foreground");
 	autopause_button_ = new QPushButton("Auto-Pause");
 	autopause_button_->setFont(button_font);
-	autopause_tooltip1_ = "min after locking the PC:\nPause the Timer and count these ";
+	autopause_tooltip1_ = "min after locking the PC:\nPause the TimeTracker and count these ";
 	autopause_tooltip2_ = "min retroactively as a Pause";
 	autopause_button_->setToolTip(settings_.getAutopauseThresholdMinString() + autopause_tooltip1_ + settings_.getAutopauseThresholdMinString() + autopause_tooltip2_);
 	optionbutton_row_->addWidget(pintotop_button_);

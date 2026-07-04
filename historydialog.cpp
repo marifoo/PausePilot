@@ -4,13 +4,13 @@
  * Architecture:
  * - Transactional Editing: All changes (type toggling, splitting) are performed
  *   on local copies inside HistoryEditSession (session_). The actual database and
- *   Timer are only updated when the user clicks "OK" and commitChanges() succeeds.
+ *   TimeTracker are only updated when the user clicks "OK" and saveChanges() succeeds.
  * - Paging Model: Data is grouped by Date (Pages). Page 0 is always "Today"
  *   (in-memory + today's DB + ongoing), while subsequent pages are historical (DB).
  * - Safety: Checkpoints are paused while this dialog is open via
  *   TimerExclusiveEditGuard (beginExclusiveEdit on construction, endExclusiveEdit
  *   on destruction — guaranteed on all exit paths).
- * - Close blocking: accept() runs commitChanges() before closing. A failed DB
+ * - Close blocking: accept() runs saveChanges() before closing. A failed DB
  *   save or a declined merge confirmation leaves the dialog open so the user
  *   can correct the situation or cancel explicitly.
  */
@@ -37,7 +37,7 @@
 #include <algorithm>
 #include <QHash>
 
-HistoryDialog::HistoryDialog(Timer& timetracker, const Settings& settings, QWidget* parent)
+HistoryDialog::HistoryDialog(TimeTracker& timetracker, const Settings& settings, QWidget* parent)
     : QDialog(parent)
     , timetracker_(timetracker)
     , settings_(settings)
@@ -112,7 +112,7 @@ void HistoryDialog::accept()
  * 3. Delegate payload construction (normalization, origin re-split) to session_.
  * 4. If a merge will occur, ask for confirmation; abort on No.
  * 5. Persist via replaceAll().
- * 6. Update Timer runtime state via commitEditedTimeline() — only after persistence succeeds.
+ * 6. Update TimeTracker runtime state via commitEditedTimeline() — only after persistence succeeds.
  */
 bool HistoryDialog::saveChanges()
 {
@@ -193,12 +193,12 @@ bool HistoryDialog::saveChanges()
         Logger::Log("[HISTORY] No historical durations to save");
     }
 
-    // Step 5: Atomically update Timer's in-memory durations and checkpoint tracking.
+    // Step 5: Atomically update TimeTracker's in-memory durations and checkpoint tracking.
     const auto commitResult = timetracker_.commitEditedTimeline(memoryTimeline);
     if (!commitResult.ok) {
         Logger::Log("[HISTORY] commitEditedTimeline: checkpoint write failed after edit commit");
     }
-    Logger::Log("[HISTORY] Updated Timer current session and checkpoint tracking");
+    Logger::Log("[HISTORY] Updated TimeTracker current session and checkpoint tracking");
     return true;
 }
 
@@ -327,16 +327,6 @@ void HistoryDialog::updateTotalsLabel(uint idx)
     pageLabel_->setText(pages[idx].title + totalsStr);
 }
 
-/**
- * Refreshes the UI table with data from the current page.
- *
- * Responsibilities:
- * 1. Clears old data and widgets.
- * 2. Compares pendingChanges against original data to detect modifications.
- * 3. Re-populates the table.
- * 4. Binds Checkboxes for Type Toggling (Activity <-> Pause).
- * 5. Applies visual highlighting if the page has unsaved changes.
- */
 void HistoryDialog::addReadOnlyRow(QTableWidget* table, int row, const TimeDuration& d, const QString& suffix)
 {
     const QColor grayBg(200, 200, 200, 180);
@@ -355,6 +345,16 @@ void HistoryDialog::addReadOnlyRow(QTableWidget* table, int row, const TimeDurat
     table->setItem(row, 2, durationItem);
 }
 
+/**
+ * Refreshes the UI table with data from the current page.
+ *
+ * Responsibilities:
+ * 1. Clears old data and widgets.
+ * 2. Compares pendingChanges against original data to detect modifications.
+ * 3. Re-populates the table.
+ * 4. Binds Checkboxes for Type Toggling (Activity <-> Pause).
+ * 5. Applies visual highlighting if the page has unsaved changes.
+ */
 void HistoryDialog::updateTable(uint idx)
 {
     const auto& pages = session_.pages();
@@ -568,6 +568,11 @@ void HistoryDialog::showContextMenu(const QPoint& pos)
     menu.exec(table_->viewport()->mapToGlobal(pos));
 }
 
+void HistoryDialog::presetSplitDialog(SplitDialog& dlg, const TimeDuration& duration) const
+{
+    dlg.setFirstSegmentType(duration.type);
+}
+
 /**
  * Handles the "Split" context menu action.
  *
@@ -577,11 +582,6 @@ void HistoryDialog::showContextMenu(const QPoint& pos)
  * 3. Validates the result to ensure no duration is lost or created (sum check).
  * 4. Atomically replaces the original entry with the two new entries in the deque.
  */
-void HistoryDialog::presetSplitDialog(SplitDialog& dlg, const TimeDuration& duration) const
-{
-    dlg.setFirstSegmentType(duration.type);
-}
-
 void HistoryDialog::onSplitRow()
 {
     if (contextMenuRow_ < 0) return;

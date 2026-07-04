@@ -9,7 +9,7 @@
 #include "types.h"
 #include "timeline.h"
 
-class Timer;
+class TimeTracker;
 
 /**
  * HistoryEditSession — non-widget model for a single history-editing transaction.
@@ -23,7 +23,7 @@ class Timer;
  *
  * Lifetime: constructed when HistoryDialog opens, destroyed when it closes.
  * The containing dialog calls buildSavePayload() on accept to get the data to
- * persist, then calls Timer::commitEditedTimeline() with the resulting timelines.
+ * persist, then calls TimeTracker::commitEditedTimeline() with the resulting timelines.
  */
 class HistoryEditSession {
 public:
@@ -44,7 +44,7 @@ public:
 
     /**
      * Output of buildSavePayload() — the three buckets HistoryDialog hands to
-     * Timer::replaceAll() and Timer::commitEditedTimeline().
+     * TimeTracker::replaceAll() and TimeTracker::commitEditedTimeline().
      *
      * needsMergeConfirmation is true when normalization reduced the segment count,
      * meaning the user must confirm before the save proceeds.
@@ -52,22 +52,22 @@ public:
     struct SavePayload {
         Timeline historyTimeline;        ///< finalized rows (non-current-session)
         Timeline sessionTimeline;        ///< rows to save to DB as unfinalized (current-session + ongoing)
-        Timeline memoryTimeline;         ///< rows to commit into Timer's live session (current-session + ongoing)
+        Timeline memoryTimeline;         ///< rows to commit into TimeTracker's live session (current-session + ongoing)
         bool needsMergeConfirmation;     ///< true iff normalization merged overlapping rows
     };
 
     HistoryEditSession() = default;
 
     /// Populates pages_, pendingTimelines_, originIsMemory_, crossMidnightRows_
-    /// from the Timer's current state and its DB history.
-    void buildFromTimer(Timer& timer);
+    /// from the TimeTracker's current state and its DB history.
+    void buildFromTimer(TimeTracker& timer);
 
     /// Refreshes the ongoing segment's end-time from the engine. If the user has
     /// edited the type, the type edit is preserved while the end-time advances.
     /// Call just before save.
-    void refreshOngoing(Timer& timer);
+    void refreshOngoing(TimeTracker& timer);
 
-    /// Builds the three timeline buckets ready for persistence and Timer commit.
+    /// Builds the three timeline buckets ready for persistence and TimeTracker commit.
     /// Does NOT perform the save — the caller (HistoryDialog::accept()) owns that.
     SavePayload buildSavePayload() const;
 

@@ -12,7 +12,7 @@
  *
  * Typical usage:
  *     FakeSessionStore fakeDb;
- *     Timer tracker(settings, fakeDb);
+ *     TimeTracker tracker(settings, fakeDb);
  *     // ... exercise tracker ...
  *     QCOMPARE(fakeDb.callLog.count("saveCheckpoint"), 1);
  *     QVERIFY(fakeDb.callLog.contains("commitSession"));
