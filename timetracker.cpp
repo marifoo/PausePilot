@@ -474,7 +474,7 @@ void TimeTracker::startTimer(const QDateTime& now)
         // the Pause entry, making the reloaded timeline show two Activities
         // back-to-back with no gap. The row is written as finalized (is_finalized=1)
         // because the Pause segment is complete the moment the user un-pauses.
-        updateDurationsInDB();
+        persistDurationsOrRetainForRetry();
 
         if (checkpoint_interval_msec_ > 0) {
             checkpointTimer_.start(); // Resume periodic checkpoint saving
@@ -552,7 +552,7 @@ void TimeTracker::finalizePauseTransition(const QDateTime& now)
 {
     mode_ = Mode::Pause;
     session_.updateSegmentStartTime(now);
-    updateDurationsInDB();
+    persistDurationsOrRetainForRetry();
     session_.beginNewSegment(now);
     checkpointTimer_.stop();
 }
@@ -666,16 +666,12 @@ void TimeTracker::stopTimer(const QDateTime& now, StopReason reason)
 
     // Persist current session durations only (not entire history). History dialog does replace explicitly.
     // Use update interface to check for existing entries by start time and update them instead of creating duplicates
-    if (updateDurationsInDB()) {
+    if (persistDurationsOrRetainForRetry()) {
         session_.resetForNewSession();
         // Use the same `now` for the shutdown marker to maintain a single
         // consistent timestamp across the entire stop operation.
         db_.setLastCleanShutdownMarker(now);
         Logger::Log("[DB] Session durations updated");
-    } else {
-        session_.markUnsaved();
-        session_.unsaved_durations = session_.durations;
-        Logger::Log("[DB] Error updating session durations - data retained for next save attempt");
     }
 
     if (!discardedCrossMidnightId.isEmpty()) {
@@ -1123,6 +1119,18 @@ bool TimeTracker::updateDurationsInDB()
     return ok;
 }
 
+bool TimeTracker::persistDurationsOrRetainForRetry()
+{
+    if (updateDurationsInDB()) {
+        session_.clearUnsaved();
+        return true;
+    }
+    session_.markUnsaved();
+    session_.unsaved_durations = session_.durations;
+    Logger::Log("[DB] Session durations not persisted - retained for retry");
+    return false;
+}
+
 SessionStoreResult TimeTracker::replaceAll(const Timeline& history, const Timeline& session)
 {
     QMutexLocker locker(&mutex_);
@@ -1214,11 +1222,7 @@ bool TimeTracker::discardCrossMidnightOngoingAndStop(const QDateTime& now)
     // Best-effort: persist any already-completed (same-day) segments that
     // accumulated before midnight. Only the ONGOING segment is discarded.
     if (!session_.durations.empty()) {
-        if (!updateDurationsInDB()) {
-            session_.markUnsaved();
-            session_.unsaved_durations = session_.durations;
-            Logger::Log("[MIDNIGHT] Could not flush completed segments to DB - retained in unsaved buffer");
-        } else {
+        if (persistDurationsOrRetainForRetry()) {
             session_.resetForNewSession();
         }
     }

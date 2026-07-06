@@ -205,6 +205,14 @@ private:
     bool appendDurationsToDB();
     /// Rewrites all completed segments to the DB. Returns true on success.
     bool updateDurationsInDB();
+    /**
+     * Persists session_.durations and keeps the unsaved-data bookkeeping
+     * consistent: on success any stale retry cache is cleared; on failure the
+     * durations are retained in unsaved_durations so the next session start
+     * retries them (and escalates to a user warning after repeated failures).
+     * Returns updateDurationsInDB()'s result.
+     */
+    bool persistDurationsOrRetainForRetry();
     void replaceCurrentDurations(const std::deque<TimeDuration>& newDurations,
                                  const std::optional<TimeDuration>& ongoing = std::nullopt);
     // Atomically replaces the live session with `edited`. Delegates to

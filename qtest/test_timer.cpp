@@ -2363,3 +2363,91 @@ void TimerTest::test_F2_ontime_stop_does_not_discard_checkpoint()
     QVERIFY(!fakeDb.callLog.contains("discardCheckpoint"));
     QVERIFY(fakeDb.callLog.contains("commitSession"));
 }
+
+// F3: pauseTimer's finalizePauseTransition persists immediately for crash
+// safety, but ignored the result. A failure there must feed the same
+// unsaved-data bookkeeping stopTimer() already uses.
+void TimerTest::test_F3_pause_failure_marks_unsaved()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    clock.advance(60ll * 1000ll); // elapse a minute so the segment isn't zero-length
+
+    // Act: fail the persistence write that finalizePauseTransition performs.
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+    tracker.useTimerViaButton(Button::Pause);
+
+    // Assert: the failure is not swallowed - it is retained for retry.
+    QVERIFY(tracker.isPaused());
+    QVERIFY(tracker.sessionState_dbg().has_unsaved_data);
+    QVERIFY(!tracker.sessionState_dbg().unsaved_durations.empty());
+}
+
+// F3: backpauseTimer (via a LongOngoingLock) also finalizes through
+// finalizePauseTransition and must get the same treatment as an explicit pause.
+void TimerTest::test_F3_backpause_failure_marks_unsaved()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    const QDateTime lockInstant(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::LocalTime);
+    clock.setNow(lockInstant);
+
+    // Act: fail the persistence write that finalizePauseTransition performs.
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockInstant);
+
+    // Assert: the failure is not swallowed - it is retained for retry.
+    QVERIFY(tracker.isPaused());
+    QVERIFY(tracker.sessionState_dbg().has_unsaved_data);
+    QVERIFY(!tracker.sessionState_dbg().unsaved_durations.empty());
+}
+
+// F3: a later successful resume-from-Pause write must clear the unsaved flag
+// that a prior pause failure set.
+void TimerTest::test_F3_recovery_after_pause_failure_clears_unsaved()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+    tracker.useTimerViaButton(Button::Pause);
+    QVERIFY(tracker.sessionState_dbg().has_unsaved_data);
+
+    // Act: DB recovers; resuming from Pause persists successfully.
+    clock.advance(60ll * 1000ll);
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    tracker.useTimerViaButton(Button::Start);
+
+    // Assert: the retained unsaved data was cleared by the successful write.
+    QVERIFY(!tracker.sessionState_dbg().has_unsaved_data);
+    QVERIFY(tracker.sessionState_dbg().unsaved_durations.empty());
+}

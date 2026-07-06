@@ -162,6 +162,12 @@ private slots:
     void test_F2_shutdown_after_midnight_discards_checkpoint();
     void test_F2_deferred_midnight_replay_discards_checkpoint();
     void test_F2_ontime_stop_does_not_discard_checkpoint();
+
+    // F3: pause/backpause persistence failures must feed the same
+    // unsaved-data bookkeeping stopTimer() already uses.
+    void test_F3_pause_failure_marks_unsaved();
+    void test_F3_backpause_failure_marks_unsaved();
+    void test_F3_recovery_after_pause_failure_clears_unsaved();
 };
 
 #endif // TEST_TIMER_H
