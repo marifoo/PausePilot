@@ -639,6 +639,17 @@ void TimeTracker::stopTimer(const QDateTime& now, StopReason reason)
         Logger::Log("[DEBUG] Stop ignored; already stopped");
         return;
     }
+
+    // A cross-midnight ongoing segment is about to be discarded by
+    // addDuration(); capture its id so its unfinalized checkpoint row can be
+    // deleted below (otherwise startup recovery would resurrect the
+    // deliberately discarded time).
+    SegmentId discardedCrossMidnightId;
+    if (session_.segment_start_time.isValid()
+        && isCrossMidnight(session_.segment_start_time, now)) {
+        discardedCrossMidnightId = session_.segment_id;
+    }
+
     if (mode_ == Mode::Pause) {
         Logger::Log("[DEBUG] Stopping from Pause - D=" + QString::number(session_.durations.size()));
         addDuration(DurationType::Pause, session_.segment_start_time, now, session_.segment_id);
@@ -665,6 +676,11 @@ void TimeTracker::stopTimer(const QDateTime& now, StopReason reason)
         session_.markUnsaved();
         session_.unsaved_durations = session_.durations;
         Logger::Log("[DB] Error updating session durations - data retained for next save attempt");
+    }
+
+    if (!discardedCrossMidnightId.isEmpty()) {
+        const SessionStoreResult r = db_.discardCheckpoint(discardedCrossMidnightId);
+        logDbResultOrWarn(r, "discardCheckpoint");
     }
 
     emit stopped(reason);
@@ -1190,10 +1206,6 @@ bool TimeTracker::discardCrossMidnightOngoingAndStop(const QDateTime& now)
     if (!session_.segment_start_time.isValid()) return false;
     if (!isCrossMidnight(session_.segment_start_time, now)) return false;
 
-    // Capture the in-flight segment id before teardown so its orphaned
-    // (unfinalized) checkpoint row can be deleted below.
-    const SegmentId discardedId = session_.segment_id;
-
     Logger::Log(QString("[MIDNIGHT] Cross-midnight ongoing detected "
                         "(segment_start=%1, now=%2) — discarding segment, forcing stop")
         .arg(session_.segment_start_time.toString(Qt::ISODateWithMs))
@@ -1215,17 +1227,10 @@ bool TimeTracker::discardCrossMidnightOngoingAndStop(const QDateTime& now)
     // discarded by addDuration (TimeDuration::create returns CrossMidnight).
     // durations is already empty (success path) or retained in unsaved buffer
     // (flush-failure path), so the updateDurationsInDB call inside stopTimer is a
-    // no-op on success and a harmless retry on flush failure.
+    // no-op on success and a harmless retry on flush failure. stopTimer() also
+    // owns deleting the discarded segment's checkpoint row (it detects the
+    // same cross-midnight condition itself) — one owner, not two.
     stopTimer(now, StopReason::MidnightWatchdog);
-
-    // Delete the discarded segment's checkpoint row. Without this, a later
-    // startup recovery would finalize it (silently re-adding the deliberately
-    // discarded time) or the stale policy would drop it (silently losing
-    // checkpointed pre-midnight work). Observable side effect + log line.
-    if (!discardedId.isEmpty()) {
-        const SessionStoreResult r = db_.discardCheckpoint(discardedId);
-        logDbResultOrWarn(r, "discardCheckpoint");
-    }
     return true;
 }
 

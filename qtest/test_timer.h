@@ -156,6 +156,12 @@ private slots:
 
     // A4: shutdown_called_ is cleared on fresh session start to prevent silent data loss
     void test_A4_shutdown_called_cleared_on_fresh_session_start();
+
+    // F2: a late (post-resume) stop that crosses midnight must discard the
+    // in-flight segment's checkpoint row itself, not rely on the watchdog path.
+    void test_F2_shutdown_after_midnight_discards_checkpoint();
+    void test_F2_deferred_midnight_replay_discards_checkpoint();
+    void test_F2_ontime_stop_does_not_discard_checkpoint();
 };
 
 #endif // TEST_TIMER_H

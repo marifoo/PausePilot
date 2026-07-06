@@ -3,6 +3,7 @@
 #include "fakeclock.h"
 #include <QtTest>
 #include <QSqlQuery>
+#include <algorithm>
 
 using TestCommon::createSettingsFile;
 using TestCommon::sumDurations;
@@ -2258,4 +2259,107 @@ void TimerTest::test_A4_shutdown_called_cleared_on_fresh_session_start()
 
     // Assert: shutdown_called_ is now cleared, so wasShutDown() returns false.
     QVERIFY(!tracker.wasShutDown());
+}
+
+// F2: shutdown() after a machine slept past midnight must discard the
+// stale checkpoint of the ongoing (cross-midnight, discarded) segment —
+// otherwise recoverStartupCheckpoints() would resurrect it on next launch.
+void TimerTest::test_F2_shutdown_after_midnight_discards_checkpoint()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(preMidnight);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    clock.advance(60ll * 1000ll); // elapse a minute so the checkpoint isn't zero-length
+    tracker.triggerCheckpoint_dbg();
+    QVERIFY(fakeDb.callLog.contains("saveCheckpoint"));
+    const SegmentId checkpointSegmentId = tracker.sessionState_dbg().segment_id;
+    QVERIFY(!checkpointSegmentId.isEmpty());
+
+    // Act: machine "wakes" well past midnight; shutdown() stops the engine.
+    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime));
+    tracker.shutdown();
+
+    // Assert: the orphaned checkpoint row was discarded.
+    QVERIFY(fakeDb.callLog.contains("discardCheckpoint"));
+    const bool stillPresent = std::any_of(fakeDb.savedCheckpoints.begin(), fakeDb.savedCheckpoints.end(),
+        [&](const FakeSessionStore::CheckpointRecord& cp) { return cp.segmentId == checkpointSegmentId; });
+    QVERIFY(!stillPresent);
+}
+
+// F2: the deferred-midnight-stop replay in endExclusiveEdit() must discard
+// the checkpoint too — it goes through the same stopTimer() call.
+void TimerTest::test_F2_deferred_midnight_replay_discards_checkpoint()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(preMidnight);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    clock.advance(60ll * 1000ll); // elapse a minute so the checkpoint isn't zero-length
+    tracker.triggerCheckpoint_dbg();
+    const SegmentId checkpointSegmentId = tracker.sessionState_dbg().segment_id;
+    QVERIFY(!checkpointSegmentId.isEmpty());
+
+    // Dialog opens before midnight; the scheduled stop fires while it's open
+    // (dialog_open_ defers it — see onMidnightTimerFired), leaving
+    // pending_midnight_stop_ set for endExclusiveEdit() to replay.
+    tracker.beginExclusiveEdit();
+    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime));
+    tracker.setPendingMidnightStop_dbg(true);
+
+    // Act: dialog closes, replaying the deferred midnight stop.
+    tracker.endExclusiveEdit();
+
+    // Assert: discardCheckpoint fired for the live segment's id; mode stopped.
+    QVERIFY(tracker.isStopped());
+    QVERIFY(fakeDb.callLog.contains("discardCheckpoint"));
+    const bool stillPresent = std::any_of(fakeDb.savedCheckpoints.begin(), fakeDb.savedCheckpoints.end(),
+        [&](const FakeSessionStore::CheckpointRecord& cp) { return cp.segmentId == checkpointSegmentId; });
+    QVERIFY(!stillPresent);
+}
+
+// F2: an on-time stop (same day) must NOT discard the checkpoint — it gets
+// finalized by commitSession's upsert instead.
+void TimerTest::test_F2_ontime_stop_does_not_discard_checkpoint()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    clock.advance(60ll * 1000ll); // elapse a minute so the checkpoint isn't zero-length
+    tracker.triggerCheckpoint_dbg();
+    QVERIFY(fakeDb.callLog.contains("saveCheckpoint"));
+    fakeDb.callLog.clear();
+
+    // Act: stop the same day, before midnight.
+    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(23, 59, 0), Qt::LocalTime));
+    tracker.useTimerViaButton(Button::Stop);
+
+    // Assert: no discard; the completed segment was committed instead.
+    QVERIFY(!fakeDb.callLog.contains("discardCheckpoint"));
+    QVERIFY(fakeDb.callLog.contains("commitSession"));
 }
