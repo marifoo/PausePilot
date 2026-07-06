@@ -2662,3 +2662,90 @@ void DatabaseTest::test_loadDurations_skips_empty_segment_id_row()
     auto orphans = manager.loadUnfinalizedCheckpoints_dbg();
     QCOMPARE(orphans.size(), static_cast<size_t>(0));
 }
+
+// ============================================================================
+// F6: ensureSettingsTable() must validate the shape of a pre-existing
+// app_settings table, not just its presence (CREATE ... IF NOT EXISTS no-ops
+// on a wrong-shaped table).
+// ============================================================================
+
+void DatabaseTest::test_ensureSettingsTable_rebuilds_malformed_table()
+{
+    // Seed a valid durations table (so checkSchemaOnStartup reaches the
+    // additive-DDL path) plus a malformed app_settings table.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+
+    const QString seedConn = "f6_malformed_seed";
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", seedConn);
+        db.setDatabaseName(db_path_);
+        QVERIFY(db.open());
+        QSqlQuery q(db);
+        QVERIFY(q.exec(
+            "CREATE TABLE durations ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "segment_id TEXT NOT NULL CHECK(length(segment_id) > 0),"
+            "type INTEGER NOT NULL,"
+            "start_utc TEXT NOT NULL,"
+            "end_utc TEXT NOT NULL,"
+            "is_finalized INTEGER NOT NULL DEFAULT 0,"
+            "UNIQUE(segment_id)"
+            ")"
+        ));
+        QVERIFY(q.exec("CREATE TABLE app_settings (wrong TEXT)"));
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(seedConn);
+
+    SqliteSessionStore manager(settings);
+    QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Ready);
+
+    // The malformed table must have been rebuilt so the marker can be written.
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    QVERIFY(manager.setLastCleanShutdownMarker(now).ok());
+
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery colQuery(manager.rawDb_dbg());
+    QVERIFY(colQuery.exec("PRAGMA table_info(app_settings)"));
+    QSet<QString> foundColumns;
+    while (colQuery.next()) {
+        foundColumns.insert(colQuery.value(1).toString());
+    }
+    QCOMPARE(foundColumns, (QSet<QString>{"key", "value"}));
+    manager.closeConnection_dbg();
+}
+
+void DatabaseTest::test_ensureSettingsTable_leaves_healthy_table_untouched()
+{
+    // A well-formed app_settings table must not be rebuilt, and its data
+    // must survive a second checkSchemaOnStartup() call.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+
+    QDateTime now;
+    {
+        SqliteSessionStore seed(settings);
+        QCOMPARE(seed.checkSchemaOnStartup(), SchemaStatus::Created);
+        now = QDateTime::currentDateTimeUtc();
+        QVERIFY(seed.setLastCleanShutdownMarker(now).ok());
+    }
+
+    // Simulate the next app start: a fresh instance over the same DB file,
+    // hitting the existing-DB validation path (not the fresh-DB shortcut).
+    SqliteSessionStore manager(settings);
+    QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Ready);
+
+    // The marker written before this startup check must still be there.
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery q(manager.rawDb_dbg());
+    q.prepare("SELECT value FROM app_settings WHERE key = 'last_clean_shutdown'");
+    QVERIFY(q.exec());
+    QVERIFY(q.next());
+    QCOMPARE(q.value(0).toString(), now.toUTC().toString(Qt::ISODateWithMs));
+    manager.closeConnection_dbg();
+}

@@ -132,6 +132,10 @@ private slots:
 
     // A14: a backward clock jump must not resurrect a future-dated orphan
     void test_recoverStartupCheckpoints_drops_future_dated_orphan();
+
+    // F6: ensureSettingsTable() must validate the shape of a pre-existing app_settings table
+    void test_ensureSettingsTable_rebuilds_malformed_table();
+    void test_ensureSettingsTable_leaves_healthy_table_untouched();
 };
 
 #endif // TEST_DATABASE_H

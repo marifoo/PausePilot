@@ -464,15 +464,53 @@ void SqliteSessionStore::pruneOldBackups(int keepCount)
     }
 }
 
+// CREATE ... IF NOT EXISTS no-ops on a pre-existing table of any shape, so
+// validate the columns and rebuild on mismatch. app_settings only holds the
+// clean-shutdown marker; dropping a malformed table costs at most one
+// spurious recovery notification, whereas keeping it silently disables crash
+// recovery (marker reads/writes fail at runtime).
 bool SqliteSessionStore::ensureSettingsTable()
 {
+    static const char* kCreateSql =
+        "CREATE TABLE IF NOT EXISTS app_settings ("
+        "key TEXT PRIMARY KEY,"
+        "value TEXT NOT NULL"
+        ")";
+
     QSqlQuery query(db);
-    if (!query.exec(
-            "CREATE TABLE IF NOT EXISTS app_settings ("
-            "key TEXT PRIMARY KEY,"
-            "value TEXT NOT NULL"
-            ")")) {
+    if (!query.exec(kCreateSql)) {
         Logger::Log("[DB] Error creating app_settings table: " + query.lastError().text());
+        return false;
+    }
+
+    QSqlQuery colQuery(db);
+    if (!colQuery.exec("PRAGMA table_info(app_settings)")) {
+        Logger::Log("[DB] Error validating app_settings table: " + colQuery.lastError().text());
+        return false;
+    }
+
+    QSet<QString> foundColumns;
+    while (colQuery.next()) {
+        foundColumns.insert(colQuery.value(1).toString()); // column 1 = name
+    }
+
+    static const QSet<QString> kExpectedColumns = {"key", "value"};
+    if (foundColumns == kExpectedColumns) {
+        return true;
+    }
+
+    Logger::Log(QString("[DB] app_settings has unexpected columns {%1} - rebuilding")
+        .arg(QStringList(foundColumns.values()).join(", ")));
+
+    QSqlQuery dropQuery(db);
+    if (!dropQuery.exec("DROP TABLE app_settings")) {
+        Logger::Log("[DB] Error dropping malformed app_settings table: " + dropQuery.lastError().text());
+        return false;
+    }
+
+    QSqlQuery recreateQuery(db);
+    if (!recreateQuery.exec(kCreateSql)) {
+        Logger::Log("[DB] Error re-creating app_settings table: " + recreateQuery.lastError().text());
         return false;
     }
 
