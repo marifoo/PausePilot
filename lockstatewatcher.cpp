@@ -99,10 +99,11 @@ LockQueryResult LockStateWatcher::isSessionLocked()
 
 	LPTSTR ppBuffer = nullptr;
 	DWORD dwBytesReturned = 0;
-	DWORD dwSessionID = WTSGetActiveConsoleSessionId();
 	LockQueryResult result = LockQueryResult::Unknown;
 
-	if (pWTSQuerySessionInformation(WTS_CURRENT_SERVER_HANDLE, dwSessionID,
+	// Query OUR session, not the physical console's: under RDP they differ and
+	// the console's lock state is meaningless for this user.
+	if (pWTSQuerySessionInformation(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION,
 	                                WTSSessionInfoEx, &ppBuffer, &dwBytesReturned)) {
 		if (dwBytesReturned > 0 && ppBuffer) {
 			auto pInfo = reinterpret_cast<WTSINFOEXW*>(ppBuffer);
