@@ -20,7 +20,12 @@ void HistoryEditSession::buildFromTimer(TimeTracker& timer)
     Timeline sessionSnapshot = timer.snapshot();
     const auto& currentDurations = sessionSnapshot.completed();
     const auto& ongoingOpt = sessionSnapshot.ongoing();
-    auto historyDurations = timer.getDurationsHistory();
+    const LoadResult loaded = timer.loadHistoryFromStore();
+    const auto& historyDurations = loaded.durations;
+    history_load_failed_ = loaded.status == SessionStoreResult::TransientError
+        || loaded.status == SessionStoreResult::FatalError;
+    history_load_skipped_ = loaded.skipped;
+    history_load_repaired_ = loaded.repaired;
     const QDate today = QDate::currentDate();
 
     // Build a list of all current (in-memory) durations for dedup comparison.

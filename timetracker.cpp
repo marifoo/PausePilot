@@ -351,7 +351,6 @@ TimeTracker::TimeTracker(const Settings &settings, SessionStore& db, QObject *pa
       autopause_pending_resume_(false), is_locked_(false),
       dialog_open_(false), db_(db),
       checkpoint_interval_msec_(settings.getCheckpointIntervalMsec()),
-      last_history_load_skipped_(0), last_history_load_repaired_(0),
       startup_recovered_seconds_(0), startup_recovery_notification_needed_(false),
       day_boundary_watcher_(*this)
 {
@@ -995,19 +994,10 @@ void TimeTracker::commit(const Timeline& edited)
     commitEditedTimeline(edited);
 }
 
-std::deque<TimeDuration> TimeTracker::getDurationsHistory()
+LoadResult TimeTracker::loadHistoryFromStore()
 {
     QMutexLocker locker(&mutex_);
-    auto loadResult = db_.loadDurations();
-    last_history_load_skipped_ = loadResult.skipped;
-    last_history_load_repaired_ = loadResult.repaired;
-    return loadResult.durations;
-}
-
-std::pair<int, int> TimeTracker::getLastHistoryLoadStats() const
-{
-    QMutexLocker locker(&mutex_);
-    return std::make_pair(last_history_load_skipped_, last_history_load_repaired_);
+    return db_.loadDurations();
 }
 
 std::optional<TimeDuration> TimeTracker::getOngoingDuration() const

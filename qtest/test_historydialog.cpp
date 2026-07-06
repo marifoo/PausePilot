@@ -7,6 +7,7 @@
 
 #include "../historydialog.h"
 #include "../historyeditsession.h"
+#include "fakesessionstore.h"
 
 using TestCommon::createSettingsFile;
 using TestCommon::mk;
@@ -1367,4 +1368,51 @@ void HistoryDialogTest::test_H6_split_dialog_preset_from_source_row_type()
     // asserts the production source-row-type -> preset wiring, not a value we supply.
     QCOMPARE(dialog.splitDialogPresetFirstType_dbg(0, 0), DurationType::Pause);
     QCOMPARE(dialog.splitDialogPresetFirstType_dbg(1, 0), DurationType::Activity);
+}
+
+// ---------------------------------------------------------------------------
+// F1: a failed history load must refuse destructive edited saves
+// ---------------------------------------------------------------------------
+
+void HistoryDialogTest::test_F1_saveChanges_refuses_when_history_load_failed()
+{
+    // Money test: a failed history load must never allow saveChanges() to
+    // reach replaceAll() (which would DELETE FROM durations and rewrite only
+    // the rows that happened to load, wiping the rest).
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    fakeDb.loadDurationsResult.status = SessionStoreResult::TransientError;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime now = QDateTime::currentDateTime();
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
+
+    HistoryDialog dialog(tracker, settings);
+    // Make an edit so the save path is not skipped by the editless no-op guard.
+    dialog.editSession_dbg().pendingTimelines()[0] =
+        dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause);
+
+    fakeDb.callLog.clear();
+    dialog.debugSkipCritical_ = true;
+    dialog.done(QDialog::Accepted);
+
+    QVERIFY(!dialog.saveChanges());
+    QCOMPARE(fakeDb.callLog.count("replaceAll"), 0);
+}
+
+void HistoryDialogTest::test_F1_banner_shows_when_history_load_failed()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    fakeDb.loadDurationsResult.status = SessionStoreResult::TransientError;
+    TimeTracker tracker(settings, fakeDb);
+
+    HistoryDialog dialog(tracker, settings);
+
+    QVERIFY(dialog.getLoadReconciliationMessage().contains("could not be loaded"));
 }

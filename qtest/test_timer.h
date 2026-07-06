@@ -168,6 +168,10 @@ private slots:
     void test_F3_pause_failure_marks_unsaved();
     void test_F3_backpause_failure_marks_unsaved();
     void test_F3_recovery_after_pause_failure_clears_unsaved();
+
+    // F1: loadHistoryFromStore() forwards the store's LoadResult status
+    // instead of discarding it (the contract violation the rest of F1 follows from).
+    void test_F1_loadHistoryFromStore_forwards_status();
 };
 
 #endif // TEST_TIMER_H

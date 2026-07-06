@@ -95,12 +95,24 @@ public:
     const std::deque<TimeDuration>& crossMidnightRows() const { return crossMidnightRows_; }
     size_t pageCount() const { return pages_.size(); }
 
+    /// True iff loadHistoryFromStore() reported TransientError/FatalError in
+    /// buildFromTimer() — Disabled is a legitimate empty state, not a failure.
+    /// The model is then built from only whatever partial history did load,
+    /// so saving it back would silently drop the rest (see HistoryDialog::saveChanges()).
+    bool historyLoadFailed() const { return history_load_failed_; }
+    /// Number of rows skipped / auto-repaired by the last load, for the dialog's banner.
+    int historyLoadSkipped() const { return history_load_skipped_; }
+    int historyLoadRepaired() const { return history_load_repaired_; }
+
 private:
     std::vector<Page> pages_;
     std::vector<Timeline> pendingTimelines_;
     std::vector<Timeline> originalTimelines_; ///< snapshot of pendingTimelines_ at build (for hasEdits)
     QHash<QString, bool> originIsMemory_; ///< segment_id.toString() → true if memory row
     std::deque<TimeDuration> crossMidnightRows_; ///< cross-midnight rows preserved as-is through save
+    bool history_load_failed_ = false;
+    int history_load_skipped_ = 0;
+    int history_load_repaired_ = 0;
 };
 
 #endif // HISTORYEDITSESSION_H

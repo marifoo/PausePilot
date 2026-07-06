@@ -58,6 +58,10 @@ private slots:
     void test_H2_midnight_crossing_shown_on_both_pages();
     void test_H6_split_dialog_preset_from_source_row_type();
     void test_H14_cross_midnight_totals_and_counts();
+
+    // F1: a failed history load must refuse destructive edited saves
+    void test_F1_saveChanges_refuses_when_history_load_failed();
+    void test_F1_banner_shows_when_history_load_failed();
 };
 
 #endif // TEST_HISTORYDIALOG_H

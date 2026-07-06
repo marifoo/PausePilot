@@ -55,8 +55,8 @@ HistoryDialog::HistoryDialog(TimeTracker& timetracker, const Settings& settings,
     // Log initial state for debugging
     Logger::Log("[HISTORY] Dialog opened");
     {
-        auto historyDurations = timetracker_.getDurationsHistory();
-        Logger::Log(QString("[HISTORY] Loaded %1 total durations from DB").arg(historyDurations.size()));
+        auto historyDurations = timetracker_.loadHistoryFromStore();
+        Logger::Log(QString("[HISTORY] Loaded %1 total durations from DB").arg(historyDurations.durations.size()));
 
         const auto& pages = session_.pages();
         for (size_t i = 0; i < pages.size(); ++i) {
@@ -126,6 +126,25 @@ bool HistoryDialog::saveChanges()
     // now-finalized rows as unfinalized into a stopped engine. Refuse it.
     if (timetracker_.wasShutDown()) {
         Logger::Log("[HISTORY] Engine was shut down; discarding changes");
+        return false;
+    }
+
+    // A failed history load means the model is incomplete; saving would
+    // replaceAll() the DB with only the rows we managed to load, wiping the
+    // rest. Refuse; the user can cancel and retry.
+    if (session_.historyLoadFailed()) {
+        Logger::Log("[HISTORY] History load failed earlier; refusing to save edits");
+#ifndef QT_NO_DEBUG
+        if (!debugSkipCritical_) {
+            QMessageBox::critical(this, "History Unavailable",
+                "History could not be loaded from the database, so changes cannot "
+                "be saved safely. Close this dialog and try again.");
+        }
+#else
+        QMessageBox::critical(this, "History Unavailable",
+            "History could not be loaded from the database, so changes cannot "
+            "be saved safely. Close this dialog and try again.");
+#endif
         return false;
     }
 
@@ -247,6 +266,7 @@ void HistoryDialog::setupUI()
 
     QHBoxLayout* buttonLayout = new QHBoxLayout();
     QPushButton* okButton = new QPushButton("OK", this);
+    okButton->setEnabled(!session_.historyLoadFailed());
     QPushButton* cancelButton = new QPushButton("Cancel", this);
     buttonLayout->addStretch();
     buttonLayout->addWidget(okButton);
@@ -271,11 +291,20 @@ void HistoryDialog::setupUI()
  */
 QString HistoryDialog::buildLoadReconciliationMessage() const
 {
-    const auto [skipped, repaired] = timetracker_.getLastHistoryLoadStats();
-    if (skipped <= 0 && repaired <= 0)
-        return QString();
+    const int skipped = session_.historyLoadSkipped();
+    const int repaired = session_.historyLoadRepaired();
 
-    QString message = QString("%1 rows skipped due to corrupt data, %2 rows auto-repaired.")
+    QString message;
+    if (session_.historyLoadFailed()) {
+        message = "History could not be loaded — showing today only. Saving is disabled.";
+    }
+
+    if (skipped <= 0 && repaired <= 0)
+        return message;
+
+    if (!message.isEmpty())
+        message += "<br>";
+    message += QString("%1 rows skipped due to corrupt data, %2 rows auto-repaired.")
         .arg(skipped)
         .arg(repaired);
 

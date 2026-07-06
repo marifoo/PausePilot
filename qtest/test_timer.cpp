@@ -1077,9 +1077,6 @@ void TimerTest::test_D_timetracker_public_surface_regression()
     bool showNotification = tracker.shouldShowStartupRecoveryNotification();
     (void)showNotification;
 
-    auto histStats = tracker.getLastHistoryLoadStats();
-    (void)histStats;
-
     bool canMark = tracker.canMarkCleanShutdown();
     QVERIFY(!canMark); // timer is running
 
@@ -1109,8 +1106,8 @@ void TimerTest::test_D_timetracker_public_surface_regression()
     // replaceCurrentDurations
     tracker.replaceCurrentDurations_dbg({}, std::nullopt);
 
-    // getDurationsHistory
-    auto history = tracker.getDurationsHistory();
+    // loadHistoryFromStore
+    auto history = tracker.loadHistoryFromStore();
     (void)history;
 
     // Confirm the engine predicate is still there
@@ -2450,4 +2447,22 @@ void TimerTest::test_F3_recovery_after_pause_failure_clears_unsaved()
     // Assert: the retained unsaved data was cleared by the successful write.
     QVERIFY(!tracker.sessionState_dbg().has_unsaved_data);
     QVERIFY(tracker.sessionState_dbg().unsaved_durations.empty());
+}
+
+void TimerTest::test_F1_loadHistoryFromStore_forwards_status()
+{
+    // F1: loadHistoryFromStore() must forward the store's LoadResult (status
+    // included) instead of discarding the status and returning just the
+    // (empty-on-failure) deque — the contract violation the rest of F1 chain
+    // followed from.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    fakeDb.loadDurationsResult.status = SessionStoreResult::TransientError;
+    TimeTracker tracker(settings, fakeDb);
+
+    const LoadResult result = tracker.loadHistoryFromStore();
+
+    QCOMPARE(result.status, SessionStoreResult::TransientError);
 }

@@ -765,3 +765,38 @@ void HistoryEditSessionTest::test_backward_clock_jump_keeps_engine_running()
     clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(12, 5, 0), Qt::LocalTime));
     tracker.useTimerViaButton(Button::Stop);
 }
+
+// ---------------------------------------------------------------------------
+// F1: a failed history load must be remembered so saving can be refused
+// ---------------------------------------------------------------------------
+
+void HistoryEditSessionTest::test_F1_historyLoadFailed_true_on_transient_error()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    fakeDb.loadDurationsResult.status = SessionStoreResult::TransientError;
+    TimeTracker tracker(settings, fakeDb);
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker);
+
+    QVERIFY(session.historyLoadFailed());
+}
+
+void HistoryEditSessionTest::test_F1_historyLoadFailed_false_when_disabled()
+{
+    // Disabled history storage is a legitimate empty state, not a failure.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    fakeDb.loadDurationsResult.status = SessionStoreResult::Disabled;
+    TimeTracker tracker(settings, fakeDb);
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker);
+
+    QVERIFY(!session.historyLoadFailed());
+}

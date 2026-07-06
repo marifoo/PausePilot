@@ -63,6 +63,10 @@ private slots:
 
     // A8: a backward clock jump during a running session must not stop the engine
     void test_backward_clock_jump_keeps_engine_running();
+
+    // F1: a failed history load must be remembered (Disabled is not a failure)
+    void test_F1_historyLoadFailed_true_on_transient_error();
+    void test_F1_historyLoadFailed_false_when_disabled();
 };
 
 #endif // TEST_HISTORYEDITSESSION_H

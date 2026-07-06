@@ -164,8 +164,6 @@ private:
     mutable QRecursiveMutex mutex_;  // Protects state transitions from concurrent access
     QTimer checkpointTimer_;  // TimeTracker for periodic checkpoint saving
     qint64 checkpoint_interval_msec_; // Checkpoint interval (0 = disabled)
-    int last_history_load_skipped_;
-    int last_history_load_repaired_;
     qint64 startup_recovered_seconds_;
     bool startup_recovery_notification_needed_;
     DayBoundaryWatcher day_boundary_watcher_; // Must be last: constructed after all other members
@@ -329,8 +327,7 @@ public:
      * success otherwise.
      */
     EditCommitResult commitEditedTimeline(const Timeline& edited);
-    std::deque<TimeDuration> getDurationsHistory();
-    std::pair<int, int> getLastHistoryLoadStats() const;
+    LoadResult loadHistoryFromStore();
     std::optional<TimeDuration> getOngoingDuration() const;
     // Cheap thread-safe predicate used by the MainWin watchdog. Returns true
     // iff there is an ongoing segment whose start date is earlier than today.
