@@ -784,9 +784,12 @@ void TimeTracker::useTimerViaLockEvent(LockEvent event, const QDateTime& lockTim
     if (event == LockEvent::Unlock) {
         is_locked_ = false;
         if (dialog_open_) {
-            // Unlock supersedes any pending LongOngoingLock
-            pending_lock_event_ = LockEvent::None;
-            pending_lock_time_ = QDateTime();
+            // The locked interval still happened and must become Pause, so an
+            // Unlock stamps the pending correction's unlock time instead of
+            // cancelling it (only if a LongOngoingLock is actually pending).
+            if (pending_lock_correction_.has_value()) {
+                pending_lock_correction_->unlock_time = now;
+            }
             Logger::Log("[LOCK] suspended during history edit (Unlock)");
             return;
         }
@@ -798,8 +801,11 @@ void TimeTracker::useTimerViaLockEvent(LockEvent event, const QDateTime& lockTim
     }
     if (event == LockEvent::LongOngoingLock) {
         if (dialog_open_) {
-            pending_lock_event_ = LockEvent::LongOngoingLock;
-            pending_lock_time_ = lockTime;
+            if (pending_lock_correction_.has_value()) {
+                Logger::Log("[LOCK] a LongOngoingLock was already pending during this "
+                             "history edit - dropping it in favor of the new one");
+            }
+            pending_lock_correction_ = PendingLockCorrection{lockTime, QDateTime()};
             Logger::Log("[LOCK] suspended during history edit (LongOngoingLock)");
             return;
         }
@@ -1298,18 +1304,26 @@ void TimeTracker::endExclusiveEdit()
     // Replay deferred events that were suspended while dialog was open.
     if (pending_midnight_stop_) {
         pending_midnight_stop_ = false;
-        pending_lock_event_ = LockEvent::None;
+        pending_lock_correction_.reset();
         Logger::Log("[MIDNIGHT] Replaying deferred midnight stop after dialog close");
         stopTimer(now_provider_(), StopReason::MidnightScheduled);
-    } else if (pending_lock_event_ == LockEvent::LongOngoingLock) {
-        pending_lock_event_ = LockEvent::None;
-        QDateTime lockTime = pending_lock_time_;
-        pending_lock_time_ = QDateTime();
-        Logger::Log("[LOCK] Replaying deferred LongOngoingLock after dialog close");
-        useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
-    } else {
-        pending_lock_event_ = LockEvent::None;
-        pending_lock_time_ = QDateTime();
+    } else if (pending_lock_correction_.has_value()) {
+        const PendingLockCorrection corr = *pending_lock_correction_;
+        pending_lock_correction_.reset();
+        if (!corr.unlock_time.isValid()) {
+            // Still locked: identical to today's replay path.
+            Logger::Log("[LOCK] Replaying deferred LongOngoingLock after dialog close");
+            useTimerViaLockEvent(LockEvent::LongOngoingLock, corr.lock_time);
+        } else if (mode_ == Mode::Activity && settings_.isAutopauseEnabled()) {
+            // Lock AND unlock both happened during the dialog: replay both at
+            // their true wall-clock instants. backpauseTimer converts
+            // [lock_time -> unlock_time] to Pause; startTimer(unlock_time) then
+            // reopens an Activity segment exactly at the unlock, so the user's
+            // post-unlock work stays Activity.
+            Logger::Log("[LOCK] Replaying deferred lock interval as Pause after dialog close");
+            backpauseTimer(corr.unlock_time, corr.lock_time);
+            startTimer(corr.unlock_time);
+        }
     }
     // Restart checkpoint timer only after deferred events are replayed, so
     // stopTimer/backpauseTimer can set mode_ before we decide whether to arm.

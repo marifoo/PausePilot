@@ -98,6 +98,13 @@ private slots:
     void test_dialog_open_defers_midnight_stop();
     void test_dialog_open_allows_lock_bookkeeping();
 
+    // F4: Unlock during a dialog-open LongOngoingLock must replay as Pause at
+    // true timestamps, not cancel the correction.
+    void test_F4_unlock_during_dialog_replays_lock_interval_at_true_timestamps();
+    void test_F4_still_locked_at_dialog_close_replays_unchanged();
+    void test_F4_midnight_supersedes_pending_lock_correction();
+    void test_F4_ongoing_edited_away_skips_lock_correction_replay();
+
     // Unpause creates a new Pause segment with a fresh id (no segment reuse)
     void test_T1_unpause_creates_new_pause_segment_with_fresh_id();
     void test_T9_new_activity_segment_after_unpause_has_activity_type();

@@ -1331,13 +1331,15 @@ void TimerTest::test_dialog_open_blocks_backpause()
     QCOMPARE(tracker.sessionState_dbg().durations.size(), dursBefore);
     QVERIFY(tracker.isActive());
 
-    // Pending event recorded
-    QCOMPARE(tracker.pendingLockEvent_dbg(), LockEvent::LongOngoingLock);
+    // Pending correction recorded, still locked (no Unlock yet)
+    auto pending = tracker.pendingLockCorrection_dbg();
+    QVERIFY(pending.has_value());
+    QVERIFY(!pending->unlock_time.isValid());
 
     // Close dialog — replay deferred LongOngoingLock
     tracker.endExclusiveEdit();
     QVERIFY(!tracker.isDialogOpen_dbg());
-    QCOMPARE(tracker.pendingLockEvent_dbg(), LockEvent::None);
+    QVERIFY(!tracker.pendingLockCorrection_dbg().has_value());
 
     // After replay, timer should be in Pause (backpause applied)
     QVERIFY(tracker.isPaused());
@@ -1398,6 +1400,201 @@ void TimerTest::test_dialog_open_allows_lock_bookkeeping()
     QCOMPARE(fakeDb.callLog.count("saveCheckpoint"), checksBefore);
 
     tracker.endExclusiveEdit();
+}
+
+// ============================================================================
+// F4: an Unlock while HistoryDialog is open must not cancel a pending
+// LongOngoingLock correction — it must replay as Pause at the true
+// lock/unlock timestamps once the dialog closes.
+// ============================================================================
+
+// Headline fix: Lock then Unlock both happen during the dialog. Replay must
+// produce Activity[start->lock], Pause[lock->unlock], then a fresh Activity
+// segment anchored at unlock_time (not at dialog-close time).
+void TimerTest::test_F4_unlock_during_dialog_replays_lock_interval_at_true_timestamps()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/autopause_enabled", true);
+    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+
+    tracker.beginExclusiveEdit();
+
+    const QDateTime lockTime(QDate(2025, 6, 1), QTime(9, 20, 0), Qt::LocalTime);
+    clock.setNow(lockTime);
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
+
+    const QDateTime unlockTime(QDate(2025, 6, 1), QTime(10, 30, 0), Qt::LocalTime);
+    clock.setNow(unlockTime);
+    tracker.useTimerViaLockEvent(LockEvent::Unlock);
+
+    const QDateTime dialogCloseTime(QDate(2025, 6, 1), QTime(10, 35, 0), Qt::LocalTime);
+    clock.setNow(dialogCloseTime);
+    tracker.endExclusiveEdit();
+
+    const auto& d = tracker.sessionState_dbg().durations;
+    bool foundActivity = false;
+    bool foundPause = false;
+    for (const auto& seg : d) {
+        if (seg.type == DurationType::Activity && seg.startTime == t0 && seg.endTime == lockTime)
+            foundActivity = true;
+        if (seg.type == DurationType::Pause && seg.startTime == lockTime && seg.endTime == unlockTime)
+            foundPause = true;
+    }
+    QVERIFY2(foundActivity, "Expected completed Activity segment 09:00->09:20");
+    QVERIFY2(foundPause, "Expected completed Pause segment 09:20->10:30");
+
+    // Engine ended in Activity, ongoing segment anchored at the true unlock
+    // time (10:30), not at dialog-close time (10:35) — the post-unlock work
+    // stays Activity.
+    QVERIFY(tracker.isActive());
+    QCOMPARE(tracker.sessionState_dbg().segment_start_time, unlockTime);
+
+    tracker.useTimerViaButton(Button::Stop);
+}
+
+// Still-locked case: no Unlock arrives before the dialog closes. Behavior
+// must equal today's — backpause replays, engine ends in Pause with
+// autopause_pending_resume_ armed for a later real Unlock.
+void TimerTest::test_F4_still_locked_at_dialog_close_replays_unchanged()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/autopause_enabled", true);
+    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    tracker.beginExclusiveEdit();
+
+    const QDateTime lockTime(QDate(2025, 6, 1), QTime(9, 20, 0), Qt::LocalTime);
+    clock.setNow(lockTime);
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
+
+    // No Unlock before the dialog closes.
+    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::LocalTime));
+    tracker.endExclusiveEdit();
+
+    QVERIFY(tracker.isPaused());
+    QVERIFY(tracker.isAutopausePendingResume_dbg());
+    QVERIFY(!tracker.pendingLockCorrection_dbg().has_value());
+
+    const auto& d = tracker.sessionState_dbg().durations;
+    bool foundActivity = false;
+    for (const auto& seg : d)
+        if (seg.type == DurationType::Activity && seg.startTime == t0 && seg.endTime == lockTime)
+            foundActivity = true;
+    QVERIFY2(foundActivity, "Expected completed Activity segment 09:00->09:20");
+
+    tracker.useTimerViaButton(Button::Stop);
+}
+
+// A pending midnight stop still wins: it clears the pending lock correction
+// entirely, no backpause replay happens.
+void TimerTest::test_F4_midnight_supersedes_pending_lock_correction()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/autopause_enabled", true);
+    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    tracker.beginExclusiveEdit();
+
+    const QDateTime lockTime(QDate(2025, 6, 1), QTime(23, 20, 0), Qt::LocalTime);
+    clock.setNow(lockTime);
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
+
+    const QDateTime unlockTime(QDate(2025, 6, 1), QTime(23, 40, 0), Qt::LocalTime);
+    clock.setNow(unlockTime);
+    tracker.useTimerViaLockEvent(LockEvent::Unlock);
+
+    QVERIFY(tracker.pendingLockCorrection_dbg().has_value());
+    tracker.setPendingMidnightStop_dbg(true);
+
+    const QDateTime afterMidnight(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime);
+    clock.setNow(afterMidnight);
+    tracker.endExclusiveEdit();
+
+    QVERIFY(tracker.isStopped());
+    QVERIFY(!tracker.pendingMidnightStop_dbg());
+    QVERIFY(!tracker.pendingLockCorrection_dbg().has_value());
+}
+
+// If the ongoing segment was edited away during the dialog (mode_ == None),
+// the correction must be dropped without crashing or adding segments —
+// matching today's autopause_pending_resume_-only-armed-in-Activity rule.
+void TimerTest::test_F4_ongoing_edited_away_skips_lock_correction_replay()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/autopause_enabled", true);
+    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    tracker.beginExclusiveEdit();
+
+    const QDateTime lockTime(QDate(2025, 6, 1), QTime(9, 20, 0), Qt::LocalTime);
+    clock.setNow(lockTime);
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
+
+    const QDateTime unlockTime(QDate(2025, 6, 1), QTime(10, 30, 0), Qt::LocalTime);
+    clock.setNow(unlockTime);
+    tracker.useTimerViaLockEvent(LockEvent::Unlock);
+
+    // Simulate the ongoing segment being edited away while the dialog is
+    // still open (mode_ becomes None).
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.isStopped());
+
+    const size_t dursBefore = tracker.sessionState_dbg().durations.size();
+    tracker.endExclusiveEdit();
+
+    QCOMPARE(tracker.sessionState_dbg().durations.size(), dursBefore);
+    QVERIFY(!tracker.pendingLockCorrection_dbg().has_value());
+    QVERIFY(tracker.isStopped());
 }
 
 // ============================================================================

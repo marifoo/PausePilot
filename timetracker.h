@@ -158,8 +158,15 @@ private:
     bool dialog_open_;   // True while HistoryDialog is open (suspends mutation)
     bool pending_midnight_stop_ = false;
     bool shutdown_called_ = false;  // Set once shutdown() has torn down the engine.
-    LockEvent pending_lock_event_ = LockEvent::None;
-    QDateTime pending_lock_time_;   // Lock instant for deferred LongOngoingLock replay
+    /// A LongOngoingLock that arrived while HistoryDialog was open, to be applied
+    /// when the dialog closes. unlock_time stays invalid while the desktop is
+    /// still locked; an Unlock during the dialog stamps it instead of cancelling
+    /// the correction (the locked interval still happened and must become Pause).
+    struct PendingLockCorrection {
+        QDateTime lock_time;
+        QDateTime unlock_time;   // invalid ⇒ still locked at dialog close
+    };
+    std::optional<PendingLockCorrection> pending_lock_correction_;
     SessionStore& db_;
     mutable QRecursiveMutex mutex_;  // Protects state transitions from concurrent access
     QTimer checkpointTimer_;  // TimeTracker for periodic checkpoint saving
@@ -419,8 +426,8 @@ public:
     /// Returns whether the periodic checkpoint QTimer is currently running.
     bool isCheckpointTimerActive_dbg() const { return checkpointTimer_.isActive(); }
 
-    /// Exposes the pending deferred lock event (set while dialog_open_).
-    LockEvent pendingLockEvent_dbg() const { return pending_lock_event_; }
+    /// Exposes the pending deferred lock correction (set while dialog_open_).
+    auto pendingLockCorrection_dbg() const { return pending_lock_correction_; }
     void setPendingMidnightStop_dbg(bool v) { pending_midnight_stop_ = v; }
     bool pendingMidnightStop_dbg() const { return pending_midnight_stop_; }
 
