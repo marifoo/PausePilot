@@ -490,16 +490,24 @@ bool SqliteSessionStore::ensureSettingsTable()
     }
 
     QSet<QString> foundColumns;
+    bool keyIsPrimaryKey = false;
+    bool valueIsNotNull = false;
     while (colQuery.next()) {
-        foundColumns.insert(colQuery.value(1).toString()); // column 1 = name
+        const QString name = colQuery.value(1).toString(); // column 1 = name
+        foundColumns.insert(name);
+        if (name == "key") {
+            keyIsPrimaryKey = colQuery.value(5).toInt() == 1; // column 5 = pk
+        } else if (name == "value") {
+            valueIsNotNull = colQuery.value(3).toInt() == 1; // column 3 = notnull
+        }
     }
 
     static const QSet<QString> kExpectedColumns = {"key", "value"};
-    if (foundColumns == kExpectedColumns) {
+    if (foundColumns == kExpectedColumns && keyIsPrimaryKey && valueIsNotNull) {
         return true;
     }
 
-    Logger::Log(QString("[DB] app_settings has unexpected columns {%1} - rebuilding")
+    Logger::Log(QString("[DB] app_settings has unexpected columns/constraints {%1} - rebuilding")
         .arg(QStringList(foundColumns.values()).join(", ")));
 
     QSqlQuery dropQuery(db);

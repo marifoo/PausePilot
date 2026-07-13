@@ -2718,6 +2718,75 @@ void DatabaseTest::test_ensureSettingsTable_rebuilds_malformed_table()
     manager.closeConnection_dbg();
 }
 
+void DatabaseTest::test_ensureSettingsTable_rebuilds_constraint_malformed_table()
+{
+    // Right column names, but no PRIMARY KEY on key / no NOT NULL on value.
+    // "CREATE ... IF NOT EXISTS" no-ops, and the old validation only checked
+    // column names, so this shape passed through unrebuilt - meaning
+    // INSERT OR REPLACE loses its REPLACE semantics (no unique constraint on
+    // key) and marker writes accumulate duplicate rows instead of replacing.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+
+    const QString seedConn = "f6_constraint_malformed_seed";
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", seedConn);
+        db.setDatabaseName(db_path_);
+        QVERIFY(db.open());
+        QSqlQuery q(db);
+        QVERIFY(q.exec(
+            "CREATE TABLE durations ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "segment_id TEXT NOT NULL CHECK(length(segment_id) > 0),"
+            "type INTEGER NOT NULL,"
+            "start_utc TEXT NOT NULL,"
+            "end_utc TEXT NOT NULL,"
+            "is_finalized INTEGER NOT NULL DEFAULT 0,"
+            "UNIQUE(segment_id)"
+            ")"
+        ));
+        QVERIFY(q.exec("CREATE TABLE app_settings (key TEXT, value TEXT)"));
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(seedConn);
+
+    SqliteSessionStore manager(settings);
+    QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Ready);
+
+    // Write the marker twice with different timestamps. With REPLACE
+    // semantics restored, exactly one row should remain for the key.
+    const QDateTime first = QDateTime::currentDateTimeUtc().addSecs(-60);
+    const QDateTime second = QDateTime::currentDateTimeUtc();
+    QVERIFY(manager.setLastCleanShutdownMarker(first).ok());
+    QVERIFY(manager.setLastCleanShutdownMarker(second).ok());
+
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery countQuery(manager.rawDb_dbg());
+    countQuery.prepare("SELECT COUNT(*) FROM app_settings WHERE key = 'last_clean_shutdown'");
+    QVERIFY(countQuery.exec());
+    QVERIFY(countQuery.next());
+    QCOMPARE(countQuery.value(0).toInt(), 1);
+
+    QSqlQuery colQuery(manager.rawDb_dbg());
+    QVERIFY(colQuery.exec("PRAGMA table_info(app_settings)"));
+    bool keyIsPk = false;
+    bool valueNotNull = false;
+    while (colQuery.next()) {
+        const QString name = colQuery.value(1).toString();
+        if (name == "key") {
+            keyIsPk = colQuery.value(5).toInt() == 1;
+        } else if (name == "value") {
+            valueNotNull = colQuery.value(3).toInt() == 1;
+        }
+    }
+    QVERIFY(keyIsPk);
+    QVERIFY(valueNotNull);
+
+    manager.closeConnection_dbg();
+}
+
 void DatabaseTest::test_ensureSettingsTable_leaves_healthy_table_untouched()
 {
     // A well-formed app_settings table must not be rebuilt, and its data

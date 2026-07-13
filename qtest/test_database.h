@@ -135,6 +135,7 @@ private slots:
 
     // F6: ensureSettingsTable() must validate the shape of a pre-existing app_settings table
     void test_ensureSettingsTable_rebuilds_malformed_table();
+    void test_ensureSettingsTable_rebuilds_constraint_malformed_table();
     void test_ensureSettingsTable_leaves_healthy_table_untouched();
 };
 
