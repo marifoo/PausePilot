@@ -1323,6 +1323,13 @@ void TimeTracker::endExclusiveEdit()
             Logger::Log("[LOCK] Replaying deferred lock interval as Pause after dialog close");
             backpauseTimer(corr.unlock_time, corr.lock_time);
             startTimer(corr.unlock_time);
+            // startTimer() just re-armed the scheduled midnight stop using
+            // corr.unlock_time as "now" (needed so the Pause->Activity
+            // duration math is correct) — but the underlying QTimer counts
+            // real wall-clock ms from when it starts, so arming it against a
+            // historical instant makes it fire late. Re-arm against the
+            // real current time so it still fires at 23:59:59.500.
+            day_boundary_watcher_.armScheduledStop(now_provider_());
         }
     }
     // Restart checkpoint timer only after deferred events are replayed, so

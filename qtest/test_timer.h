@@ -104,6 +104,7 @@ private slots:
     void test_F4_still_locked_at_dialog_close_replays_unchanged();
     void test_F4_midnight_supersedes_pending_lock_correction();
     void test_F4_ongoing_edited_away_skips_lock_correction_replay();
+    void test_F4_replay_rearms_midnight_stop_at_real_time();
 
     // Unpause creates a new Pause segment with a fresh id (no segment reuse)
     void test_T1_unpause_creates_new_pause_segment_with_fresh_id();

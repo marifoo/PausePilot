@@ -138,6 +138,11 @@ private:
         /// Cancels the single-shot timer (call on any stop).
         void cancel();
 
+#ifndef QT_NO_DEBUG
+        /// Remaining ms until the scheduled stop fires (-1 if not armed). Test probe.
+        qint64 remainingMs_dbg() const { return midnight_timer_.remainingTime(); }
+#endif // QT_NO_DEBUG
+
     private:
         TimeTracker& owner_;
         QTimer midnight_timer_;

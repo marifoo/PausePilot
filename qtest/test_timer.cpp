@@ -1597,6 +1597,70 @@ void TimerTest::test_F4_ongoing_edited_away_skips_lock_correction_replay()
     QVERIFY(tracker.isStopped());
 }
 
+// F4 followup: the "lock AND unlock both happened during the dialog" replay
+// branch calls startTimer(corr.unlock_time) with a HISTORICAL timestamp.
+// startTimer's Pause->Activity path re-arms the scheduled midnight stop via
+// armScheduledStop(now) using that same historical "now" — but the
+// underlying QTimer counts real wall-clock ms from the moment it starts, so
+// the scheduled stop ends up armed for the wrong duration (computed from the
+// unlock instant's time-of-day, not from when the dialog actually closed).
+// If the dialog stays open a long time after the unlock, this makes the
+// midnight stop fire hours later than 23:59:59.500, risking a missed
+// day-boundary stop. This test checks the scheduled-stop timer's remaining
+// interval right after endExclusiveEdit() and asserts it reflects the REAL
+// dialog-close time, not the historical unlock time.
+void TimerTest::test_F4_replay_rearms_midnight_stop_at_real_time()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/autopause_enabled", true);
+    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+
+    tracker.beginExclusiveEdit();
+
+    const QDateTime lockTime(QDate(2025, 6, 1), QTime(9, 20, 0), Qt::LocalTime);
+    clock.setNow(lockTime);
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
+
+    const QDateTime unlockTime(QDate(2025, 6, 1), QTime(10, 30, 0), Qt::LocalTime);
+    clock.setNow(unlockTime);
+    tracker.useTimerViaLockEvent(LockEvent::Unlock);
+
+    // Dialog stays open for hours after the unlock before being closed.
+    const QDateTime dialogCloseTime(QDate(2025, 6, 1), QTime(14, 0, 0), Qt::LocalTime);
+    clock.setNow(dialogCloseTime);
+    tracker.endExclusiveEdit();
+
+    QVERIFY(tracker.isActive());
+
+    // Expected remaining interval if armed at the real dialog-close time
+    // (14:00:00 -> 23:59:59.500 = 9h59m59.5s).
+    const qint64 expectedMs =
+        QTime(14, 0, 0).msecsTo(QTime(23, 59, 59, 500));
+    const qint64 actualMs = tracker.dayBoundaryWatcher_dbg().remainingMs_dbg();
+
+    QVERIFY2(actualMs >= 0, "Scheduled stop must be armed after replay");
+    QVERIFY2(qAbs(actualMs - expectedMs) < 5000,
+        qPrintable(QString("Scheduled stop armed for %1 ms remaining, expected ~%2 ms "
+                            "(armed at real dialog-close time, not the historical unlock time)")
+                       .arg(actualMs).arg(expectedMs)));
+
+    tracker.useTimerViaButton(Button::Stop);
+}
+
 // ============================================================================
 // Pause-merge removal: unpause creates new Pause segment with fresh id
 // ============================================================================
