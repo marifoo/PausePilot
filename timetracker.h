@@ -37,10 +37,6 @@ struct SessionState {
     /// Completed duration segments for the current session (in-memory).
     std::deque<TimeDuration> durations;
 
-    /// Cached copy of durations that still need DB append-retry after a
-    /// failed save. Empty when there is nothing to retry.
-    std::deque<TimeDuration> unsaved_durations;
-
     /// Segment identity for checkpoint saves.  Empty when the timer
     /// is stopped (Mode::None).  Rotated on every mode transition so each
     /// segment gets its own DB row.
@@ -50,15 +46,6 @@ struct SessionState {
     /// timer is stopped. Used together with "now" to compute the ongoing
     /// segment's duration.
     QDateTime segment_start_time;
-
-    /// True when a previous DB save failed and the data in durations (or
-    /// unsaved_durations) still needs to be persisted.
-    bool has_unsaved_data = false;
-
-    /// Counts consecutive retry failures at the top of startTimer (None → Activity).
-    /// Reset to 0 on first success. When it reaches 3 the engine refuses to start
-    /// a new session until the user acknowledges the warning.
-    int consecutive_retry_failures = 0;
 
     // ---- Explicit transition methods ----
     // Each method logs the old→new state at debug level so that state
@@ -74,14 +61,8 @@ struct SessionState {
     /// Updates segment_start_time (e.g. after a pause transition).
     void updateSegmentStartTime(const QDateTime& newStart);
 
-    /// Marks unsaved data state after a failed DB write.
-    void markUnsaved();
-
-    /// Clears the unsaved flag and the retry cache after a successful save
-    /// or a fresh start.
-    void clearUnsaved();
-
-    /// Clears durations and unsaved state (fresh start).
+    /// Clears durations for a fresh session. Pending-commit bookkeeping is
+    /// owned separately by TimeTracker::PendingCommit.
     void resetForNewSession();
 
     /// Adopts the segment identity from an externally-provided ongoing
@@ -150,6 +131,50 @@ private:
         void onMidnightTimerFired();
     };
 
+    /**
+     * PendingCommit — the one persistence payload TimeTracker may still owe
+     * the store.
+     *
+     * Invariant: there is either no pending commit, or exactly one immutable
+     * payload awaiting a durable write. Every complete successful
+     * persistence (an ordinary commit, a Start-time retry, a successful
+     * replaceAll, or a contractual Disabled no-op) clears it. A pending
+     * payload blocks a new session from starting (see retryUnsavedDurations()).
+     *
+     * submit() is used by ordinary in-session persistence (Pause/Backpause/
+     * Stop): it may overwrite an already-pending payload with the current
+     * (larger) snapshot, because within one still-running session that
+     * snapshot is always a superset of anything already pending — segment
+     * ids are stable and commitSession() is an idempotent upsert. retry() is
+     * used only when mode_ == None; it takes no new content, so a failed
+     * retry can never replace the payload with newer mutable session
+     * contents — it is left byte-for-byte as submitted.
+     */
+    class PendingCommit {
+    public:
+        bool hasPending() const { return payload_.has_value(); }
+        const std::deque<TimeDuration>& payload() const { return *payload_; }
+
+        /// Records an ordinary persist attempt's outcome.
+        void submit(bool success, const std::deque<TimeDuration>& durations) {
+            if (success) { payload_.reset(); return; }
+            payload_ = durations;
+        }
+
+        /// Records a Start-time retry outcome against the payload already held.
+        void retry(bool success) {
+            if (success) payload_.reset();
+        }
+
+        /// DB is now authoritative after a successful replaceAll.
+        void replaceSucceeded() { payload_.reset(); }
+
+        void clear() { payload_.reset(); }
+
+    private:
+        std::optional<std::deque<TimeDuration>> payload_;
+    };
+
     const Settings & settings_;
     /// Wall-clock source for the engine. Defaults to QDateTime::currentDateTime;
     /// tests inject a controllable clock via setNowProvider_dbg(). Every internal
@@ -157,6 +182,7 @@ private:
     std::function<QDateTime()> now_provider_;
     QElapsedTimer timer_;
     SessionState session_;
+    PendingCommit pending_commit_;
     Mode mode_;
     bool autopause_pending_resume_;
     bool is_locked_;     // Track if desktop is currently locked (to prevent checkpoints while locked)
@@ -217,7 +243,8 @@ private:
     /// named context.  Does NOT affect control flow — callers decide what to do
     /// after calling this.
     void logDbResultOrWarn(const SessionStoreResult& result, const QString& context);
-    // Retries saving previously unsaved durations at the start of a new session.
+    // Retries the pending commit payload at the start of a new session
+    // (None -> Activity only). Performs exactly one retry attempt.
     // Returns true if startTimer should continue, false if it should abort.
     bool retryUnsavedDurations();
     bool maybeReanchorCheckpoint(const TimeDuration& seg);
@@ -228,10 +255,10 @@ private:
     /// Rewrites all completed segments to the DB. Returns true on success.
     bool updateDurationsInDB();
     /**
-     * Persists session_.durations and keeps the unsaved-data bookkeeping
-     * consistent: on success any stale retry cache is cleared; on failure the
-     * durations are retained in unsaved_durations so the next session start
-     * retries them (and escalates to a user warning after repeated failures).
+     * Persists session_.durations and keeps the pending-commit lifecycle
+     * consistent: on success any stale pending payload is cleared; on
+     * failure the durations become the pending payload so the next session
+     * start retries them exactly once.
      * Returns updateDurationsInDB()'s result.
      */
     bool persistDurationsOrRetainForRetry();
@@ -254,7 +281,7 @@ private:
         size_t durations_size;
         SegmentId segment_id;
         QDateTime segment_start_time;
-        bool has_unsaved_data;
+        bool has_pending_commit;
         Mode mode;
     };
     StateSnapshot takeStateSnapshot() const;
@@ -422,6 +449,16 @@ public:
     /// Direct access to the SessionState for test setup and assertions.
     SessionState& sessionState_dbg() { return session_; }
     const SessionState& sessionState_dbg() const { return session_; }
+
+    /// True iff a pending commit payload is currently retained (blocks a new
+    /// session from starting until retried successfully). Test probe exposing
+    /// PendingCommit behavior rather than a mutable field.
+    bool hasPendingCommit_dbg() const { return pending_commit_.hasPending(); }
+
+    /// Copy of the currently pending commit payload, or empty if none.
+    std::deque<TimeDuration> pendingCommitPayload_dbg() const {
+        return pending_commit_.hasPending() ? pending_commit_.payload() : std::deque<TimeDuration>{};
+    }
 
     /// Expose frequently-checked flags for test assertions.
     bool isDialogOpen_dbg() const { return dialog_open_; }

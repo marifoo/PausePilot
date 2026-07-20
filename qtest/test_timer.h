@@ -36,13 +36,39 @@ private slots:
     // SessionState transition tests
     void test_session_state_begin_new_segment();
     void test_session_state_clear_segment();
-    void test_session_state_mark_and_clear_unsaved();
     void test_session_state_reset_for_new_session();
     void test_session_state_adopt_ongoing_segment();
 
     // Issue 9: retry cache cleared after successful replaceAll
     void test_replaceAll_success_clears_unsaved_cache();
     void test_replaceAll_failure_keeps_unsaved_cache();
+
+    // ========================================================================
+    // A2 (R16-001/R09-001): PendingCommit replaces the retry flag/cache/
+    // counter with one immutable-payload lifecycle. There is no retry
+    // threshold: a pending commit always blocks Start until exactly one
+    // retry either succeeds (payload cleared) or fails (payload retained
+    // unchanged, Start refused).
+    // ========================================================================
+
+    // Table-driven: outcome of a first persist attempt (Stop) determines the
+    // resulting pending state and whether a subsequent Start is permitted.
+    void test_A2_first_submit_outcome_data();
+    void test_A2_first_submit_outcome();
+
+    // A single Start-time retry: failure keeps the exact same payload and
+    // refuses Start; success clears it and permits Start.
+    void test_A2_retry_failure_retains_same_payload_and_refuses_start();
+    void test_A2_retry_success_clears_payload_and_permits_start();
+
+    // Regression: no stale failure count. Three independent, non-consecutive
+    // fail/recover cycles must each behave exactly like a first failure —
+    // never escalate or refuse permanently.
+    void test_A2_no_stale_failure_state_across_intermittent_successes();
+
+    // Repeated failed Start attempts while a payload is pending must neither
+    // begin tracking nor mutate the retained payload.
+    void test_A2_repeated_failed_start_neither_starts_nor_mutates_payload();
 
     // State transition tests for public TimeTracker methods
     void test_session_state_start_to_pause_transition();

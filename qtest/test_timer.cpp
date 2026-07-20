@@ -239,13 +239,13 @@ void TimerTest::test_timer_retry_append_failure_then_success_preserves_segments(
     QVERIFY(dbFile.setPermissions(QFile::ReadOwner | QFile::ReadUser | QFile::ReadGroup | QFile::ReadOther));
     tracker.useTimerViaButton(Button::Stop);
 
-    QVERIFY(tracker.sessionState_dbg().has_unsaved_data);
+    QVERIFY(tracker.hasPendingCommit_dbg());
     QVERIFY(!tracker.sessionState_dbg().durations.empty());
     std::deque<TimeDuration> unsavedCopy = tracker.sessionState_dbg().durations;
 
     // Retry while DB is still blocked -> must stay unsaved.
     tracker.useTimerViaButton(Button::Start);
-    QVERIFY(tracker.sessionState_dbg().has_unsaved_data);
+    QVERIFY(tracker.hasPendingCommit_dbg());
     QVERIFY(!tracker.sessionState_dbg().durations.empty());
 
     // Restore DB and retry again -> previously unsaved rows should be appended.
@@ -289,13 +289,13 @@ void TimerTest::test_timer_retry_failure_keeps_unsaved_state_and_durations()
     QVERIFY(dbFile.setPermissions(QFile::ReadOwner | QFile::ReadUser | QFile::ReadGroup | QFile::ReadOther));
     tracker.useTimerViaButton(Button::Stop);
 
-    QVERIFY(tracker.sessionState_dbg().has_unsaved_data);
+    QVERIFY(tracker.hasPendingCommit_dbg());
     QVERIFY(!tracker.sessionState_dbg().durations.empty());
     const size_t sizeBeforeRetry = tracker.sessionState_dbg().durations.size();
 
     // Retry still fails -> must still be unsaved with data intact.
     tracker.useTimerViaButton(Button::Start);
-    QVERIFY(tracker.sessionState_dbg().has_unsaved_data);
+    QVERIFY(tracker.hasPendingCommit_dbg());
     QVERIFY(!tracker.sessionState_dbg().durations.empty());
     QVERIFY(tracker.sessionState_dbg().durations.size() >= sizeBeforeRetry);
 
@@ -347,30 +347,6 @@ void TimerTest::test_session_state_clear_segment()
     QVERIFY(!tracker.sessionState_dbg().segment_start_time.isValid());
 }
 
-void TimerTest::test_session_state_mark_and_clear_unsaved()
-{
-    // Arrange
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-    QVERIFY(!tracker.sessionState_dbg().has_unsaved_data);
-
-    // Act: mark unsaved
-    tracker.sessionState_dbg().markUnsaved();
-
-    // Assert
-    QVERIFY(tracker.sessionState_dbg().has_unsaved_data);
-
-    // Act: clear unsaved
-    tracker.sessionState_dbg().clearUnsaved();
-
-    // Assert
-    QVERIFY(!tracker.sessionState_dbg().has_unsaved_data);
-    QVERIFY(tracker.sessionState_dbg().unsaved_durations.empty());
-}
-
 void TimerTest::test_session_state_reset_for_new_session()
 {
     // Arrange
@@ -381,16 +357,12 @@ void TimerTest::test_session_state_reset_for_new_session()
     TimeTracker tracker(settings, fakeDb);
     QDateTime now = QDateTime::currentDateTime();
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-10), now));
-    tracker.sessionState_dbg().has_unsaved_data = true;
-    tracker.sessionState_dbg().unsaved_durations = tracker.sessionState_dbg().durations;
 
     // Act
     tracker.sessionState_dbg().resetForNewSession();
 
     // Assert
     QVERIFY(tracker.sessionState_dbg().durations.empty());
-    QVERIFY(!tracker.sessionState_dbg().has_unsaved_data);
-    QVERIFY(tracker.sessionState_dbg().unsaved_durations.empty());
 }
 
 void TimerTest::test_replaceAll_success_clears_unsaved_cache()
@@ -401,17 +373,23 @@ void TimerTest::test_replaceAll_success_clears_unsaved_cache()
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
 
-    QDateTime now = QDateTime::currentDateTime();
-    tracker.sessionState_dbg().durations.emplace_back(
-        TimeDuration::create(DurationType::Activity, now.addSecs(-60), now).value());
-    tracker.sessionState_dbg().unsaved_durations = tracker.sessionState_dbg().durations;
-    tracker.sessionState_dbg().has_unsaved_data = true;
+    // Arrange: a pending commit via a real failed Stop persist (behavior, not
+    // direct field injection).
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.hasPendingCommit_dbg());
 
+    // Act: replaceAll succeeds (default result), so the DB is now authoritative.
     const SessionStoreResult result = tracker.replaceAll(Timeline({}, std::nullopt), Timeline({}, std::nullopt));
 
     QVERIFY(result.ok());
-    QVERIFY(!tracker.sessionState_dbg().has_unsaved_data);
-    QVERIFY(tracker.sessionState_dbg().unsaved_durations.empty());
+    QVERIFY(!tracker.hasPendingCommit_dbg());
+    QVERIFY(tracker.pendingCommitPayload_dbg().empty());
 }
 
 void TimerTest::test_replaceAll_failure_keeps_unsaved_cache()
@@ -420,21 +398,26 @@ void TimerTest::test_replaceAll_failure_keeps_unsaved_cache()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    fakeDb.replaceDurationsResult = SessionStoreResult::transient("injected failure");
     TimeTracker tracker(settings, fakeDb);
 
-    QDateTime now = QDateTime::currentDateTime();
-    tracker.sessionState_dbg().durations.emplace_back(
-        TimeDuration::create(DurationType::Activity, now.addSecs(-60), now).value());
-    tracker.sessionState_dbg().unsaved_durations = tracker.sessionState_dbg().durations;
-    tracker.sessionState_dbg().has_unsaved_data = true;
+    // Arrange: a pending commit via a real failed Stop persist.
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.hasPendingCommit_dbg());
 
+    // Act: replaceAll itself also fails.
+    fakeDb.replaceDurationsResult = SessionStoreResult::transient("injected failure");
     const SessionStoreResult result = tracker.replaceAll(Timeline({}, std::nullopt), Timeline({}, std::nullopt));
 
     QVERIFY(!result.ok());
     QVERIFY(result.category == SessionStoreResult::TransientError);
-    QVERIFY(tracker.sessionState_dbg().has_unsaved_data);
-    QVERIFY(!tracker.sessionState_dbg().unsaved_durations.empty());
+    QVERIFY(tracker.hasPendingCommit_dbg());
+    QVERIFY(!tracker.pendingCommitPayload_dbg().empty());
 }
 
 void TimerTest::test_session_state_adopt_ongoing_segment()
@@ -533,7 +516,7 @@ void TimerTest::test_session_state_stop_clears_segment()
     QVERIFY(tracker.isStopped());
     QVERIFY(tracker.sessionState_dbg().segment_id.isEmpty());
     QVERIFY(!tracker.sessionState_dbg().segment_start_time.isValid());
-    QVERIFY(!tracker.sessionState_dbg().has_unsaved_data);
+    QVERIFY(!tracker.hasPendingCommit_dbg());
 }
 
 // ============================================================================
@@ -2224,8 +2207,7 @@ void TimerTest::test_disabled_history_stop_keeps_clean_state_no_warning()
 
     // Assert: Disabled was folded into success, so no failure side effects.
     QCOMPARE(warnSpy.count(), 0);
-    QCOMPARE(tracker.sessionState_dbg().has_unsaved_data, false);
-    QCOMPARE(tracker.sessionState_dbg().consecutive_retry_failures, 0);
+    QCOMPARE(tracker.hasPendingCommit_dbg(), false);
 }
 
 // commitEditedTimeline re-anchors a checkpoint for an ongoing Activity segment.
@@ -3064,8 +3046,8 @@ void TimerTest::test_F3_pause_failure_marks_unsaved()
 
     // Assert: the failure is not swallowed - it is retained for retry.
     QVERIFY(tracker.isPaused());
-    QVERIFY(tracker.sessionState_dbg().has_unsaved_data);
-    QVERIFY(!tracker.sessionState_dbg().unsaved_durations.empty());
+    QVERIFY(tracker.hasPendingCommit_dbg());
+    QVERIFY(!tracker.pendingCommitPayload_dbg().empty());
 }
 
 // F3: backpauseTimer (via a LongOngoingLock) also finalizes through
@@ -3093,8 +3075,8 @@ void TimerTest::test_F3_backpause_failure_marks_unsaved()
 
     // Assert: the failure is not swallowed - it is retained for retry.
     QVERIFY(tracker.isPaused());
-    QVERIFY(tracker.sessionState_dbg().has_unsaved_data);
-    QVERIFY(!tracker.sessionState_dbg().unsaved_durations.empty());
+    QVERIFY(tracker.hasPendingCommit_dbg());
+    QVERIFY(!tracker.pendingCommitPayload_dbg().empty());
 }
 
 // F3: a later successful resume-from-Pause write must clear the unsaved flag
@@ -3115,7 +3097,7 @@ void TimerTest::test_F3_recovery_after_pause_failure_clears_unsaved()
     clock.advance(60ll * 1000ll);
     fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
     tracker.useTimerViaButton(Button::Pause);
-    QVERIFY(tracker.sessionState_dbg().has_unsaved_data);
+    QVERIFY(tracker.hasPendingCommit_dbg());
 
     // Act: DB recovers; resuming from Pause persists successfully.
     clock.advance(60ll * 1000ll);
@@ -3123,8 +3105,220 @@ void TimerTest::test_F3_recovery_after_pause_failure_clears_unsaved()
     tracker.useTimerViaButton(Button::Start);
 
     // Assert: the retained unsaved data was cleared by the successful write.
-    QVERIFY(!tracker.sessionState_dbg().has_unsaved_data);
-    QVERIFY(tracker.sessionState_dbg().unsaved_durations.empty());
+    QVERIFY(!tracker.hasPendingCommit_dbg());
+    QVERIFY(tracker.pendingCommitPayload_dbg().empty());
+}
+
+// ============================================================================
+// A2 (R16-001/R09-001): PendingCommit replaces the retry flag/cache/counter
+// with one immutable-payload lifecycle. There is no retry threshold.
+// ============================================================================
+
+void TimerTest::test_A2_first_submit_outcome_data()
+{
+    QTest::addColumn<int>("category");
+    QTest::addColumn<bool>("expectPendingAfterStop");
+    QTest::addColumn<bool>("expectStartPermitted");
+
+    QTest::newRow("Success")        << static_cast<int>(SessionStoreResult::Success)        << false << true;
+    QTest::newRow("Disabled")       << static_cast<int>(SessionStoreResult::Disabled)        << false << true;
+    QTest::newRow("TransientError") << static_cast<int>(SessionStoreResult::TransientError)  << true  << false;
+    QTest::newRow("FatalError")     << static_cast<int>(SessionStoreResult::FatalError)      << true  << false;
+}
+
+// Table-driven (A2 packet table, "first submit"/"operation" rows): the
+// outcome of a single persist attempt at Stop determines whether a pending
+// commit remains and whether a subsequent Start is permitted. Start is
+// attempted with the SAME store outcome still configured, so a failing
+// category is retried exactly once and refused - never "continued" with a
+// warning.
+void TimerTest::test_A2_first_submit_outcome()
+{
+    QFETCH(int, category);
+    QFETCH(bool, expectPendingAfterStop);
+    QFETCH(bool, expectStartPermitted);
+
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+
+    const auto cat = static_cast<SessionStoreResult::Category>(category);
+    const bool isFailure = (cat == SessionStoreResult::TransientError || cat == SessionStoreResult::FatalError);
+    fakeDb.commitSessionResult = {cat, isFailure ? QStringLiteral("injected failure") : QString()};
+    tracker.useTimerViaButton(Button::Stop);
+
+    QCOMPARE(tracker.hasPendingCommit_dbg(), expectPendingAfterStop);
+
+    // Act: attempt Start with the same store outcome still configured.
+    tracker.useTimerViaButton(Button::Start);
+
+    QCOMPARE(tracker.isActive(), expectStartPermitted);
+    QCOMPARE(tracker.isStopped(), !expectStartPermitted);
+    // A refused Start must never silently drop the pending payload.
+    QCOMPARE(tracker.hasPendingCommit_dbg(), !expectStartPermitted);
+}
+
+// A single Start-time retry that still fails must retain the exact same
+// payload (same segment IDs/content) - never replace it with newer mutable
+// session contents - and must refuse Start.
+void TimerTest::test_A2_retry_failure_retains_same_payload_and_refuses_start()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.hasPendingCommit_dbg());
+    const auto payloadBefore = tracker.pendingCommitPayload_dbg();
+    QVERIFY(!payloadBefore.empty());
+
+    // Act: one Start-time retry attempt, still failing.
+    tracker.useTimerViaButton(Button::Start);
+
+    // Assert: refused, payload retained byte-for-byte.
+    QVERIFY(tracker.isStopped());
+    QVERIFY(tracker.hasPendingCommit_dbg());
+    const auto payloadAfter = tracker.pendingCommitPayload_dbg();
+    QCOMPARE(payloadAfter.size(), payloadBefore.size());
+    for (size_t i = 0; i < payloadBefore.size(); ++i) {
+        QCOMPARE(payloadAfter[i].segment_id.toString(), payloadBefore[i].segment_id.toString());
+        QCOMPARE(payloadAfter[i].startTime, payloadBefore[i].startTime);
+        QCOMPARE(payloadAfter[i].endTime, payloadBefore[i].endTime);
+    }
+}
+
+// A single Start-time retry that succeeds clears the payload and permits Start.
+void TimerTest::test_A2_retry_success_clears_payload_and_permits_start()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.hasPendingCommit_dbg());
+
+    // Act: store recovers; the Start-time retry now succeeds.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    tracker.useTimerViaButton(Button::Start);
+
+    // Assert: pending cleared, Start permitted.
+    QVERIFY(tracker.isActive());
+    QVERIFY(!tracker.hasPendingCommit_dbg());
+}
+
+// Regression for R09-001: there is no retry counter to go stale. Three
+// independent, non-consecutive fail/recover cycles must each behave exactly
+// like a first failure - a single retry either unblocks Start or refuses it;
+// nothing ever escalates or refuses permanently.
+void TimerTest::test_A2_no_stale_failure_state_across_intermittent_successes()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        tracker.useTimerViaButton(Button::Start);
+        QVERIFY(tracker.isActive());
+        clock.advance(60ll * 1000ll);
+
+        // Fail the Stop persist -> pending commit.
+        fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+        tracker.useTimerViaButton(Button::Stop);
+        QVERIFY(tracker.isStopped());
+        QVERIFY(tracker.hasPendingCommit_dbg());
+
+        // Start while still failing: must be refused, exactly like a first-ever failure.
+        tracker.useTimerViaButton(Button::Start);
+        QVERIFY(tracker.isStopped());
+        QVERIFY(tracker.hasPendingCommit_dbg());
+
+        // Fix the store: the single retry now succeeds.
+        fakeDb.commitSessionResult = SessionStoreResult::success();
+        tracker.useTimerViaButton(Button::Start);
+        QVERIFY(tracker.isActive());
+        QVERIFY(!tracker.hasPendingCommit_dbg());
+
+        clock.advance(60ll * 1000ll);
+        tracker.useTimerViaButton(Button::Stop);
+        QVERIFY(!tracker.hasPendingCommit_dbg());
+    }
+
+    // No message ever mentions an escalating "consecutive failure" count.
+    for (int i = 0; i < warnSpy.count(); ++i) {
+        const QString msg = warnSpy.at(i).at(0).toString();
+        QVERIFY(!msg.contains("consecutive", Qt::CaseInsensitive));
+    }
+}
+
+// Repeated failed Start attempts while a payload is pending must neither
+// begin tracking nor mutate the payload retained from the earlier session.
+void TimerTest::test_A2_repeated_failed_start_neither_starts_nor_mutates_payload()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.hasPendingCommit_dbg());
+    const auto payloadBefore = tracker.pendingCommitPayload_dbg();
+
+    // Act: repeatedly attempt Start while the store keeps failing.
+    for (int i = 0; i < 3; ++i) {
+        tracker.useTimerViaButton(Button::Start);
+        QVERIFY(tracker.isStopped());
+        QVERIFY(!tracker.isActive());
+    }
+
+    // Assert: never began tracking, payload never mutated.
+    QVERIFY(tracker.isStopped());
+    const auto payloadAfter = tracker.pendingCommitPayload_dbg();
+    QCOMPARE(payloadAfter.size(), payloadBefore.size());
+    for (size_t i = 0; i < payloadBefore.size(); ++i) {
+        QCOMPARE(payloadAfter[i].segment_id.toString(), payloadBefore[i].segment_id.toString());
+    }
 }
 
 void TimerTest::test_F1_loadHistoryFromStore_forwards_status()

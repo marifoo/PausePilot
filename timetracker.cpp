@@ -152,33 +152,11 @@ void SessionState::updateSegmentStartTime(const QDateTime& newStart)
         .arg(oldStart.toString(Qt::ISODate), newStart.toString(Qt::ISODate)));
 }
 
-void SessionState::markUnsaved()
-{
-    if (!has_unsaved_data) {
-        has_unsaved_data = true;
-        Logger::Log("[STATE] markUnsaved: false -> true");
-    }
-}
-
-void SessionState::clearUnsaved()
-{
-    bool old = has_unsaved_data;
-    has_unsaved_data = false;
-    unsaved_durations.clear();
-    if (old) {
-        Logger::Log("[STATE] clearUnsaved: true -> false");
-    }
-}
-
 void SessionState::resetForNewSession()
 {
     size_t oldSize = durations.size();
-    bool oldUnsaved = has_unsaved_data;
     durations.clear();
-    has_unsaved_data = false;
-    unsaved_durations.clear();
-    Logger::Log(QString("[STATE] resetForNewSession: durations %1 -> 0, unsaved %2 -> false")
-        .arg(oldSize).arg(oldUnsaved ? "true" : "false"));
+    Logger::Log(QString("[STATE] resetForNewSession: durations %1 -> 0").arg(oldSize));
 }
 
 void SessionState::adoptOngoingSegment(const TimeDuration& ongoing)
@@ -204,7 +182,7 @@ TimeTracker::StateSnapshot TimeTracker::takeStateSnapshot() const
         session_.durations.size(),
         session_.segment_id,
         session_.segment_start_time,
-        session_.has_unsaved_data,
+        pending_commit_.hasPending(),
         mode_
     };
 }
@@ -223,15 +201,15 @@ TimeTracker::StateGuard::~StateGuard()
     bool changed = (exit.durations_size != entry_.durations_size)
                 || (exit.segment_id != entry_.segment_id)
                 || (exit.segment_start_time != entry_.segment_start_time)
-                || (exit.has_unsaved_data != entry_.has_unsaved_data)
+                || (exit.has_pending_commit != entry_.has_pending_commit)
                 || (exit.mode != entry_.mode);
     if (changed) {
         qWarning("[STATE-GUARD] Unacknowledged state mutation in %s: "
-                 "durations %zu->%zu, segId '%s'->'%s', unsaved %d->%d, mode %d->%d",
+                 "durations %zu->%zu, segId '%s'->'%s', pending %d->%d, mode %d->%d",
                  method_,
                  entry_.durations_size, exit.durations_size,
                  qPrintable(entry_.segment_id.toString()), qPrintable(exit.segment_id.toString()),
-                 entry_.has_unsaved_data, exit.has_unsaved_data,
+                 entry_.has_pending_commit, exit.has_pending_commit,
                  static_cast<int>(entry_.mode), static_cast<int>(exit.mode));
         Q_ASSERT_X(false, method_,
                     "SessionState changed without explicit transition call");
@@ -409,49 +387,36 @@ TimeTracker::~TimeTracker()
 }
 
 /**
- * Retries saving previously unsaved durations at the start of a new session.
+ * Retries the pending commit payload at the start of a new session (called
+ * only from the None -> Activity transition in startTimer()). Performs
+ * exactly one retry attempt against the payload PendingCommit already holds
+ * — there is no retry counter or failure threshold.
  *
- * Three outcomes:
- * - Success: clears unsaved state, returns true (startTimer continues)
- * - FatalError/CallerBug: returns false (startTimer aborts)
- * - TransientError: increments retry counter; returns false if max retries
- *   reached (abort with warning), returns true otherwise (warn-and-continue)
+ * - No pending payload: no-op, returns true (startTimer continues).
+ * - Success/Disabled: payload cleared, returns true (startTimer continues).
+ * - Any other failure: payload retained unchanged, one concise error is
+ *   emitted (Fatal already emitted its own message via logDbResultOrWarn),
+ *   returns false (startTimer aborts; tracker remains stopped).
  */
 bool TimeTracker::retryUnsavedDurations()
 {
-    // Use unsaved_durations if present to keep retries idempotent.
-    const std::deque<TimeDuration>& retry_source = session_.unsaved_durations.empty() ? session_.durations : session_.unsaved_durations;
-    if (!session_.has_unsaved_data || retry_source.empty()) {
+    if (!pending_commit_.hasPending()) {
         return true;
     }
 
-    Logger::Log("[DB] Retrying save of previously unsaved durations");
-    const SessionStoreResult retryResult = appendDurationsChunkToDB(retry_source);
-    if (retryResult.okOrDisabled()) {
-        // Disabled history is a no-op, not a retry failure.
-        session_.clearUnsaved();
-        session_.consecutive_retry_failures = 0;
-        Logger::Log("[DB] Previously unsaved durations saved successfully");
+    Logger::Log("[DB] Retrying pending commit at Start");
+    const SessionStoreResult retryResult = appendDurationsChunkToDB(pending_commit_.payload());
+    const bool ok = retryResult.okOrDisabled();
+    pending_commit_.retry(ok);
+    if (ok) {
+        Logger::Log("[DB] Pending commit saved successfully");
         return true;
     }
-    if (retryResult.category == SessionStoreResult::FatalError
-        || retryResult.category == SessionStoreResult::CallerBug) {
-        // Already handled by logDbResultOrWarn inside appendDurationsChunkToDB
-        if (retryResult.category == SessionStoreResult::FatalError)
-            session_.consecutive_retry_failures = 3;
-        return false;
+    if (retryResult.category != SessionStoreResult::FatalError) {
+        // FatalError already emitted "Database error: ..." via logDbResultOrWarn.
+        emit userWarning("Could not save previous session data. Please retry Start.");
     }
-    // TransientError
-    session_.consecutive_retry_failures++;
-    Logger::Log(QString("[DB] CRITICAL: Retry save failed (consecutive=%1) - unsaved data retained")
-        .arg(session_.consecutive_retry_failures));
-    if (session_.consecutive_retry_failures >= 3) {
-        emit userWarning("Repeated save failures (" + QString::number(session_.consecutive_retry_failures) +
-                         " consecutive). Please check your storage, then restart the application to retry.");
-        return false;
-    }
-    emit userWarning("Could not save previous session data. It is kept in memory and will be retried.");
-    return true;
+    return false;
 }
 
 /**
@@ -506,7 +471,6 @@ void TimeTracker::startTimer(const QDateTime& now)
         Logger::Log("[DEBUG] Starting TimeTracker from Stopped - D=" + QString::number(session_.durations.size()));
 
         if (!retryUnsavedDurations()) return;
-        const bool retry_succeeded = !session_.has_unsaved_data; // has_unsaved_data cleared by clearUnsaved on success; true means retry was needed but failed
 
         unsigned int boot_time_sec = settings_.getBootTimeSec();
         bool shouldAddBootTime = false;
@@ -529,9 +493,7 @@ void TimeTracker::startTimer(const QDateTime& now)
                         ? "[TIMER] Will add boot time: " + QString::number(boot_time_sec) + " seconds (first session today)"
                         : "[TIMER] Boot time not added - entries already exist for today");
         }
-        if (retry_succeeded) {
-            session_.resetForNewSession();
-        }
+        session_.resetForNewSession();
         if (shouldAddBootTime) {
             QDateTime bootStart = now.addMSecs(-static_cast<qint64>(boot_time_sec) * 1000);
             addDuration(DurationType::Activity, bootStart, now);
@@ -962,7 +924,7 @@ TimeTracker::EditCommitResult TimeTracker::commitEditedTimeline(const Timeline& 
     const std::optional<TimeDuration>& ongoing = edited.ongoing();
 
     session_.durations = newDurations;
-    session_.clearUnsaved();
+    pending_commit_.clear();
 
     bool checkpointOk = true;
     if (ongoing.has_value() && mode_ != Mode::None) {
@@ -1070,7 +1032,7 @@ bool TimeTracker::shouldShowStartupRecoveryNotification() const
 bool TimeTracker::canMarkCleanShutdown() const
 {
     QMutexLocker locker(&mutex_);
-    return mode_ == Mode::None && !session_.has_unsaved_data;
+    return mode_ == Mode::None && !pending_commit_.hasPending();
 }
 
 TimeTracker::ShutdownResult TimeTracker::shutdown()
@@ -1083,7 +1045,7 @@ TimeTracker::ShutdownResult TimeTracker::shutdown()
         stopCalled = true;
     }
     const bool stopped = (mode_ == Mode::None);
-    const bool canCleanMark = stopped && !session_.has_unsaved_data;
+    const bool canCleanMark = stopped && !pending_commit_.hasPending();
     return {stopped, canCleanMark, stopCalled};
 }
 
@@ -1118,7 +1080,6 @@ SessionStoreResult TimeTracker::appendDurationsChunkToDB(const std::deque<TimeDu
 bool TimeTracker::updateDurationsInDB()
 {
     if (session_.durations.empty()) {
-        session_.clearUnsaved();
         return true;
     }
     const SessionStoreResult result = db_.commitSession(Timeline(session_.durations, std::nullopt));
@@ -1136,14 +1097,12 @@ bool TimeTracker::updateDurationsInDB()
 
 bool TimeTracker::persistDurationsOrRetainForRetry()
 {
-    if (updateDurationsInDB()) {
-        session_.clearUnsaved();
-        return true;
+    const bool ok = updateDurationsInDB();
+    pending_commit_.submit(ok, session_.durations);
+    if (!ok) {
+        Logger::Log("[DB] Session durations not persisted - retained for retry");
     }
-    session_.markUnsaved();
-    session_.unsaved_durations = session_.durations;
-    Logger::Log("[DB] Session durations not persisted - retained for retry");
-    return false;
+    return ok;
 }
 
 SessionStoreResult TimeTracker::replaceAll(const Timeline& history, const Timeline& session)
@@ -1151,8 +1110,8 @@ SessionStoreResult TimeTracker::replaceAll(const Timeline& history, const Timeli
     QMutexLocker locker(&mutex_);
     const SessionStoreResult result = db_.replaceAll(history, session);
     if (result.okOrDisabled()) {
-        // DB is now authoritative; stale retry cache must not survive past here.
-        session_.clearUnsaved();
+        // DB is now authoritative; a stale pending commit must not survive past here.
+        pending_commit_.replaceSucceeded();
     }
     return result;
 }
