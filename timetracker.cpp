@@ -51,6 +51,17 @@ void TimeTracker::DayBoundaryWatcher::tick(const QDateTime& now)
     // bypassing the scheduled stop), force the engine to stopped state.
     // The mutex is already held by the caller (TimeTracker::onTick).
     if (owner_.dialog_open_) {
+        // Capture (once) a conservative watchdog deferral so endExclusiveEdit()
+        // can discard the whole ongoing segment at replay, exactly as this
+        // watchdog would have done had the dialog not suspended it. The
+        // engine itself is not touched while the dialog remains open.
+        if (!owner_.pending_midnight_event_.has_value()
+            && owner_.mode_ != Mode::None
+            && owner_.session_.segment_start_time.isValid()
+            && isCrossMidnight(owner_.session_.segment_start_time, now)) {
+            owner_.pending_midnight_event_ = PendingMidnightEvent{StopReason::MidnightWatchdog, now};
+            Logger::Log("[MIDNIGHT] watchdog cross-midnight detected during history edit - deferred");
+        }
         return;
     }
     owner_.discardCrossMidnightOngoingAndStop(now);
@@ -92,12 +103,20 @@ void TimeTracker::DayBoundaryWatcher::onMidnightTimerFired()
         Logger::Log("[MIDNIGHT] Scheduled stop fired but engine already stopped - ignoring");
         return;
     }
+    // Capture the cutoff once, at the instant the scheduled stop actually
+    // fires (nominally 23:59:59.500). If History editing is suspending
+    // mutation, this exact instant becomes the deferred event's boundary, so
+    // replay later credits precisely through it rather than through whatever
+    // wall time happens to be current when the dialog eventually closes.
+    const QDateTime cutoff = owner_.now_provider_();
     if (owner_.dialog_open_) {
-        owner_.pending_midnight_stop_ = true;
-        Logger::Log("[MIDNIGHT] suspended during history edit");
+        if (!owner_.pending_midnight_event_.has_value()) {
+            owner_.pending_midnight_event_ = PendingMidnightEvent{StopReason::MidnightScheduled, cutoff};
+            Logger::Log("[MIDNIGHT] suspended during history edit");
+        }
         return;
     }
-    owner_.stopTimer(owner_.now_provider_(), StopReason::MidnightScheduled);
+    owner_.stopTimer(cutoff, StopReason::MidnightScheduled);
 }
 
 // ============================================================================
@@ -1301,41 +1320,83 @@ void TimeTracker::endExclusiveEdit()
     dialog_open_ = false;
     Logger::Log("[CHECKPOINT] Checkpoints resumed (dialog closed)");
 
-    // Replay deferred events that were suspended while dialog was open.
-    if (pending_midnight_stop_) {
-        pending_midnight_stop_ = false;
-        pending_lock_correction_.reset();
-        Logger::Log("[MIDNIGHT] Replaying deferred midnight stop after dialog close");
-        stopTimer(now_provider_(), StopReason::MidnightScheduled);
-    } else if (pending_lock_correction_.has_value()) {
-        const PendingLockCorrection corr = *pending_lock_correction_;
-        pending_lock_correction_.reset();
-        if (!corr.unlock_time.isValid()) {
-            // Still locked: identical to today's replay path.
-            Logger::Log("[LOCK] Replaying deferred LongOngoingLock after dialog close");
-            useTimerViaLockEvent(LockEvent::LongOngoingLock, corr.lock_time);
-        } else if (mode_ == Mode::Activity && settings_.isAutopauseEnabled()) {
-            // Lock AND unlock both happened during the dialog: replay both at
-            // their true wall-clock instants. backpauseTimer converts
-            // [lock_time -> unlock_time] to Pause; startTimer(unlock_time) then
-            // reopens an Activity segment exactly at the unlock, so the user's
-            // post-unlock work stays Activity.
-            Logger::Log("[LOCK] Replaying deferred lock interval as Pause after dialog close");
-            backpauseTimer(corr.unlock_time, corr.lock_time);
-            startTimer(corr.unlock_time);
-            // startTimer() just re-armed the scheduled midnight stop using
-            // corr.unlock_time as "now" (needed so the Pause->Activity
-            // duration math is correct) — but the underlying QTimer counts
-            // real wall-clock ms from when it starts, so arming it against a
-            // historical instant makes it fire late. Re-arm against the
-            // real current time so it still fires at 23:59:59.500.
-            day_boundary_watcher_.armScheduledStop(now_provider_());
+    // Snapshot and clear both possible deferred events up front so a
+    // re-entrant/duplicate endExclusiveEdit() call cannot replay either one
+    // twice.
+    const std::optional<PendingMidnightEvent> midnightEvent = pending_midnight_event_;
+    pending_midnight_event_.reset();
+    const std::optional<PendingLockCorrection> lockCorrection = pending_lock_correction_;
+    pending_lock_correction_.reset();
+
+    // Replay chronologically by captured event timestamp, earliest first, so
+    // the outcome matches exactly what would have happened had the dialog
+    // never been open. A lock correction's event instant is when the
+    // LongOngoingLock fired (lock_time).
+    if (midnightEvent.has_value() && lockCorrection.has_value()
+        && lockCorrection->lock_time < midnightEvent->timestamp) {
+        replayDeferredLockCorrection(*lockCorrection);
+        replayDeferredMidnightEvent(*midnightEvent);
+    } else if (midnightEvent.has_value()) {
+        replayDeferredMidnightEvent(*midnightEvent);
+        if (lockCorrection.has_value()) {
+            // Midnight happened first (or at the same instant): a real
+            // (non-deferred) LongOngoingLock arriving this late would see the
+            // engine already stopped and no-op, so replay through the same
+            // Activity-only gate below.
+            replayDeferredLockCorrection(*lockCorrection);
         }
+    } else if (lockCorrection.has_value()) {
+        replayDeferredLockCorrection(*lockCorrection);
     }
+
     // Restart checkpoint timer only after deferred events are replayed, so
     // stopTimer/backpauseTimer can set mode_ before we decide whether to arm.
     if (checkpoint_interval_msec_ > 0 && mode_ == Mode::Activity && !is_locked_) {
         checkpointTimer_.start();
+    }
+}
+
+void TimeTracker::replayDeferredMidnightEvent(const PendingMidnightEvent& event)
+{
+    if (mode_ == Mode::None) {
+        // Already stopped by an earlier-replayed event; nothing to do.
+        return;
+    }
+    if (event.reason == StopReason::MidnightWatchdog) {
+        // Conservative discard, matching the non-deferred watchdog path:
+        // the whole ongoing segment is dropped, never credited.
+        Logger::Log("[MIDNIGHT] Replaying deferred watchdog cross-midnight discard after dialog close");
+        discardCrossMidnightOngoingAndStop(now_provider_());
+    } else {
+        // Scheduled stop: finalize exactly at the captured cutoff, not at
+        // whatever wall time is current now.
+        Logger::Log("[MIDNIGHT] Replaying deferred midnight stop at captured cutoff after dialog close");
+        stopTimer(event.timestamp, StopReason::MidnightScheduled);
+    }
+}
+
+void TimeTracker::replayDeferredLockCorrection(const PendingLockCorrection& corr)
+{
+    if (!corr.unlock_time.isValid()) {
+        // Still locked: identical to today's replay path.
+        Logger::Log("[LOCK] Replaying deferred LongOngoingLock after dialog close");
+        useTimerViaLockEvent(LockEvent::LongOngoingLock, corr.lock_time);
+    } else if (mode_ == Mode::Activity && settings_.isAutopauseEnabled()) {
+        // Lock AND unlock both happened during the dialog: replay both at
+        // their true wall-clock instants. backpauseTimer converts
+        // [lock_time -> unlock_time] to Pause; startTimer(unlock_time) then
+        // reopens an Activity segment exactly at the unlock, so the user's
+        // post-unlock work stays Activity.
+        Logger::Log("[LOCK] Replaying deferred lock interval as Pause after dialog close");
+        backpauseTimer(corr.unlock_time, corr.lock_time);
+        startTimer(corr.unlock_time);
+        // startTimer() just re-armed the scheduled midnight stop using
+        // corr.unlock_time as "now" (needed so the Pause->Activity
+        // duration math is correct) — but the underlying QTimer counts
+        // real wall-clock ms from when it starts, so arming it against a
+        // historical instant makes it fire late. Re-arm against the
+        // real current time so it still fires at 23:59:59.500.
+        day_boundary_watcher_.armScheduledStop(now_provider_());
     }
 }
 

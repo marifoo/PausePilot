@@ -102,7 +102,6 @@ private slots:
     // true timestamps, not cancel the correction.
     void test_F4_unlock_during_dialog_replays_lock_interval_at_true_timestamps();
     void test_F4_still_locked_at_dialog_close_replays_unchanged();
-    void test_F4_midnight_supersedes_pending_lock_correction();
     void test_F4_ongoing_edited_away_skips_lock_correction_replay();
     void test_F4_replay_rearms_midnight_stop_at_real_time();
 
@@ -168,7 +167,6 @@ private slots:
     // F2: a late (post-resume) stop that crosses midnight must discard the
     // in-flight segment's checkpoint row itself, not rely on the watchdog path.
     void test_F2_shutdown_after_midnight_discards_checkpoint();
-    void test_F2_deferred_midnight_replay_discards_checkpoint();
     void test_F2_ontime_stop_does_not_discard_checkpoint();
 
     // F3: pause/backpause persistence failures must feed the same
@@ -180,6 +178,39 @@ private slots:
     // F1: loadHistoryFromStore() forwards the store's LoadResult status
     // instead of discarding it (the contract violation the rest of F1 follows from).
     void test_F1_loadHistoryFromStore_forwards_status();
+
+    // ========================================================================
+    // A1 (R11-002): a deferred midnight event replayed at endExclusiveEdit()
+    // must preserve the original policy — scheduled deferral credits exactly
+    // through the captured 23:59:59.500 cutoff; watchdog deferral
+    // conservatively discards the whole ongoing segment. Neither may use the
+    // post-dialog-close "now" as a segment endpoint.
+    // ========================================================================
+
+    // Production capture path: onMidnightTimerFired()/tick() must record a
+    // typed event (not just a bool) while dialog_open_, without stopping.
+    void test_A1_onMidnightTimerFired_captures_typed_event_while_dialog_open();
+    void test_A1_tick_captures_watchdog_event_while_dialog_open();
+
+    // Scheduled deferral credits exactly through the captured cutoff.
+    void test_A1_scheduled_deferred_credits_activity_through_cutoff_with_checkpoint();
+    void test_A1_scheduled_deferred_credits_activity_through_cutoff_no_checkpoint();
+    void test_A1_scheduled_deferred_credits_pause_through_cutoff();
+
+    // Watchdog deferral conservatively discards the whole segment.
+    void test_A1_watchdog_deferred_discards_entire_segment_with_checkpoint();
+    void test_A1_watchdog_deferred_discards_entire_segment_no_checkpoint();
+
+    // An unrelated in-memory History edit made during the deferral survives replay.
+    void test_A1_unrelated_history_edit_preserved_during_deferred_midnight();
+
+    // endExclusiveEdit() is idempotent: a second call must not replay again.
+    void test_A1_repeated_endExclusiveEdit_does_not_replay_twice();
+
+    // A deferred lock correction and a deferred midnight event pending
+    // together replay chronologically by captured timestamp; both orders.
+    void test_A1_lock_before_midnight_replays_lock_first();
+    void test_A1_midnight_before_lock_replays_midnight_first();
 };
 
 #endif // TEST_TIMER_H

@@ -161,8 +161,20 @@ private:
     bool autopause_pending_resume_;
     bool is_locked_;     // Track if desktop is currently locked (to prevent checkpoints while locked)
     bool dialog_open_;   // True while HistoryDialog is open (suspends mutation)
-    bool pending_midnight_stop_ = false;
     bool shutdown_called_ = false;  // Set once shutdown() has torn down the engine.
+    /// A midnight boundary event captured while dialog_open_, to be replayed
+    /// exactly once by endExclusiveEdit(). Distinguishes the two deferral
+    /// policies: a scheduled cutoff credits the segment through the captured
+    /// instant (nominally 23:59:59.500); a watchdog detection conservatively
+    /// discards the whole ongoing segment, matching the non-deferred watchdog
+    /// path. `timestamp` also orders replay against a simultaneously deferred
+    /// PendingLockCorrection (chronological, earliest captured event first).
+    struct PendingMidnightEvent {
+        StopReason reason;    // MidnightScheduled or MidnightWatchdog
+        QDateTime timestamp;  // Scheduled: the captured cutoff. Watchdog: the
+                               // instant the crossing was detected.
+    };
+    std::optional<PendingMidnightEvent> pending_midnight_event_;
     /// A LongOngoingLock that arrived while HistoryDialog was open, to be applied
     /// when the dialog closes. unlock_time stays invalid while the desktop is
     /// still locked; an Unlock during the dialog stamps it instead of cancelling
@@ -228,6 +240,13 @@ private:
     // Atomically replaces the live session with `edited`. Delegates to
     // commitEditedTimeline; use commitEditedTimeline directly from outside TimeTracker.
     void commit(const Timeline& edited);
+    // Applies a deferred midnight event captured while dialog_open_. No-op if
+    // an earlier-replayed event already stopped the engine (mode_ == None).
+    void replayDeferredMidnightEvent(const PendingMidnightEvent& event);
+    // Applies a deferred LongOngoingLock/Unlock correction captured while
+    // dialog_open_. Called by endExclusiveEdit() in chronological order
+    // relative to a co-pending PendingMidnightEvent, if any.
+    void replayDeferredLockCorrection(const PendingLockCorrection& corr);
 
 #ifndef QT_NO_DEBUG
     /// Debug-build state snapshot used by StateGuard to detect unlogged mutations.
@@ -433,8 +452,11 @@ public:
 
     /// Exposes the pending deferred lock correction (set while dialog_open_).
     auto pendingLockCorrection_dbg() const { return pending_lock_correction_; }
-    void setPendingMidnightStop_dbg(bool v) { pending_midnight_stop_ = v; }
-    bool pendingMidnightStop_dbg() const { return pending_midnight_stop_; }
+    /// Exposes/injects the pending deferred midnight event (set while dialog_open_).
+    void setPendingMidnightEvent_dbg(StopReason reason, const QDateTime& timestamp) {
+        pending_midnight_event_ = PendingMidnightEvent{reason, timestamp};
+    }
+    auto pendingMidnightEvent_dbg() const { return pending_midnight_event_; }
 
     /// Triggers the periodic checkpoint slot directly (bypasses timer interval).
     void triggerCheckpoint_dbg() { saveCheckpoint(); }
