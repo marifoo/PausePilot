@@ -299,8 +299,12 @@ void TimerTest::test_timer_retry_failure_keeps_unsaved_state_and_durations()
     QVERIFY(!tracker.sessionState_dbg().durations.empty());
     QVERIFY(tracker.sessionState_dbg().durations.size() >= sizeBeforeRetry);
 
-    // Cleanup permissions for following tests.
+    // Cleanup permissions for following tests, then resolve the pending
+    // payload via the same idempotent drain a real shutdown would use (A3):
+    // an unresolved pending commit at destruction with no prior drain call
+    // is flagged as an orchestration bug.
     QVERIFY(dbFile.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ReadUser | QFile::ReadGroup | QFile::ReadOther));
+    QVERIFY(tracker.drainForShutdown().clean());
 }
 
 // ============================================================================
@@ -418,6 +422,12 @@ void TimerTest::test_replaceAll_failure_keeps_unsaved_cache()
     QVERIFY(result.category == SessionStoreResult::TransientError);
     QVERIFY(tracker.hasPendingCommit_dbg());
     QVERIFY(!tracker.pendingCommitPayload_dbg().empty());
+
+    // Cleanup (A3): resolve the pending payload via the same idempotent
+    // drain a real shutdown would use, so destruction does not find an
+    // unresolved commit with no prior drain call.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(tracker.drainForShutdown().clean());
 }
 
 void TimerTest::test_session_state_adopt_ongoing_segment()
@@ -3048,6 +3058,12 @@ void TimerTest::test_F3_pause_failure_marks_unsaved()
     QVERIFY(tracker.isPaused());
     QVERIFY(tracker.hasPendingCommit_dbg());
     QVERIFY(!tracker.pendingCommitPayload_dbg().empty());
+
+    // Cleanup (A3): resolve the pending payload via the same idempotent
+    // drain a real shutdown would use, so destruction does not find an
+    // unresolved commit with no prior drain call.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(tracker.drainForShutdown().clean());
 }
 
 // F3: backpauseTimer (via a LongOngoingLock) also finalizes through
@@ -3077,6 +3093,12 @@ void TimerTest::test_F3_backpause_failure_marks_unsaved()
     QVERIFY(tracker.isPaused());
     QVERIFY(tracker.hasPendingCommit_dbg());
     QVERIFY(!tracker.pendingCommitPayload_dbg().empty());
+
+    // Cleanup (A3): resolve the pending payload via the same idempotent
+    // drain a real shutdown would use, so destruction does not find an
+    // unresolved commit with no prior drain call.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(tracker.drainForShutdown().clean());
 }
 
 // F3: a later successful resume-from-Pause write must clear the unsaved flag
@@ -3165,6 +3187,12 @@ void TimerTest::test_A2_first_submit_outcome()
     QCOMPARE(tracker.isStopped(), !expectStartPermitted);
     // A refused Start must never silently drop the pending payload.
     QCOMPARE(tracker.hasPendingCommit_dbg(), !expectStartPermitted);
+
+    // Cleanup (A3): resolve any pending payload via the same idempotent
+    // drain a real shutdown would use, so destruction does not find an
+    // unresolved commit with no prior drain call.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(tracker.drainForShutdown().clean());
 }
 
 // A single Start-time retry that still fails must retain the exact same
@@ -3203,6 +3231,12 @@ void TimerTest::test_A2_retry_failure_retains_same_payload_and_refuses_start()
         QCOMPARE(payloadAfter[i].startTime, payloadBefore[i].startTime);
         QCOMPARE(payloadAfter[i].endTime, payloadBefore[i].endTime);
     }
+
+    // Cleanup (A3): resolve the pending payload via the same idempotent
+    // drain a real shutdown would use, so destruction does not find an
+    // unresolved commit with no prior drain call.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(tracker.drainForShutdown().clean());
 }
 
 // A single Start-time retry that succeeds clears the payload and permits Start.
@@ -3319,6 +3353,12 @@ void TimerTest::test_A2_repeated_failed_start_neither_starts_nor_mutates_payload
     for (size_t i = 0; i < payloadBefore.size(); ++i) {
         QCOMPARE(payloadAfter[i].segment_id.toString(), payloadBefore[i].segment_id.toString());
     }
+
+    // Cleanup (A3): resolve the pending payload via the same idempotent
+    // drain a real shutdown would use, so destruction does not find an
+    // unresolved commit with no prior drain call.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(tracker.drainForShutdown().clean());
 }
 
 void TimerTest::test_F1_loadHistoryFromStore_forwards_status()
@@ -3337,4 +3377,302 @@ void TimerTest::test_F1_loadHistoryFromStore_forwards_status()
     const LoadResult result = tracker.loadHistoryFromStore();
 
     QCOMPARE(result.status, SessionStoreResult::TransientError);
+}
+
+// ============================================================================
+// A3 (R11-001): drainForShutdown() retries a pending commit payload
+// independent of tracker mode. Invariant: shutdown cannot report clean while
+// a commit payload exists only in memory.
+// ============================================================================
+
+void TimerTest::test_A3_drain_already_stopped_no_pending_is_noop_success()
+{
+    // Arrange: a tracker that was never started.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    // Act
+    const DrainResult result = tracker.drainForShutdown();
+
+    // Assert
+    QVERIFY(result.clean());
+    QVERIFY(!tracker.hasPendingCommit_dbg());
+}
+
+void TimerTest::test_A3_drain_retries_preexisting_pending_payload_while_stopped()
+{
+    // Arrange: an already-stopped tracker with a payload retained from an
+    // earlier failed Stop (mode_ == None throughout -- the R11-001 scenario:
+    // the old shutdown() path never retried this).
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.isStopped());
+    QVERIFY(tracker.hasPendingCommit_dbg());
+    const int commitsBefore = fakeDb.callLog.count("commitSession");
+
+    // Act: the store recovers; drainForShutdown() retries without a Start.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    const DrainResult result = tracker.drainForShutdown();
+
+    // Assert: resolved, exactly one retry attempt, no residual pending state.
+    QVERIFY(result.clean());
+    QVERIFY(!tracker.hasPendingCommit_dbg());
+    QCOMPARE(fakeDb.callLog.count("commitSession") - commitsBefore, 1);
+}
+
+void TimerTest::test_A3_drain_retry_failure_keeps_incomplete_and_payload()
+{
+    // Arrange: same setup, but the store keeps failing.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    fakeDb.commitSessionResult = SessionStoreResult::transient("still failing");
+    tracker.useTimerViaButton(Button::Stop);
+    const auto payloadBefore = tracker.pendingCommitPayload_dbg();
+
+    // Act
+    const DrainResult result = tracker.drainForShutdown();
+
+    // Assert: no clean marker eligibility, payload retained byte-for-byte,
+    // the failure category/message are preserved.
+    QVERIFY(!result.clean());
+    QCOMPARE(result.category, SessionStoreResult::TransientError);
+    QCOMPARE(result.message, QString("still failing"));
+    QVERIFY(tracker.hasPendingCommit_dbg());
+    const auto payloadAfter = tracker.pendingCommitPayload_dbg();
+    QCOMPARE(payloadAfter.size(), payloadBefore.size());
+    for (size_t i = 0; i < payloadBefore.size(); ++i) {
+        QCOMPARE(payloadAfter[i].segment_id.toString(), payloadBefore[i].segment_id.toString());
+    }
+
+    // Cleanup so destruction does not find an unresolved commit.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(tracker.drainForShutdown().clean());
+}
+
+void TimerTest::test_A3_drain_running_session_stop_commit_fails_then_drain_succeeds()
+{
+    // Arrange: a running session whose live segment has never been stopped.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    clock.advance(60ll * 1000ll);
+
+    // Act: the store fails at drain time, so the inline Stop-time commit
+    // inside drainForShutdown() fails on this first call.
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+    const DrainResult firstAttempt = tracker.drainForShutdown();
+    QVERIFY(!firstAttempt.clean());
+    QVERIFY(tracker.isStopped());
+    QVERIFY(tracker.hasPendingCommit_dbg());
+
+    // The store recovers; a second drainForShutdown() call (what a user
+    // Retry performs) resolves the retained payload.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    const DrainResult secondAttempt = tracker.drainForShutdown();
+
+    // Assert
+    QVERIFY(secondAttempt.clean());
+    QVERIFY(!tracker.hasPendingCommit_dbg());
+}
+
+void TimerTest::test_A3_drain_running_session_stop_commit_fails_then_drain_fails()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+
+    // Act: two drain attempts, store never recovers.
+    const DrainResult firstAttempt = tracker.drainForShutdown();
+    const DrainResult secondAttempt = tracker.drainForShutdown();
+
+    // Assert: both incomplete, engine stopped, payload retained.
+    QVERIFY(!firstAttempt.clean());
+    QVERIFY(!secondAttempt.clean());
+    QVERIFY(tracker.isStopped());
+    QVERIFY(tracker.hasPendingCommit_dbg());
+
+    // Cleanup so destruction does not find an unresolved commit.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(tracker.drainForShutdown().clean());
+}
+
+void TimerTest::test_A3_drain_idempotent_repeated_calls_after_success()
+{
+    // Arrange: a resolved drain (no pending payload).
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    QVERIFY(tracker.drainForShutdown().clean());
+    const int commitsAfterFirstDrain = fakeDb.callLog.count("commitSession");
+
+    // Act: a second call after success.
+    const DrainResult second = tracker.drainForShutdown();
+
+    // Assert: still Complete, and no additional commit was submitted (no
+    // duplicate/resubmit of an already-committed segment).
+    QVERIFY(second.clean());
+    QCOMPARE(fakeDb.callLog.count("commitSession"), commitsAfterFirstDrain);
+}
+
+void TimerTest::test_A3_drain_idempotent_repeated_calls_after_failure()
+{
+    // Arrange: a failed drain leaves a pending payload.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    fakeDb.commitSessionResult = SessionStoreResult::transient("first failure message");
+    const DrainResult first = tracker.drainForShutdown();
+    const auto payloadAfterFirst = tracker.pendingCommitPayload_dbg();
+    const int commitsAfterFirst = fakeDb.callLog.count("commitSession");
+
+    // Act: a second call. The store now fails with a DIFFERENT message, which
+    // also proves the second call really reached the store rather than
+    // replaying a cached result.
+    fakeDb.commitSessionResult = SessionStoreResult::transient("second failure message");
+    const DrainResult second = tracker.drainForShutdown();
+
+    // Assert: the second call genuinely re-attempted the store (a cached-result
+    // implementation that skipped it would leave this delta at 0)...
+    QCOMPARE(fakeDb.callLog.count("commitSession") - commitsAfterFirst, 1);
+    // ...and it did not lose the payload identity...
+    QVERIFY(!first.clean());
+    QVERIFY(!second.clean());
+    const auto payloadAfterSecond = tracker.pendingCommitPayload_dbg();
+    QCOMPARE(payloadAfterSecond.size(), payloadAfterFirst.size());
+    for (size_t i = 0; i < payloadAfterFirst.size(); ++i) {
+        QCOMPARE(payloadAfterSecond[i].segment_id.toString(), payloadAfterFirst[i].segment_id.toString());
+    }
+    // ...nor the FIRST failure message (plan A3 step 3: an idempotent repeat
+    // must not lose it, even though the store has since reported a new one).
+    QCOMPARE(first.message, QString("first failure message"));
+    QCOMPARE(second.message, QString("first failure message"));
+
+    // Cleanup so destruction does not find an unresolved commit.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(tracker.drainForShutdown().clean());
+}
+
+// N3 counterpart: an explicit user-driven Retry is a genuinely NEW attempt,
+// not an idempotent repeat, so it reports its own fresh diagnosis rather than
+// the message latched by the drain that prompted it.
+void TimerTest::test_A3_user_retry_reports_fresh_failure_message()
+{
+    // Arrange: a failed drain latches "first failure message".
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    fakeDb.commitSessionResult = SessionStoreResult::transient("first failure message");
+    const DrainResult first = tracker.drainForShutdown();
+    QCOMPARE(first.message, QString("first failure message"));
+
+    // Act: the user clicks Retry; the store now fails differently.
+    fakeDb.commitSessionResult = SessionStoreResult::transient("second failure message");
+    const DrainResult userRetry =
+        tracker.drainForShutdown(TimeTracker::DrainAttempt::UserRetry);
+
+    // Assert: the fresh diagnosis is surfaced, and a subsequent idempotent
+    // repeat now latches onto THAT one.
+    QVERIFY(!userRetry.clean());
+    QCOMPARE(userRetry.message, QString("second failure message"));
+    const DrainResult repeat = tracker.drainForShutdown();
+    QCOMPARE(repeat.message, QString("second failure message"));
+
+    // Cleanup so destruction does not find an unresolved commit.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(tracker.drainForShutdown().clean());
+}
+
+void TimerTest::test_A3_destructor_is_noop_after_successful_drain()
+{
+    // Arrange: fakeDb outlives tracker (mirrors the real ownership order:
+    // TimeTracker must be destroyed before the store) so the callLog can be
+    // inspected after the tracker's destructor has run.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    int commitsAfterDrain = 0;
+    {
+        TimeTracker tracker(settings, fakeDb);
+        const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+        FakeClock clock(t0);
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+        tracker.useTimerViaButton(Button::Start);
+        clock.advance(60ll * 1000ll);
+        // Act: a full drain, as ShutdownCoordinator would perform it.
+        QVERIFY(tracker.drainForShutdown().clean());
+        commitsAfterDrain = fakeDb.callLog.count("commitSession");
+        // tracker goes out of scope here -- its destructor's own
+        // drainForShutdown() call runs against an already-resolved state.
+    }
+
+    // Assert: the destructor did not resubmit/duplicate the committed
+    // segment (no additional commitSession call beyond the explicit drain).
+    QCOMPARE(fakeDb.callLog.count("commitSession"), commitsAfterDrain);
 }

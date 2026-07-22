@@ -62,6 +62,12 @@ private slots:
 
     // Item A: toggle ongoing type then crash — refreshed end_utc survives recovery.
     void test_A_toggle_ongoing_to_pause_crash_recovery_uses_refreshed_end_utc();
+
+    // A3 (R11-001): Exit Anyway (drain attempted and failed, no further
+    // retry) leaves an existing durable checkpoint untouched. A real SQLite
+    // reopen proves ordinary startup recovery finalizes only that durable
+    // portion, without duplication or resurrecting the in-memory-only tail.
+    void test_A3_exit_anyway_leaves_checkpoint_untouched_for_recovery();
 };
 
 #endif // TEST_INTEGRATION_H

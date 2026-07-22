@@ -157,22 +157,41 @@ private:
 
         /// Records an ordinary persist attempt's outcome.
         void submit(bool success, const std::deque<TimeDuration>& durations) {
-            if (success) { payload_.reset(); return; }
+            if (success) { clear(); return; }
             payload_ = durations;
         }
 
         /// Records a Start-time retry outcome against the payload already held.
         void retry(bool success) {
-            if (success) payload_.reset();
+            if (success) clear();
         }
 
         /// DB is now authoritative after a successful replaceAll.
-        void replaceSucceeded() { payload_.reset(); }
+        void replaceSucceeded() { clear(); }
 
-        void clear() { payload_.reset(); }
+        void clear() { payload_.reset(); first_drain_failure_.reset(); }
+
+        /// Remembers why this payload's FIRST shutdown drain failed. Later
+        /// idempotent repeats of drainForShutdown() re-attempt the store but
+        /// keep reporting this original diagnosis, so a repeated call cannot
+        /// lose the first failure message. Lives here (rather than on
+        /// TimeTracker) because its validity is exactly the payload's
+        /// lifetime: every path that clears the payload clears it too.
+        void recordDrainFailure(SessionStoreResult::Category category, const QString& message) {
+            if (!first_drain_failure_.has_value())
+                first_drain_failure_ = DrainResult::incomplete(category, message);
+        }
+
+        /// Discards the remembered first failure so the next drain reports its
+        /// own outcome. Used for an explicit user-driven Retry, which is a
+        /// genuinely new attempt rather than an idempotent repeat.
+        void forgetDrainFailure() { first_drain_failure_.reset(); }
+
+        const std::optional<DrainResult>& firstDrainFailure() const { return first_drain_failure_; }
 
     private:
         std::optional<std::deque<TimeDuration>> payload_;
+        std::optional<DrainResult> first_drain_failure_;
     };
 
     const Settings & settings_;
@@ -408,6 +427,36 @@ public:
     /// Stops the timer if running and returns the resulting state.
     /// Thread-safe; may be called multiple times (idempotent on an already-stopped timer).
     ShutdownResult shutdown();
+
+    /// Why drainForShutdown() is being called.
+    ///   Idempotent — an automatic repeat (coordinator re-entry, destructor
+    ///                safety net). Re-attempts the store, but keeps reporting
+    ///                the FIRST failure message for this payload.
+    ///   UserRetry   — an explicit user-driven Retry, i.e. a genuinely new
+    ///                attempt, so it reports its own fresh outcome.
+    enum class DrainAttempt { Idempotent, UserRetry };
+
+    /**
+     * Terminal-shutdown drain: closes any live segment using one captured
+     * `now` (via shutdown()), then retries any pending commit payload even
+     * if mode_ is already None. Independent of tracker mode -- a pre-existing
+     * pending payload from an earlier failed Stop is retried here too.
+     *
+     * Idempotent: a second call neither duplicates a committed segment nor
+     * retries after a prior success, and never loses the first failure
+     * message (see DrainAttempt). A repeated failure re-attempts the same
+     * payload without corrupting its identity.
+     *
+     * Called by ShutdownCoordinator (normal exit, OS-forced shutdown, and
+     * user Retry) and by the destructor as a last-resort safety net.
+     *
+     * Ownership/ordering requirement: TimeTracker must be destroyed BEFORE
+     * the SessionStore it was constructed with. The destructor runs this
+     * drain as a final safety net, so the store must still be alive at that
+     * point; main.cpp satisfies this by declaring the store first (later
+     * declarations are destroyed first).
+     */
+    DrainResult drainForShutdown(DrainAttempt attempt = DrainAttempt::Idempotent);
 
 public slots:
     void useTimerViaButton(Button button);

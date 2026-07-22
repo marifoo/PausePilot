@@ -389,10 +389,13 @@ void IntegrationTest::test_F_shutdown_sequence_stop_flush_marker()
     // Test F: shutdown sequence end-to-end through ShutdownCoordinator.
     //
     // ShutdownCoordinator::run(DrainEvents) owns the sequence:
-    //   1. timetracker_.shutdown()               — stops the engine, writes marker
+    //   1. timetracker_.drainForShutdown()       — stops the engine and retries
+    //                                              any pending commit (A3)
     //   2. pumpEvents(150)                        — drains queued signals
     //   3. db_.flushToDisc()                     — durability flush
-    //   4. db_.setLastCleanShutdownMarker(...)   — if canCleanMark && !stopCalled
+    //   4. db_.setLastCleanShutdownMarker(...)   — iff the typed DrainResult is
+    //                                              Complete and stopTimer did not
+    //                                              already write it inline
     //
     // This test drives the production owner rather than reproducing the
     // sequence by hand.
@@ -1178,4 +1181,76 @@ void IntegrationTest::test_A_toggle_ongoing_to_pause_crash_recovery_uses_refresh
 
         db.closeConnection_dbg();
     }
+}
+
+// ============================================================================
+// A3 (R11-001): Exit Anyway leaves a durable checkpoint untouched; a real
+// SQLite reopen proves recovery finalizes only that durable portion.
+// ============================================================================
+
+void IntegrationTest::test_A3_exit_anyway_leaves_checkpoint_untouched_for_recovery()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    SegmentId checkpointSegmentId;
+
+    {
+        // Session 1: Start, durably checkpoint 20 s of Activity, then accrue
+        // 5 more seconds that are never checkpointed. The Stop-time commit
+        // (and the coordinator's own retry) fail -- simulating the user
+        // choosing Exit Anyway: one drain attempt fails, no further retry,
+        // process terminates.
+        Settings settings(settingsPath);
+        SqliteSessionStore db(settings);
+        TimeTracker tracker(settings, db);
+        FakeClock clock(QDateTime::currentDateTime().addSecs(-30));
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+        tracker.useTimerViaButton(Button::Start);
+        clock.advance(20000);
+        tracker.saveCheckpoint_locked_dbg(clock.now());
+        checkpointSegmentId = tracker.sessionState_dbg().segment_id;
+        QVERIFY(!checkpointSegmentId.isEmpty());
+        clock.advance(5000);
+
+        // Force the drain's commit to fail: close the connection before
+        // making the file read-only so ensureOpen() re-tries and fails on
+        // the permission.
+        db.closeConnection_dbg();
+        QFile dbFile(db_path_);
+        QVERIFY(dbFile.setPermissions(QFile::ReadOwner | QFile::ReadUser | QFile::ReadGroup | QFile::ReadOther));
+
+        ShutdownCoordinator coordinator(tracker, db);
+        const DrainResult result = coordinator.run(ShutdownMode::DrainEvents);
+
+        QVERIFY(!result.clean());
+        QVERIFY(tracker.hasPendingCommit_dbg());
+        // Exit Anyway: no further retry. tracker/db/coordinator destruct
+        // here with the store still unwritable, so the destructor's own
+        // last-resort drain also fails silently (shutdown_called_ is
+        // already true from run(), so no orchestration-bug assert fires).
+        // The in-memory 5 s tail is genuinely lost.
+    }
+
+    // Restore permissions for the next process to open the DB normally.
+    QFile dbFile(db_path_);
+    QVERIFY(dbFile.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ReadUser | QFile::ReadGroup | QFile::ReadOther));
+
+    // Session 2: real reopen. Startup recovery must finalize exactly the
+    // durable 20 s checkpoint -- no more, no less -- and must not duplicate
+    // it, proving Exit Anyway left the durable checkpoint untouched.
+    Settings settings(settingsPath);
+    SqliteSessionStore db2(settings);
+    TimeTracker reopened(settings, db2);
+    reopened.initializeFromStore();
+
+    QCOMPARE(reopened.getStartupRecoveredSeconds(), static_cast<qint64>(20));
+
+    SqliteSessionStore db3(settings);
+    auto loaded = db3.loadDurations();
+    QCOMPARE(loaded.size(), static_cast<size_t>(1));
+    QCOMPARE(loaded[0].segment_id.toString(), checkpointSegmentId.toString());
+    QCOMPARE(loaded[0].duration, static_cast<qint64>(20000));
 }

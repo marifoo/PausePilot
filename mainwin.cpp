@@ -16,6 +16,7 @@
 #include <QDateTime>
 #include <QSystemTrayIcon>
 #include <QMessageBox>
+#include <QPushButton>
 #include <QCloseEvent>
 #include <QCoreApplication>
 #include <QStatusBar>
@@ -190,12 +191,51 @@ void MainWin::start()
 /**
  * Delegates the application shutdown sequence to ShutdownCoordinator.
  *
+ * Normal quit (DrainEvents): one drain attempt; on failure, a modal
+ * Retry / Exit Anyway choice is shown. Each Retry performs exactly one new
+ * drain attempt. Exit Anyway stops asking and lets the process terminate
+ * without a clean marker, leaving existing durable checkpoints untouched.
+ *
+ * A normal quit reaches this method TWICE -- closeEvent (X / Alt+F4) and then
+ * QCoreApplication::aboutToQuit once the last window closes; SIGTERM likewise
+ * calls onAboutToQuit() before quit() re-emits aboutToQuit. Since the
+ * coordinator's run() is guarded and replays its cached (still Incomplete)
+ * result, unsaved_loss_accepted_ makes the user's decline stick so the modal
+ * cannot reappear on the second entry.
+ *
+ * OS-forced shutdown (Direct): exactly one attempt, no warning and no modal
+ * on failure -- the OS event loop is restricted during this path.
+ *
  * @param mode DrainEvents for normal quit; Direct for OS-restricted paths
  *             (Windows WM_QUERYENDSESSION / WM_ENDSESSION).
  */
 void MainWin::shutdown(ShutdownMode mode)
 {
-	shutdown_coordinator_.run(mode);
+	DrainResult result = shutdown_coordinator_.run(mode);
+	if (mode == ShutdownMode::Direct) {
+		return;
+	}
+	while (!result.clean()) {
+		if (unsaved_loss_accepted_) {
+			// The user already accepted this loss; never ask a second time.
+			return;
+		}
+		QMessageBox box(this);
+		box.setWindowTitle("uTimer - Could Not Save");
+		box.setIcon(QMessageBox::Warning);
+		box.setText("Could not save the current session. Retry, or exit and keep only what was already saved?");
+		QAbstractButton* retryButton = box.addButton("Retry", QMessageBox::AcceptRole);
+		box.addButton("Exit Anyway", QMessageBox::DestructiveRole);
+		box.setDefaultButton(static_cast<QPushButton*>(retryButton));
+		box.exec();
+		if (box.clickedButton() != retryButton) {
+			// Exit Anyway: latch the decision so a later shutdown entry point
+			// does not ask again, then let the caller terminate.
+			unsaved_loss_accepted_ = true;
+			break;
+		}
+		result = shutdown_coordinator_.retryDrain();
+	}
 }
 
 void MainWin::onAboutToQuit()

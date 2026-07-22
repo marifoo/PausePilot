@@ -236,3 +236,145 @@ void ShutdownCoordinatorTest::test_N_restart_during_pump_is_restopped()
     QVERIFY2(tracker.isStopped(),
              "a timer restarted during the shutdown pump must be re-stopped");
 }
+
+// ============================================================================
+// A3 (R11-001): run()/retryDrain() consume the typed DrainResult. Clean-
+// marker eligibility comes from that result, not from mode_ == None.
+// ============================================================================
+
+void ShutdownCoordinatorTest::test_A3_run_incomplete_then_retryDrain_succeeds()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(20);
+
+    // Act: the store fails, so run()'s own drain is incomplete.
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+    const DrainResult first = coordinator.run(ShutdownMode::DrainEvents);
+    QVERIFY(!first.clean());
+    QVERIFY(!fakeDb.callLog.contains("setLastCleanShutdownMarker"));
+
+    // Act: the store recovers; the user clicks Retry.
+    fakeDb.callLog.clear();
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    const DrainResult second = coordinator.retryDrain();
+
+    // Assert: resolved, flushed, and the marker is now written.
+    QVERIFY(second.clean());
+    QVERIFY(fakeDb.callLog.contains("flushToDisc"));
+    QVERIFY(fakeDb.callLog.contains("setLastCleanShutdownMarker"));
+}
+
+void ShutdownCoordinatorTest::test_A3_run_incomplete_then_retryDrain_fails()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(20);
+
+    fakeDb.commitSessionResult = SessionStoreResult::transient("still failing");
+    const DrainResult first = coordinator.run(ShutdownMode::DrainEvents);
+    QVERIFY(!first.clean());
+
+    // Act: Retry, but the store still fails.
+    fakeDb.callLog.clear();
+    const DrainResult second = coordinator.retryDrain();
+
+    // Assert: still incomplete, no marker written.
+    QVERIFY(!second.clean());
+    QVERIFY(!fakeDb.callLog.contains("setLastCleanShutdownMarker"));
+
+    // Cleanup so destruction does not find an unresolved commit.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(coordinator.retryDrain().clean());
+}
+
+void ShutdownCoordinatorTest::test_A3_run_already_stopped_no_pending_is_noop_success()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+
+    // TimeTracker never started -> already Mode::None, no pending payload.
+    const DrainResult result = coordinator.run(ShutdownMode::DrainEvents);
+
+    QVERIFY(result.clean());
+    QVERIFY(fakeDb.callLog.contains("setLastCleanShutdownMarker"));
+}
+
+void ShutdownCoordinatorTest::test_A3_direct_and_drainevents_modes_produce_same_result()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+
+    FakeSessionStore fakeDbDrainEvents;
+    TimeTracker trackerDrainEvents(settings, fakeDbDrainEvents);
+    ShutdownCoordinator coordinatorDrainEvents(trackerDrainEvents, fakeDbDrainEvents);
+    trackerDrainEvents.useTimerViaButton(Button::Start);
+    QTest::qWait(20);
+    fakeDbDrainEvents.commitSessionResult = SessionStoreResult::transient("injected failure");
+    const DrainResult drainEventsResult = coordinatorDrainEvents.run(ShutdownMode::DrainEvents);
+
+    FakeSessionStore fakeDbDirect;
+    TimeTracker trackerDirect(settings, fakeDbDirect);
+    ShutdownCoordinator coordinatorDirect(trackerDirect, fakeDbDirect);
+    trackerDirect.useTimerViaButton(Button::Start);
+    QTest::qWait(20);
+    fakeDbDirect.commitSessionResult = SessionStoreResult::transient("injected failure");
+    const DrainResult directResult = coordinatorDirect.run(ShutdownMode::Direct);
+
+    // Assert: identical persistence outcome regardless of pump mode.
+    QCOMPARE(directResult.clean(), drainEventsResult.clean());
+    QCOMPARE(directResult.category, drainEventsResult.category);
+    QVERIFY(trackerDrainEvents.isStopped());
+    QVERIFY(trackerDirect.isStopped());
+
+    // Cleanup so destruction does not find an unresolved commit.
+    fakeDbDrainEvents.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(coordinatorDrainEvents.retryDrain().clean());
+    fakeDbDirect.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(coordinatorDirect.retryDrain().clean());
+}
+
+void ShutdownCoordinatorTest::test_A3_direct_mode_failure_emits_no_warning_and_no_marker()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
+
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(20);
+
+    // Act: OS-forced shutdown; the store fails. Per policy, a forced
+    // shutdown attempts once and exits with no warning and no clean marker.
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+    const DrainResult result = coordinator.run(ShutdownMode::Direct);
+
+    // Assert
+    QVERIFY(!result.clean());
+    QVERIFY(!fakeDb.callLog.contains("setLastCleanShutdownMarker"));
+    QCOMPARE(warnSpy.count(), 0);
+
+    // Cleanup so destruction does not find an unresolved commit.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(coordinator.retryDrain().clean());
+}

@@ -78,6 +78,38 @@ struct SessionStoreResult {
 };
 
 /**
+ * Result of TimeTracker::drainForShutdown() — the terminal-shutdown attempt to
+ * persist all pending commit work, independent of tracker mode.
+ *
+ *   Complete   — a live segment (if any) was closed and no commit payload
+ *                remains only in memory; a clean-shutdown marker may be
+ *                written.
+ *   Incomplete — a payload remains in memory only; category/message describe
+ *                why the persistence attempt failed. No clean marker may be
+ *                written.
+ */
+struct DrainResult {
+    enum class Status { Complete, Incomplete };
+    Status status = Status::Complete;
+    SessionStoreResult::Category category = SessionStoreResult::Success;
+    QString message;
+    /// True when this drain's own live-segment stop already wrote the
+    /// clean-shutdown marker synchronously (no retry was needed). Lets
+    /// ShutdownCoordinator avoid a redundant marker write. Never used to
+    /// decide clean-marker eligibility -- see clean().
+    bool markerAlreadyWritten = false;
+
+    bool clean() const { return status == Status::Complete; }
+
+    static DrainResult complete(bool markerAlreadyWritten = false) {
+        return {Status::Complete, SessionStoreResult::Success, {}, markerAlreadyWritten};
+    }
+    static DrainResult incomplete(SessionStoreResult::Category cat, QString msg) {
+        return {Status::Incomplete, cat, std::move(msg), false};
+    }
+};
+
+/**
  * Result of loadDurations().
  *
  * status carries the same SessionStoreResult::Category vocabulary:

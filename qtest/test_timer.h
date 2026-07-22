@@ -237,6 +237,36 @@ private slots:
     // together replay chronologically by captured timestamp; both orders.
     void test_A1_lock_before_midnight_replays_lock_first();
     void test_A1_midnight_before_lock_replays_midnight_first();
+
+    // ========================================================================
+    // A3 (R11-001): TimeTracker::drainForShutdown() retries a pending commit
+    // payload independent of tracker mode. Shutdown cleanliness derives from
+    // the typed DrainResult, not from mode_ == None.
+    // ========================================================================
+
+    // Already-stopped, no pending payload: a no-op success.
+    void test_A3_drain_already_stopped_no_pending_is_noop_success();
+    // A pre-existing pending payload (from an earlier failed, already-stopped
+    // Stop) is retried and resolved by drainForShutdown() even though
+    // mode_ == None throughout -- the exact R11-001 scenario.
+    void test_A3_drain_retries_preexisting_pending_payload_while_stopped();
+    // Same setup, but the retry also fails: Incomplete, payload retained,
+    // message preserved.
+    void test_A3_drain_retry_failure_keeps_incomplete_and_payload();
+    // A running session whose own Stop-time commit fails is drained (stopped
+    // + retried) by one drainForShutdown() call.
+    void test_A3_drain_running_session_stop_commit_fails_then_drain_succeeds();
+    void test_A3_drain_running_session_stop_commit_fails_then_drain_fails();
+    // Idempotent: a second call after success does not resubmit/duplicate;
+    // a second call after failure retries again without losing/mutating the
+    // payload identity or the failure category.
+    void test_A3_drain_idempotent_repeated_calls_after_success();
+    void test_A3_drain_idempotent_repeated_calls_after_failure();
+    // An explicit user Retry is a new attempt, so it reports a fresh message
+    // rather than the one latched by the drain that prompted it.
+    void test_A3_user_retry_reports_fresh_failure_message();
+    // The destructor is a no-op on the normal path (drain already resolved).
+    void test_A3_destructor_is_noop_after_successful_drain();
 };
 
 #endif // TEST_TIMER_H

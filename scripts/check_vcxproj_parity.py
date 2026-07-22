@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Guard against uTimer.pro/qtest.pro drifting apart from their MSVC .vcxproj
-counterparts (see plan4.md A1). Compares the SOURCES/HEADERS file lists on
-each side and fails on any difference.
+"""Guard against uTimer.pro/qtest.pro/apptest.pro drifting apart from their MSVC
+.vcxproj counterparts (see plan4.md A1). Compares the SOURCES/HEADERS file lists
+on each side and fails on any difference.
 
 Run: python3 scripts/check_vcxproj_parity.py
 """
@@ -75,6 +75,7 @@ def main():
     problems = []
     problems += check(ROOT / "uTimer.pro", ROOT / "uTimer.vcxproj")
     problems += check(ROOT / "qtest" / "qtest.pro", ROOT / "qtest" / "qtest.vcxproj")
+    problems += check(ROOT / "apptest" / "apptest.pro", ROOT / "apptest" / "apptest.vcxproj")
 
     if problems:
         print("\n\n".join(problems))

@@ -7,6 +7,8 @@ uTimer.sqlite
 *.durations.txt
 qtest/qtest
 qtest/*.log
+apptest/apptest
+apptest/*.log
 
 # Python
 __pycache__/

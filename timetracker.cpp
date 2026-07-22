@@ -383,7 +383,24 @@ TimeTracker::~TimeTracker()
     checkpointTimer_.stop();
     checkpointTimer_.disconnect();
     QMutexLocker locker(&mutex_);
-    stopTimer(now_provider_(), StopReason::Shutdown);
+    // drainForShutdown() is idempotent: on every normal path
+    // ShutdownCoordinator has already run it (directly or via a user Retry)
+    // and this call is a no-op. If a pending commit is still here AND
+    // shutdown()/drainForShutdown() was never called on this object before,
+    // ShutdownCoordinator was bypassed entirely -- an orchestration bug, even
+    // though this last-resort drain may still save the data.
+    const bool orchestrationBypassed = !shutdown_called_ && pending_commit_.hasPending();
+    const DrainResult result = drainForShutdown();
+    if (orchestrationBypassed) {
+        Logger::Log(QString("[SHUTDOWN] ~TimeTracker: found a pending commit at destruction "
+                             "with no prior shutdown()/drainForShutdown() call -- "
+                             "ShutdownCoordinator was bypassed (orchestration bug); "
+                             "last-resort drain result: %1")
+                     .arg(result.clean() ? "Complete" : "Incomplete"));
+        Q_ASSERT_X(false, "~TimeTracker",
+                   "drainForShutdown() must be invoked via ShutdownCoordinator before "
+                   "TimeTracker is destroyed");
+    }
 }
 
 /**
@@ -1047,6 +1064,42 @@ TimeTracker::ShutdownResult TimeTracker::shutdown()
     const bool stopped = (mode_ == Mode::None);
     const bool canCleanMark = stopped && !pending_commit_.hasPending();
     return {stopped, canCleanMark, stopCalled};
+}
+
+DrainResult TimeTracker::drainForShutdown(DrainAttempt attempt)
+{
+    QMutexLocker locker(&mutex_);
+    if (attempt == DrainAttempt::UserRetry) {
+        // A genuinely new attempt: report this attempt's own outcome rather
+        // than the diagnosis latched by the drain that prompted the retry.
+        pending_commit_.forgetDrainFailure();
+    }
+    // Close any live segment first, using the one "now" captured inside
+    // shutdown(). No-op (stopCalled=false) if already None -- this is what
+    // makes a repeated call idempotent on the close-segment half.
+    const ShutdownResult sr = shutdown();
+    // stopTimer() writes its own clean-shutdown marker synchronously when its
+    // commit succeeds inline. That only happens when this call actually
+    // stopped a live segment AND that commit did not leave a pending payload.
+    const bool markerAlreadyWritten = sr.stopCalled && !pending_commit_.hasPending();
+
+    if (pending_commit_.hasPending()) {
+        Logger::Log("[DB] Drain: retrying pending commit at shutdown");
+        const SessionStoreResult retryResult = appendDurationsChunkToDB(pending_commit_.payload());
+        const bool ok = retryResult.okOrDisabled();
+        // Latch this payload's first failure BEFORE retry() may clear it, so
+        // an idempotent repeat still reports the original diagnosis.
+        if (!ok) pending_commit_.recordDrainFailure(retryResult.category, retryResult.message);
+        pending_commit_.retry(ok);
+        if (!ok) {
+            Logger::Log("[DB] Drain: pending commit still unresolved: " + retryResult.message);
+            // Report the first failure for this payload; on the first attempt
+            // that IS this attempt's own result.
+            return *pending_commit_.firstDrainFailure();
+        }
+        Logger::Log("[DB] Drain: pending commit saved successfully");
+    }
+    return DrainResult::complete(markerAlreadyWritten);
 }
 
 bool TimeTracker::appendDurationsToDB()

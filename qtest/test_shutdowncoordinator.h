@@ -32,6 +32,25 @@ private slots:
 
     // Test N: a START click during the pump is re-stopped (A14 pump re-entrancy)
     void test_N_restart_during_pump_is_restopped();
+
+    // ========================================================================
+    // A3 (R11-001): ShutdownCoordinator::run()/retryDrain() consume the typed
+    // DrainResult from TimeTracker::drainForShutdown(). Clean-marker
+    // eligibility comes from that result, not from mode_ == None.
+    // ========================================================================
+
+    // run() reports an incomplete drain; a later retryDrain() (what a user
+    // Retry performs) resolves it once the store recovers.
+    void test_A3_run_incomplete_then_retryDrain_succeeds();
+    // Same setup, but retryDrain() also fails: still incomplete, no marker.
+    void test_A3_run_incomplete_then_retryDrain_fails();
+    // Already-stopped with no pending payload: a no-op success.
+    void test_A3_run_already_stopped_no_pending_is_noop_success();
+    // Direct and DrainEvents modes produce the same persistence result for
+    // an identical failing setup.
+    void test_A3_direct_and_drainevents_modes_produce_same_result();
+    // Forced OS shutdown (Direct) on failure: no user warning, no marker.
+    void test_A3_direct_mode_failure_emits_no_warning_and_no_marker();
 };
 
 #endif // TEST_SHUTDOWNCOORDINATOR_H

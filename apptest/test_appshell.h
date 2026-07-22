@@ -1,0 +1,35 @@
+#ifndef TEST_APPSHELL_H
+#define TEST_APPSHELL_H
+
+#include <QObject>
+#include "testcommon.h"
+
+/**
+ * AppShellTest -- application-shell composition tests (A3).
+ *
+ * Narrow on purpose: this is the seam where MainWin's Retry/Exit Anyway
+ * modal loop is actually exercised end-to-end (qtest's own aggregate never
+ * links mainwin.cpp/contentwidget.cpp, so it cannot compose MainWin with a
+ * real ShutdownCoordinator/TimeTracker). B2 and C1 add their own cases here;
+ * D13 later extends it to full startup/shutdown composition coverage.
+ */
+class AppShellTest : public QObject
+{
+    Q_OBJECT
+
+private slots:
+    // Close with a healthy store: no modal, marker written.
+    void test_close_happy_path_writes_marker_without_modal();
+    // Close fails once; the user clicks Retry and the store has recovered:
+    // exactly one new drain attempt resolves it.
+    void test_close_retry_succeeds_after_failure();
+    // Close fails; the user clicks Exit Anyway: no further retry, no marker.
+    void test_close_exit_anyway_stops_retrying_and_writes_no_marker();
+    // Regression: Exit Anyway is latched, so the second shutdown entry point
+    // (aboutToQuit after the last window closes) must not ask again.
+    void test_exit_anyway_is_not_asked_again_on_aboutToQuit();
+    // OS-forced (Direct) shutdown failure must show no modal at all.
+    void test_forced_os_shutdown_failure_shows_no_modal();
+};
+
+#endif // TEST_APPSHELL_H
