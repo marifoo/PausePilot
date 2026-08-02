@@ -1751,7 +1751,9 @@ void DatabaseTest::test_finalizeIfNoOverlap_succeeds_when_no_overlap()
     QVERIFY(orphanRowId > 0);
     manager.closeConnection_dbg();
 
-    QVERIFY(manager.finalizeIfNoOverlap_dbg(orphanRowId, orphanStartUtc, orphanEndUtc));
+    const auto result = manager.finalizeIfNoOverlap_dbg(orphanRowId, orphanStartUtc, orphanEndUtc);
+    QCOMPARE(result.outcome, SqliteSessionStore::FinalizeOutcome_dbg::Finalized);
+    QVERIFY(result.errorMessage.isEmpty());
 
     // Verify the row is now finalised.
     QVERIFY(manager.ensureOpen_dbg());
@@ -1788,8 +1790,11 @@ void DatabaseTest::test_finalizeIfNoOverlap_rejects_when_overlapping_finalized_r
     QVERIFY(orphanRowId > 0);
     manager.closeConnection_dbg();
 
-    // The overlap probe must reject the finalise attempt.
-    QVERIFY(!manager.finalizeIfNoOverlap_dbg(orphanRowId, orphanStartUtc, orphanEndUtc));
+    // The overlap probe must reject the finalise attempt with a typed
+    // OverlapRejected outcome -- a policy decision, not an error.
+    const auto result = manager.finalizeIfNoOverlap_dbg(orphanRowId, orphanStartUtc, orphanEndUtc);
+    QCOMPARE(result.outcome, SqliteSessionStore::FinalizeOutcome_dbg::OverlapRejected);
+    QVERIFY(result.errorMessage.isEmpty());
 }
 
 void DatabaseTest::test_finalizeIfNoOverlap_leaves_row_unchanged_on_overlap()
@@ -1816,7 +1821,8 @@ void DatabaseTest::test_finalizeIfNoOverlap_leaves_row_unchanged_on_overlap()
     QVERIFY(orphanRowId > 0);
     manager.closeConnection_dbg();
 
-    QVERIFY(!manager.finalizeIfNoOverlap_dbg(orphanRowId, orphanStartUtc, orphanEndUtc));
+    const auto result = manager.finalizeIfNoOverlap_dbg(orphanRowId, orphanStartUtc, orphanEndUtc);
+    QCOMPARE(result.outcome, SqliteSessionStore::FinalizeOutcome_dbg::OverlapRejected);
 
     // After rejection, the row must still be is_finalized = 0 (transaction atomicity).
     QVERIFY(manager.ensureOpen_dbg());
@@ -1826,6 +1832,359 @@ void DatabaseTest::test_finalizeIfNoOverlap_leaves_row_unchanged_on_overlap()
     QVERIFY(verify.exec());
     QVERIFY(verify.next());
     QCOMPARE(verify.value(0).toInt(), 0);
+    manager.closeConnection_dbg();
+}
+
+/**
+ * B1 (R07-002): a row that no longer matches "id = :id AND is_finalized = 0"
+ * (for example it vanished between orphan load and reconcile) is a distinct
+ * Missing outcome -- a policy no-op, not an overlap and not a database error.
+ */
+void DatabaseTest::test_finalizeIfNoOverlap_reports_missing_when_row_absent()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QVERIFY(manager.ensureOpen_dbg());
+    const QDateTime orphanStartUtc = QDateTime(QDate(2025, 1, 1), QTime(12, 0, 0), Qt::UTC);
+    const QDateTime orphanEndUtc   = QDateTime(QDate(2025, 1, 1), QTime(12, 30, 0), Qt::UTC);
+    const qint64 orphanRowId = seedOrphanRow(manager, orphanStartUtc, orphanEndUtc);
+    QVERIFY(orphanRowId > 0);
+
+    // The row disappears before finalize runs (e.g. already discarded).
+    QSqlQuery del(manager.rawDb_dbg());
+    del.prepare("DELETE FROM durations WHERE id = :id");
+    del.bindValue(":id", orphanRowId);
+    QVERIFY(del.exec());
+
+    const auto result = manager.finalizeIfNoOverlap_dbg(orphanRowId, orphanStartUtc, orphanEndUtc);
+    QCOMPARE(result.outcome, SqliteSessionStore::FinalizeOutcome_dbg::Missing);
+    QVERIFY(result.errorMessage.isEmpty());
+
+    // Connection remains usable after the rollback: a fresh orphan finalizes normally.
+    const qint64 secondRowId = seedOrphanRow(manager, orphanStartUtc, orphanEndUtc);
+    QVERIFY(secondRowId > 0);
+    const auto retryResult = manager.finalizeIfNoOverlap_dbg(secondRowId, orphanStartUtc, orphanEndUtc);
+    QCOMPARE(retryResult.outcome, SqliteSessionStore::FinalizeOutcome_dbg::Finalized);
+    manager.closeConnection_dbg();
+}
+
+/**
+ * B1 (R07-002): a BEGIN failure must map to Error, not to a false value that
+ * could also mean overlap. The failure is real SQLite behaviour: SQLite does
+ * not support nested transactions, so starting finalizeIfNoOverlap() while
+ * the connection is already inside a transaction makes its own db.transaction()
+ * fail with "cannot start a transaction within a transaction".
+ */
+void DatabaseTest::test_finalizeIfNoOverlap_returns_error_on_begin_failure()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QVERIFY(manager.ensureOpen_dbg());
+    const QDateTime orphanStartUtc = QDateTime(QDate(2025, 1, 1), QTime(12, 0, 0), Qt::UTC);
+    const QDateTime orphanEndUtc   = QDateTime(QDate(2025, 1, 1), QTime(12, 30, 0), Qt::UTC);
+    const qint64 orphanRowId = seedOrphanRow(manager, orphanStartUtc, orphanEndUtc);
+    QVERIFY(orphanRowId > 0);
+
+    // Force a real BEGIN failure by leaving the connection already inside an
+    // outer transaction before finalizeIfNoOverlap() tries to start its own.
+    QVERIFY(manager.rawDb_dbg().transaction());
+
+    const auto result = manager.finalizeIfNoOverlap_dbg(orphanRowId, orphanStartUtc, orphanEndUtc);
+    QCOMPARE(result.outcome, SqliteSessionStore::FinalizeOutcome_dbg::Error);
+    QVERIFY(!result.errorMessage.isEmpty());
+
+    // Clean up the outer transaction the test started.
+    QVERIFY(manager.rawDb_dbg().rollback());
+
+    // The row is untouched and the connection remains usable afterward.
+    QSqlQuery verify(manager.rawDb_dbg());
+    verify.prepare("SELECT is_finalized FROM durations WHERE id = :id");
+    verify.bindValue(":id", orphanRowId);
+    QVERIFY(verify.exec());
+    QVERIFY(verify.next());
+    QCOMPARE(verify.value(0).toInt(), 0);
+
+    const auto retryResult = manager.finalizeIfNoOverlap_dbg(orphanRowId, orphanStartUtc, orphanEndUtc);
+    QCOMPARE(retryResult.outcome, SqliteSessionStore::FinalizeOutcome_dbg::Finalized);
+    manager.closeConnection_dbg();
+}
+
+/**
+ * B1 (R07-002): an overlap-probe SELECT failure must also map to Error, not
+ * be conflated with a genuine overlap rejection. Renaming the durations table
+ * away makes the probe's real SELECT fail with "no such table".
+ */
+void DatabaseTest::test_finalizeIfNoOverlap_returns_error_on_probe_failure()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QVERIFY(manager.ensureOpen_dbg());
+    const QDateTime orphanStartUtc = QDateTime(QDate(2025, 1, 1), QTime(12, 0, 0), Qt::UTC);
+    const QDateTime orphanEndUtc   = QDateTime(QDate(2025, 1, 1), QTime(12, 30, 0), Qt::UTC);
+    const qint64 orphanRowId = seedOrphanRow(manager, orphanStartUtc, orphanEndUtc);
+    QVERIFY(orphanRowId > 0);
+
+    QSqlQuery rename(manager.rawDb_dbg());
+    QVERIFY(rename.exec("ALTER TABLE durations RENAME TO durations_b1_probe_test"));
+
+    const auto result = manager.finalizeIfNoOverlap_dbg(orphanRowId, orphanStartUtc, orphanEndUtc);
+    QCOMPARE(result.outcome, SqliteSessionStore::FinalizeOutcome_dbg::Error);
+    QVERIFY(!result.errorMessage.isEmpty());
+
+    QVERIFY(rename.exec("ALTER TABLE durations_b1_probe_test RENAME TO durations"));
+
+    QSqlQuery verify(manager.rawDb_dbg());
+    verify.prepare("SELECT is_finalized FROM durations WHERE id = :id");
+    verify.bindValue(":id", orphanRowId);
+    QVERIFY(verify.exec());
+    QVERIFY(verify.next());
+    QCOMPARE(verify.value(0).toInt(), 0);
+
+    const auto retryResult = manager.finalizeIfNoOverlap_dbg(orphanRowId, orphanStartUtc, orphanEndUtc);
+    QCOMPARE(retryResult.outcome, SqliteSessionStore::FinalizeOutcome_dbg::Finalized);
+    manager.closeConnection_dbg();
+}
+
+/**
+ * B1 (R07-002): an UPDATE failure must map to Error. A BEFORE UPDATE trigger
+ * that raises a real SQLite error blocks only the UPDATE statement, leaving
+ * the earlier overlap-probe SELECT unaffected -- proving the failure is
+ * attributed to the correct stage.
+ */
+void DatabaseTest::test_finalizeIfNoOverlap_returns_error_on_update_failure()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QVERIFY(manager.ensureOpen_dbg());
+    const QDateTime orphanStartUtc = QDateTime(QDate(2025, 1, 1), QTime(12, 0, 0), Qt::UTC);
+    const QDateTime orphanEndUtc   = QDateTime(QDate(2025, 1, 1), QTime(12, 30, 0), Qt::UTC);
+    const qint64 orphanRowId = seedOrphanRow(manager, orphanStartUtc, orphanEndUtc);
+    QVERIFY(orphanRowId > 0);
+
+    QSqlQuery trig(manager.rawDb_dbg());
+    QVERIFY(trig.exec(
+        "CREATE TRIGGER block_finalize_update_b1_test BEFORE UPDATE ON durations "
+        "BEGIN SELECT RAISE(ABORT, 'B1 test: blocked update'); END"
+    ));
+
+    const auto result = manager.finalizeIfNoOverlap_dbg(orphanRowId, orphanStartUtc, orphanEndUtc);
+    QCOMPARE(result.outcome, SqliteSessionStore::FinalizeOutcome_dbg::Error);
+    QVERIFY(result.errorMessage.contains("blocked update"));
+
+    QVERIFY(trig.exec("DROP TRIGGER block_finalize_update_b1_test"));
+
+    QSqlQuery verify(manager.rawDb_dbg());
+    verify.prepare("SELECT is_finalized FROM durations WHERE id = :id");
+    verify.bindValue(":id", orphanRowId);
+    QVERIFY(verify.exec());
+    QVERIFY(verify.next());
+    QCOMPARE(verify.value(0).toInt(), 0);
+
+    const auto retryResult = manager.finalizeIfNoOverlap_dbg(orphanRowId, orphanStartUtc, orphanEndUtc);
+    QCOMPARE(retryResult.outcome, SqliteSessionStore::FinalizeOutcome_dbg::Finalized);
+    manager.closeConnection_dbg();
+}
+
+/**
+ * B1 (R07-002): a COMMIT failure must map to Error and roll back, not be
+ * conflated with a successful drop. Reproduces the finding's own two-connection
+ * diagnostic: a second connection holds a SHARED read lock so the store's
+ * UPDATE (RESERVED) still succeeds but its COMMIT (needs EXCLUSIVE) is
+ * refused with "database is locked".
+ */
+void DatabaseTest::test_finalizeIfNoOverlap_returns_error_on_commit_failure()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QVERIFY(manager.ensureOpen_dbg());
+    const QDateTime orphanStartUtc = QDateTime(QDate(2025, 1, 1), QTime(12, 0, 0), Qt::UTC);
+    const QDateTime orphanEndUtc   = QDateTime(QDate(2025, 1, 1), QTime(12, 30, 0), Qt::UTC);
+    const qint64 orphanRowId = seedOrphanRow(manager, orphanStartUtc, orphanEndUtc);
+    QVERIFY(orphanRowId > 0);
+
+    const QString connName = "finalize_commit_lock_b1_test";
+    {
+        QSqlDatabase lockConn = QSqlDatabase::addDatabase("QSQLITE", connName);
+        lockConn.setDatabaseName(db_path_);
+        QVERIFY(lockConn.open());
+        QVERIFY(lockConn.transaction());
+        QSqlQuery holdRead(lockConn);
+        QVERIFY(holdRead.exec("SELECT COUNT(*) FROM durations"));
+        QVERIFY(holdRead.next());
+
+        const auto result = manager.finalizeIfNoOverlap_dbg(orphanRowId, orphanStartUtc, orphanEndUtc);
+        QCOMPARE(result.outcome, SqliteSessionStore::FinalizeOutcome_dbg::Error);
+        QVERIFY(!result.errorMessage.isEmpty());
+
+        lockConn.rollback();
+        lockConn.close();
+    }
+    QSqlDatabase::removeDatabase(connName);
+
+    QSqlQuery verify(manager.rawDb_dbg());
+    verify.prepare("SELECT is_finalized FROM durations WHERE id = :id");
+    verify.bindValue(":id", orphanRowId);
+    QVERIFY(verify.exec());
+    QVERIFY(verify.next());
+    QCOMPARE(verify.value(0).toInt(), 0);
+
+    const auto retryResult = manager.finalizeIfNoOverlap_dbg(orphanRowId, orphanStartUtc, orphanEndUtc);
+    QCOMPARE(retryResult.outcome, SqliteSessionStore::FinalizeOutcome_dbg::Finalized);
+    manager.closeConnection_dbg();
+}
+
+/**
+ * B1 (R07-002) at the reconcile layer: a real SQL error on one orphan must
+ * flip ReconcileResult::ok to false and must NOT be added to `dropped`
+ * (which would silently misreport a database failure as a policy drop).
+ * A second, genuinely overlapping orphan in the same batch still lands in
+ * `dropped`, proving Error and OverlapRejected remain distinguishable.
+ */
+void DatabaseTest::test_reconcileUnfinalizedCheckpoints_sql_error_is_not_reported_as_dropped()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    // Existing finalised row 10:00 - 11:00 so one orphan genuinely overlaps.
+    const QDateTime existingStartUtc = QDateTime(QDate(2025, 1, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime existingEndUtc   = QDateTime(QDate(2025, 1, 1), QTime(11, 0, 0), Qt::UTC);
+    std::deque<TimeDuration> seeded;
+    seeded.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, existingStartUtc.toLocalTime(), existingEndUtc.toLocalTime()));
+    QVERIFY(manager.updateDurationsById(seeded).ok());
+
+    QVERIFY(manager.ensureOpen_dbg());
+    // Orphan A: 12:00 - 12:30, no overlap -- would finalize, but UPDATE is blocked.
+    // Orphan B: 10:30 - 11:30, overlaps existing -- OverlapRejected as before.
+    const QDateTime aStartUtc = QDateTime(QDate(2025, 1, 1), QTime(12, 0, 0), Qt::UTC);
+    const QDateTime aEndUtc   = QDateTime(QDate(2025, 1, 1), QTime(12, 30, 0), Qt::UTC);
+    const QDateTime bStartUtc = QDateTime(QDate(2025, 1, 1), QTime(10, 30, 0), Qt::UTC);
+    const QDateTime bEndUtc   = QDateTime(QDate(2025, 1, 1), QTime(11, 30, 0), Qt::UTC);
+    const qint64 aId = seedOrphanRow(manager, aStartUtc, aEndUtc);
+    const qint64 bId = seedOrphanRow(manager, bStartUtc, bEndUtc);
+    QVERIFY(aId > 0 && bId > 0);
+
+    QSqlQuery trig(manager.rawDb_dbg());
+    QVERIFY(trig.exec(
+        "CREATE TRIGGER block_reconcile_update_b1_test BEFORE UPDATE ON durations "
+        "BEGIN SELECT RAISE(ABORT, 'B1 test: blocked update'); END"
+    ));
+
+    std::vector<SqliteSessionStore::OrphanCheckpoint_dbg> toFinalize;
+    SqliteSessionStore::OrphanCheckpoint_dbg a; a.id = aId; a.startTime = aStartUtc.toLocalTime(); a.endTime = aEndUtc.toLocalTime();
+    SqliteSessionStore::OrphanCheckpoint_dbg b; b.id = bId; b.startTime = bStartUtc.toLocalTime(); b.endTime = bEndUtc.toLocalTime();
+    toFinalize.push_back(a);
+    toFinalize.push_back(b);
+
+    SqliteSessionStore::ReconcileResult_dbg result = manager.reconcileUnfinalizedCheckpoints_dbg(toFinalize, {});
+
+    QVERIFY(!result.ok);
+    QVERIFY(result.finalized.empty());
+    // A's UPDATE error must not be misreported as a dropped/policy row.
+    QCOMPARE(result.dropped.size(), (size_t)1);
+    QCOMPARE(result.dropped[0], bId);
+
+    QVERIFY(trig.exec("DROP TRIGGER block_reconcile_update_b1_test"));
+
+    // Raw state: A untouched (rolled back), B still is_finalized = 0 (a
+    // dropped orphan is left in place by reconcile itself, only outright
+    // drops delete rows).
+    QSqlQuery verify(manager.rawDb_dbg());
+    verify.prepare("SELECT id, is_finalized FROM durations WHERE id IN (:a, :b) ORDER BY id");
+    verify.bindValue(":a", aId);
+    verify.bindValue(":b", bId);
+    QVERIFY(verify.exec());
+    int seen = 0;
+    while (verify.next()) {
+        QCOMPARE(verify.value(1).toInt(), 0);
+        seen++;
+    }
+    QCOMPARE(seen, 2);
+    manager.closeConnection_dbg();
+}
+
+/**
+ * B1 (R07-002) regression at the public recovery API: a real SQL error
+ * finalizing one orphan must make recoverStartupCheckpoints() report failure
+ * and must preserve the clean-shutdown marker -- the exact bug the finding
+ * describes (a failed finalize was previously reported as a successful drop
+ * with ok==true, consuming the marker).
+ */
+void DatabaseTest::test_recoverStartupCheckpoints_marker_intact_on_finalize_sql_error()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QVERIFY(manager.ensureOpen_dbg());
+
+    // Seed a valid unfinalized orphan (duration > 1 s, not stale) with no
+    // overlap, so it is eligible for finalization.
+    const QDateTime startUtc = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime endUtc   = QDateTime(QDate(2025, 6, 1), QTime(10, 5, 0), Qt::UTC);
+    const qint64 orphanId = seedOrphanRow(manager, startUtc, endUtc);
+    QVERIFY(orphanId > 0);
+
+    QSqlQuery q(manager.rawDb_dbg());
+    QVERIFY(q.exec(
+        "INSERT OR REPLACE INTO app_settings (key, value) "
+        "VALUES ('last_clean_shutdown', '2025-06-01T10:05:00.000Z')"
+    ));
+
+    // Block the finalizing UPDATE with a real trigger-raised SQLite error.
+    QVERIFY(q.exec(
+        "CREATE TRIGGER block_recovery_update_b1_test BEFORE UPDATE ON durations "
+        "BEGIN SELECT RAISE(ABORT, 'B1 test: blocked update'); END"
+    ));
+
+    const QDateTime now = QDateTime(QDate(2025, 6, 1), QTime(10, 10, 0), Qt::UTC);
+    StartupRecoveryResult res = manager.recoverStartupCheckpoints(now);
+
+    // Assert: recovery reports failure, not a false success with a bogus drop.
+    QVERIFY(!res.ok);
+
+    QVERIFY(q.exec("DROP TRIGGER block_recovery_update_b1_test"));
+
+    // Assert: marker is still present (not consumed by the failed recovery).
+    QSqlQuery checkMarker(manager.rawDb_dbg());
+    QVERIFY(checkMarker.exec(
+        "SELECT COUNT(*) FROM app_settings WHERE key = 'last_clean_shutdown'"
+    ));
+    QVERIFY(checkMarker.next());
+    QCOMPARE(checkMarker.value(0).toInt(), 1);
+
+    // Assert: the orphan row is still unfinalized (rolled back, not resurrected).
+    QSqlQuery checkOrphan(manager.rawDb_dbg());
+    checkOrphan.prepare("SELECT is_finalized FROM durations WHERE id = :id");
+    checkOrphan.bindValue(":id", orphanId);
+    QVERIFY(checkOrphan.exec());
+    QVERIFY(checkOrphan.next());
+    QCOMPARE(checkOrphan.value(0).toInt(), 0);
+
     manager.closeConnection_dbg();
 }
 

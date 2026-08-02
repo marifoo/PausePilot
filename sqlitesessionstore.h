@@ -69,6 +69,14 @@ private:
         QDateTime startTime;
         QDateTime endTime;
     };
+    // R07-002 (B1): typed outcome for finalizeIfNoOverlap() so a deliberate
+    // policy decision (overlap rejection, missing row) can never be reported
+    // as -- or silently substitute for -- a real transaction/SQL failure.
+    enum class FinalizeOutcome { Finalized, OverlapRejected, Missing, Error };
+    struct FinalizeResult {
+        FinalizeOutcome outcome = FinalizeOutcome::Error;
+        QString errorMessage;  // populated only when outcome == Error
+    };
     struct ReconcileResult {
         std::vector<long long> finalized;
         std::vector<long long> dropped;
@@ -121,7 +129,7 @@ private:
 
     // Startup recovery helpers (implementation details of recoverStartupCheckpoints).
     std::optional<std::deque<OrphanCheckpoint>> loadUnfinalizedCheckpoints();
-    bool finalizeIfNoOverlap(qint64 rowId, const QDateTime& startUtc, const QDateTime& endUtc);
+    FinalizeResult finalizeIfNoOverlap(qint64 rowId, const QDateTime& startUtc, const QDateTime& endUtc);
     ReconcileResult reconcileUnfinalizedCheckpoints(const std::vector<OrphanCheckpoint>& orphansToFinalize,
                                                     const std::vector<long long>& outrightDropIds);
     std::optional<MarkerResult> readLastCleanShutdownMarker();
@@ -154,8 +162,10 @@ public:
     /// Exposes private types and methods for white-box tests of recovery internals.
     using OrphanCheckpoint_dbg = OrphanCheckpoint;
     using ReconcileResult_dbg  = ReconcileResult;
+    using FinalizeOutcome_dbg  = FinalizeOutcome;
+    using FinalizeResult_dbg   = FinalizeResult;
     std::deque<OrphanCheckpoint> loadUnfinalizedCheckpoints_dbg() { return loadUnfinalizedCheckpoints().value_or(std::deque<OrphanCheckpoint>{}); }
-    bool finalizeIfNoOverlap_dbg(qint64 rowId, const QDateTime& s, const QDateTime& e) {
+    FinalizeResult finalizeIfNoOverlap_dbg(qint64 rowId, const QDateTime& s, const QDateTime& e) {
         return finalizeIfNoOverlap(rowId, s, e);
     }
     ReconcileResult reconcileUnfinalizedCheckpoints_dbg(

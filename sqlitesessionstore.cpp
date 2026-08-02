@@ -1452,21 +1452,31 @@ std::optional<std::deque<SqliteSessionStore::OrphanCheckpoint>> SqliteSessionSto
     return orphans;
 }
 
-bool SqliteSessionStore::finalizeIfNoOverlap(qint64 rowId, const QDateTime& startUtc, const QDateTime& endUtc)
+SqliteSessionStore::FinalizeResult SqliteSessionStore::finalizeIfNoOverlap(qint64 rowId, const QDateTime& startUtc, const QDateTime& endUtc)
 {
     QMutexLocker locker(&db_mutex_);
 
+    // Rolls back the open transaction on an error/no-op exit. The rollback
+    // failing is secondary evidence, logged without replacing the primary
+    // failure already reported by the caller.
+    auto rollbackAfter = [this](const char* context) {
+        if (!db.rollback()) {
+            Logger::Log(QString("[DB] Warning: rollback after %1 also failed: ").arg(context) + db.lastError().text());
+        }
+    };
+
     if (history_days_to_keep_ == 0) {
-        return false;
+        return {FinalizeOutcome::Error, "history persistence is disabled"};
     }
 
     if (!ensureOpen()) {
-        return false;
+        return {FinalizeOutcome::Error, "failed to open database connection"};
     }
 
     if (!db.transaction()) {
-        Logger::Log("[DB] Error starting finalizeIfNoOverlap transaction: " + db.lastError().text());
-        return false;
+        const QString err = db.lastError().text();
+        Logger::Log("[DB] Error starting finalizeIfNoOverlap transaction: " + err);
+        return {FinalizeOutcome::Error, err};
     }
 
     // Probe for any *other* finalised row that overlaps [startUtc, endUtc).
@@ -1490,41 +1500,44 @@ bool SqliteSessionStore::finalizeIfNoOverlap(qint64 rowId, const QDateTime& star
     probe.bindValue(":startTs", startTs);
 
     if (!probe.exec()) {
-        Logger::Log("[DB] Error probing for orphan overlap: " + probe.lastError().text());
-        db.rollback();
-        return false;
+        const QString err = probe.lastError().text();
+        Logger::Log("[DB] Error probing for orphan overlap: " + err);
+        rollbackAfter("overlap probe failure");
+        return {FinalizeOutcome::Error, err};
     }
 
     if (probe.next()) {
         // Overlap detected: leave the row unchanged.
-        db.rollback();
-        return false;
+        rollbackAfter("overlap rejection");
+        return {FinalizeOutcome::OverlapRejected, QString()};
     }
 
     QSqlQuery updateQuery(db);
     updateQuery.prepare("UPDATE durations SET is_finalized = 1 WHERE id = :id AND is_finalized = 0");
     updateQuery.bindValue(":id", static_cast<qlonglong>(rowId));
     if (!updateQuery.exec()) {
-        Logger::Log("[DB] Error finalising orphan row: " + updateQuery.lastError().text());
-        db.rollback();
-        return false;
+        const QString err = updateQuery.lastError().text();
+        Logger::Log("[DB] Error finalising orphan row: " + err);
+        rollbackAfter("UPDATE failure");
+        return {FinalizeOutcome::Error, err};
     }
 
     const bool updated = updateQuery.numRowsAffected() > 0;
     if (!updated) {
         // Row missing or already finalised — nothing to commit, but treat as a
         // no-op rather than a failure.
-        db.rollback();
-        return false;
+        rollbackAfter("missing-row no-op");
+        return {FinalizeOutcome::Missing, QString()};
     }
 
     if (!db.commit()) {
-        Logger::Log("[DB] Error committing finalizeIfNoOverlap: " + db.lastError().text());
-        db.rollback();
-        return false;
+        const QString err = db.lastError().text();
+        Logger::Log("[DB] Error committing finalizeIfNoOverlap: " + err);
+        rollbackAfter("commit failure");
+        return {FinalizeOutcome::Error, err};
     }
 
-    return true;
+    return {FinalizeOutcome::Finalized, QString()};
 }
 
 SqliteSessionStore::ReconcileResult SqliteSessionStore::reconcileUnfinalizedCheckpoints(const std::vector<OrphanCheckpoint>& orphansToFinalize,
@@ -1588,10 +1601,22 @@ SqliteSessionStore::ReconcileResult SqliteSessionStore::reconcileUnfinalizedChec
     for (const auto& orphan : orphansToFinalize) {
         const QDateTime startUtc = orphan.startTime.toUTC();
         const QDateTime endUtc   = orphan.endTime.toUTC();
-        if (finalizeIfNoOverlap(orphan.id, startUtc, endUtc)) {
+        const FinalizeResult finalizeResult = finalizeIfNoOverlap(orphan.id, startUtc, endUtc);
+        switch (finalizeResult.outcome) {
+        case FinalizeOutcome::Finalized:
             result.finalized.push_back(orphan.id);
-        } else {
+            break;
+        case FinalizeOutcome::OverlapRejected:
+        case FinalizeOutcome::Missing:
             result.dropped.push_back(orphan.id);
+            break;
+        case FinalizeOutcome::Error:
+            // A real SQL/transaction failure is not a policy decision: it must
+            // not be silently reported as a dropped row. Mark reconciliation
+            // unsuccessful so the caller preserves the clean-shutdown marker.
+            Logger::Log(QString("[DB] finalizeIfNoOverlap failed for orphan row %1: ").arg(orphan.id) + finalizeResult.errorMessage);
+            result.ok = false;
+            break;
         }
     }
 
