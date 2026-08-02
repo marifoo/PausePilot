@@ -385,11 +385,13 @@ TimeTracker::~TimeTracker()
     QMutexLocker locker(&mutex_);
     // drainForShutdown() is idempotent: on every normal path
     // ShutdownCoordinator has already run it (directly or via a user Retry)
-    // and this call is a no-op. If a pending commit is still here AND
-    // shutdown()/drainForShutdown() was never called on this object before,
-    // ShutdownCoordinator was bypassed entirely -- an orchestration bug, even
-    // though this last-resort drain may still save the data.
-    const bool orchestrationBypassed = !shutdown_called_ && pending_commit_.hasPending();
+    // and this call is a no-op. If a pending commit or discard intent is
+    // still here AND shutdown()/drainForShutdown() was never called on this
+    // object before, ShutdownCoordinator was bypassed entirely -- an
+    // orchestration bug, even though this last-resort drain may still
+    // resolve it.
+    const bool orchestrationBypassed = !shutdown_called_
+        && (pending_commit_.hasPending() || pending_discards_.hasPending());
     const DrainResult result = drainForShutdown();
     if (orchestrationBypassed) {
         Logger::Log(QString("[SHUTDOWN] ~TimeTracker: found a pending commit at destruction "
@@ -417,6 +419,11 @@ TimeTracker::~TimeTracker()
  */
 bool TimeTracker::retryUnsavedDurations()
 {
+    // Best-effort: a pending checkpoint-discard intent must not block Start
+    // (only clean-marking cares about it), but Start is a normal persistence
+    // opportunity to retry it.
+    retryPendingDiscards();
+
     if (!pending_commit_.hasPending()) {
         return true;
     }
@@ -661,19 +668,30 @@ void TimeTracker::stopTimer(const QDateTime& now, StopReason reason)
     autopause_pending_resume_ = false;
     Logger::Log("[TIMER] TimeTracker stopped <<");
 
+    // Register the discard intent BEFORE any store call (including the
+    // ordinary commit below), so the identity is captured even if this
+    // stop's own persistence attempt runs first (A4/R05-001).
+    if (!discardedCrossMidnightId.isEmpty()) {
+        pending_discards_.begin(discardedCrossMidnightId);
+    }
+
     // Persist current session durations only (not entire history). History dialog does replace explicitly.
-    // Use update interface to check for existing entries by start time and update them instead of creating duplicates
-    if (persistDurationsOrRetainForRetry()) {
+    // Use update interface to check for existing entries by start time and update them instead of creating duplicates.
+    // This also retries any pending discard intent(s), including the one just registered above.
+    const bool committed = persistDurationsOrRetainForRetry();
+    if (committed) {
         session_.resetForNewSession();
+    }
+
+    // The clean-shutdown marker must not be written while a commit or a
+    // discard intent remains unresolved (A4/R05-001): writing it here while
+    // a checkpoint-discard is still only pending could let startup recovery
+    // treat that not-yet-durable rejection as ordinary crash data.
+    if (committed && !pending_discards_.hasPending()) {
         // Use the same `now` for the shutdown marker to maintain a single
         // consistent timestamp across the entire stop operation.
         db_.setLastCleanShutdownMarker(now);
         Logger::Log("[DB] Session durations updated");
-    }
-
-    if (!discardedCrossMidnightId.isEmpty()) {
-        const SessionStoreResult r = db_.discardCheckpoint(discardedCrossMidnightId);
-        logDbResultOrWarn(r, "discardCheckpoint");
     }
 
     emit stopped(reason);
@@ -1049,7 +1067,7 @@ bool TimeTracker::shouldShowStartupRecoveryNotification() const
 bool TimeTracker::canMarkCleanShutdown() const
 {
     QMutexLocker locker(&mutex_);
-    return mode_ == Mode::None && !pending_commit_.hasPending();
+    return mode_ == Mode::None && !pending_commit_.hasPending() && !pending_discards_.hasPending();
 }
 
 TimeTracker::ShutdownResult TimeTracker::shutdown()
@@ -1062,7 +1080,7 @@ TimeTracker::ShutdownResult TimeTracker::shutdown()
         stopCalled = true;
     }
     const bool stopped = (mode_ == Mode::None);
-    const bool canCleanMark = stopped && !pending_commit_.hasPending();
+    const bool canCleanMark = stopped && !pending_commit_.hasPending() && !pending_discards_.hasPending();
     return {stopped, canCleanMark, stopCalled};
 }
 
@@ -1080,8 +1098,9 @@ DrainResult TimeTracker::drainForShutdown(DrainAttempt attempt)
     const ShutdownResult sr = shutdown();
     // stopTimer() writes its own clean-shutdown marker synchronously when its
     // commit succeeds inline. That only happens when this call actually
-    // stopped a live segment AND that commit did not leave a pending payload.
-    const bool markerAlreadyWritten = sr.stopCalled && !pending_commit_.hasPending();
+    // stopped a live segment AND that commit did not leave a pending payload
+    // or discard intent behind.
+    const bool markerAlreadyWritten = sr.stopCalled && !pending_commit_.hasPending() && !pending_discards_.hasPending();
 
     if (pending_commit_.hasPending()) {
         Logger::Log("[DB] Drain: retrying pending commit at shutdown");
@@ -1099,6 +1118,18 @@ DrainResult TimeTracker::drainForShutdown(DrainAttempt attempt)
         }
         Logger::Log("[DB] Drain: pending commit saved successfully");
     }
+
+    // Retry any pending checkpoint-discard intent(s) (A4/R05-001). An
+    // unresolved intent must block clean marking exactly like a pending
+    // commit: a crash before it is durably resolved could let startup
+    // recovery resurrect a segment the engine already deliberately rejected.
+    retryPendingDiscards();
+    if (pending_discards_.hasPending()) {
+        Logger::Log("[DB] Drain: pending checkpoint discard(s) still unresolved");
+        return DrainResult::incomplete(SessionStoreResult::TransientError,
+                                        "A previously discarded checkpoint could not be removed from storage");
+    }
+
     return DrainResult::complete(markerAlreadyWritten);
 }
 
@@ -1155,7 +1186,34 @@ bool TimeTracker::persistDurationsOrRetainForRetry()
     if (!ok) {
         Logger::Log("[DB] Session durations not persisted - retained for retry");
     }
+    // A normal persistence opportunity is also a normal discard-retry
+    // opportunity (A4/R05-001).
+    retryPendingDiscards();
     return ok;
+}
+
+/**
+ * Retries any durable-discard intents (A4/R05-001) against the store. Each
+ * attempt is a normal discardCheckpoint() call; the store makes both halves
+ * of that call idempotent (re-recording an already-recorded tombstone and
+ * re-deleting an already-deleted row are both safe no-ops), so calling this
+ * repeatedly cannot double-discard or resurrect anything.
+ *
+ * Success or Disabled resolves the intent. TransientError retains it for the
+ * next opportunity. FatalError also retains it here -- C4 owns latching the
+ * one tracker-unavailable state; this is only the seam for it.
+ */
+void TimeTracker::retryPendingDiscards()
+{
+    if (!pending_discards_.hasPending()) return;
+    // Copy: resolve() mutates the list pending_discards_.pending() refers to.
+    for (const SegmentId& id : std::vector<SegmentId>(pending_discards_.pending())) {
+        const SessionStoreResult r = db_.discardCheckpoint(id);
+        logDbResultOrWarn(r, "discardCheckpoint");
+        if (r.okOrDisabled()) {
+            pending_discards_.resolve(id);
+        }
+    }
 }
 
 SessionStoreResult TimeTracker::replaceAll(const Timeline& history, const Timeline& session)

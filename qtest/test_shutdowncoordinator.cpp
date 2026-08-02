@@ -1,5 +1,6 @@
 #include "test_shutdowncoordinator.h"
 #include "fakesessionstore.h"
+#include "fakeclock.h"
 #include "shutdowncoordinator.h"
 #include <QtTest>
 
@@ -376,5 +377,49 @@ void ShutdownCoordinatorTest::test_A3_direct_mode_failure_emits_no_warning_and_n
 
     // Cleanup so destruction does not find an unresolved commit.
     fakeDb.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(coordinator.retryDrain().clean());
+}
+
+// ============================================================================
+// A4 (R05-001): an unresolved checkpoint-discard intent must block clean
+// marking exactly like a pending commit -- including the explicit
+// best-effort termination exception: an OS-forced shutdown attempts once
+// and, on failure, exits with no warning and no clean marker.
+// ============================================================================
+
+void ShutdownCoordinatorTest::test_A4_forced_shutdown_with_unresolved_discard_writes_no_marker()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+
+    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(preMidnight);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+
+    // The engine crosses midnight and deliberately rejects the segment, but
+    // the store keeps failing the discard.
+    fakeDb.discardCheckpointResult = SessionStoreResult::transient("injected discard failure");
+    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime));
+    QVERIFY(tracker.discardCrossMidnightOngoingAndStop_dbg(clock.now()));
+    QVERIFY(tracker.hasPendingDiscards_dbg());
+
+    fakeDb.callLog.clear();
+
+    // Act: OS-forced shutdown attempts once; per policy it shows no warning
+    // on failure, but it must also NOT write a clean marker -- the discard
+    // intent is still unresolved.
+    const DrainResult result = coordinator.run(ShutdownMode::Direct);
+
+    // Assert
+    QVERIFY(!result.clean());
+    QVERIFY(!fakeDb.callLog.contains("setLastCleanShutdownMarker"));
+
+    // Cleanup so destruction does not find an unresolved intent.
+    fakeDb.discardCheckpointResult = SessionStoreResult::success();
     QVERIFY(coordinator.retryDrain().clean());
 }

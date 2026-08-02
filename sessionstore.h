@@ -207,6 +207,15 @@ public:
     /// Called when the engine deliberately discards an in-flight segment (e.g. the
     /// cross-midnight watchdog) so the orphaned checkpoint is neither resurrected
     /// by startup recovery nor silently dropped by the stale-orphan policy.
+    ///
+    /// The DISCARD INTENT itself must be durable across a failure of this call
+    /// (R05-001): implementations own recording it (e.g. a store-owned tombstone)
+    /// before attempting the physical row delete, and startup recovery must honor
+    /// any unresolved intent it finds -- deleting only a matching unfinalized row,
+    /// never a finalized one. Returning TransientError/FatalError therefore does
+    /// not mean the intent was lost; the caller retains the segment id and may
+    /// call this again -- both the tombstone write and the row delete are
+    /// idempotent, so repeated calls are safe.
     /// Returns Disabled when history storage is off (no-op, not an error).
     /// Returns TransientError/FatalError on DB failure.
     /// @pre segmentId must be non-empty

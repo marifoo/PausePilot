@@ -206,6 +206,13 @@ bool SqliteSessionStore::ensureSchema()
         return false;
     }
 
+    // Non-fatal: a missing discard_intents table only degrades A4's
+    // discard-durability guarantee to ordinary (non-durable) TransientError
+    // behavior; it does not indicate schema incompatibility.
+    if (!ensureDiscardIntentsTable()) {
+        Logger::Log("[DB] Warning: Failed to ensure discard_intents table");
+    }
+
     QSqlQuery segmentIndexQuery(db);
     if (!segmentIndexQuery.exec("CREATE INDEX IF NOT EXISTS idx_segment_id ON durations(segment_id)")) {
         Logger::Log("[DB] Warning: Failed to create segment_id index: " + segmentIndexQuery.lastError().text());
@@ -390,6 +397,11 @@ SchemaStatus SqliteSessionStore::checkSchemaOnStartup()
         // Non-fatal: log and continue; the durations table is the critical one.
     }
 
+    if (!ensureDiscardIntentsTable()) {
+        Logger::Log("[DB] Warning: Failed to ensure discard_intents table on existing DB");
+        // Non-fatal: log and continue (see ensureSchema() for rationale).
+    }
+
     {
         QSqlQuery segmentIndexQuery(db);
         if (!segmentIndexQuery.exec("CREATE INDEX IF NOT EXISTS idx_segment_id ON durations(segment_id)")) {
@@ -522,6 +534,25 @@ bool SqliteSessionStore::ensureSettingsTable()
         return false;
     }
 
+    return true;
+}
+
+// A4 (R05-001): discard_intents is a durable tombstone table. A row here
+// means the engine has deliberately rejected a segment (currently: the
+// cross-midnight watchdog/scheduled-stop discard) and its unfinalized
+// checkpoint row must never be resurrected by startup recovery, even if the
+// physical row delete itself keeps failing. IF NOT EXISTS makes this safe to
+// call from both a fresh-DB build and an existing-DB upgrade.
+bool SqliteSessionStore::ensureDiscardIntentsTable()
+{
+    QSqlQuery query(db);
+    if (!query.exec(
+            "CREATE TABLE IF NOT EXISTS discard_intents ("
+            "segment_id TEXT PRIMARY KEY"
+            ")")) {
+        Logger::Log("[DB] Error creating discard_intents table: " + query.lastError().text());
+        return false;
+    }
     return true;
 }
 
@@ -1104,6 +1135,19 @@ SessionStoreResult SqliteSessionStore::saveCheckpoint(DurationType type, const Q
         : SessionStoreResult::transient("Checkpoint transaction commit failed: " + db.lastError().text());
 }
 
+/**
+ * Discards a deliberately-rejected in-flight segment's checkpoint (A4/R05-001).
+ *
+ * Durability: the discard INTENT is recorded in discard_intents as its own
+ * committed statement BEFORE the physical row delete is attempted. Both
+ * steps are individually auto-committed (deliberately not wrapped in one
+ * transaction) so that a failure of the second step leaves the first step's
+ * tombstone durably in place -- recovery can then finish the job even if
+ * this call, and every retry of it before the process ends, keeps failing.
+ * Both the tombstone write (INSERT OR IGNORE) and the row delete (DELETE ...
+ * WHERE, a no-op if already gone) are idempotent, so repeated calls for the
+ * same segment_id are always safe.
+ */
 SessionStoreResult SqliteSessionStore::discardCheckpoint(const SegmentId& segmentId)
 {
     QMutexLocker locker(&db_mutex_);
@@ -1122,6 +1166,28 @@ SessionStoreResult SqliteSessionStore::discardCheckpoint(const SegmentId& segmen
         return SessionStoreResult::fatal("DB connection could not be opened");
     }
 
+    // Defensive: guarantee the table exists even if this is somehow called
+    // before checkSchemaOnStartup() has run its additive DDL (e.g. an
+    // existing pre-A4 DB in a test that seeds/exercises this call directly).
+    if (!ensureDiscardIntentsTable()) {
+        return SessionStoreResult::transient("Failed to prepare discard-intent storage");
+    }
+
+    QSqlQuery intentQuery(db);
+    intentQuery.prepare("INSERT OR IGNORE INTO discard_intents (segment_id) VALUES (:id)");
+    intentQuery.bindValue(":id", segmentId.toString());
+    if (!intentQuery.exec()) {
+        Logger::Log("[DB] Error recording discard intent: " + intentQuery.lastError().text());
+        return SessionStoreResult::transient("Failed to record discard intent: " + intentQuery.lastError().text());
+    }
+
+#ifndef QT_NO_DEBUG
+    if (force_discard_row_delete_failure_dbg_) {
+        Logger::Log("[DB] discardCheckpoint: injected row-delete failure (test) — intent remains durable");
+        return SessionStoreResult::transient("Injected discard-delete failure (test)");
+    }
+#endif
+
     // Only unfinalized rows may be removed here; finalized history is never touched.
     QSqlQuery query(db);
     query.prepare("DELETE FROM durations WHERE segment_id = :segment_id AND is_finalized = 0");
@@ -1133,6 +1199,17 @@ SessionStoreResult SqliteSessionStore::discardCheckpoint(const SegmentId& segmen
 
     Logger::Log(QString("[DB] discardCheckpoint: removed %1 unfinalized row(s) for segment_id %2")
         .arg(query.numRowsAffected()).arg(segmentId.toString()));
+
+    // The row is confirmed gone (or was already gone) -- resolve the intent.
+    // Best-effort: a failure here is harmless (recovery re-resolves a
+    // leftover tombstone as a safe no-op), so it does not fail the call.
+    QSqlQuery clearQuery(db);
+    clearQuery.prepare("DELETE FROM discard_intents WHERE segment_id = :id");
+    clearQuery.bindValue(":id", segmentId.toString());
+    if (!clearQuery.exec()) {
+        Logger::Log("[DB] Warning: failed to clear discard intent: " + clearQuery.lastError().text());
+    }
+
     return SessionStoreResult::success();
 }
 
@@ -1621,11 +1698,74 @@ bool SqliteSessionStore::deleteLastCleanShutdownMarker()
 }
 
 /**
+ * Loads all durable discard-intent segment ids (A4/R05-001).
+ *
+ * Returns nullopt only on a real query failure -- an empty (but successfully
+ * queried) table returns an empty vector, not nullopt.
+ */
+std::optional<std::vector<SegmentId>> SqliteSessionStore::loadDiscardIntents()
+{
+    QMutexLocker locker(&db_mutex_);
+
+    if (history_days_to_keep_ == 0) {
+        return std::vector<SegmentId>{};
+    }
+
+    if (!ensureOpen()) {
+        return std::nullopt;
+    }
+
+    if (!ensureDiscardIntentsTable()) {
+        return std::nullopt;
+    }
+
+    QSqlQuery q(db);
+    if (!q.exec("SELECT segment_id FROM discard_intents")) {
+        Logger::Log("[DB] Error loading discard intents: " + q.lastError().text());
+        return std::nullopt;
+    }
+
+    std::vector<SegmentId> ids;
+    while (q.next()) {
+        const QString s = q.value(0).toString();
+        if (!s.isEmpty()) {
+            ids.push_back(SegmentId::fromString(s));
+        }
+    }
+    return ids;
+}
+
+/**
+ * Clears resolved discard intents (A4/R05-001). Best-effort: a failure here
+ * is logged only -- a leftover tombstone is safely re-resolved as a no-op on
+ * the next recovery, since it never matches a still-live row by then.
+ */
+void SqliteSessionStore::clearDiscardIntents(const std::vector<SegmentId>& ids)
+{
+    QMutexLocker locker(&db_mutex_);
+
+    if (ids.empty()) {
+        return;
+    }
+
+    QSqlQuery q(db);
+    q.prepare("DELETE FROM discard_intents WHERE segment_id = :id");
+    for (const auto& id : ids) {
+        q.bindValue(":id", id.toString());
+        if (!q.exec()) {
+            Logger::Log("[DB] Warning: failed to clear discard intent for " + id.toString()
+                        + ": " + q.lastError().text());
+        }
+    }
+}
+
+/**
  * Startup checkpoint recovery.
  *
  * Consumes the last-clean-shutdown marker, loads unfinalized checkpoint rows,
- * applies the too-short (<1 s) / stale (>24 h) / overlap policies, finalizes
- * qualifying rows, and decides whether the user needs to be notified.
+ * applies the durable-discard-intent (A4/R05-001), too-short (<1 s), stale
+ * (>24 h), and overlap policies, finalizes qualifying rows, and decides
+ * whether the user needs to be notified.
  *
  * All internal mechanics (row ids, finalize/drop lists, marker timestamps) stay
  * inside this method.  TimeTracker receives only domain facts via StartupRecoveryResult.
@@ -1654,7 +1794,25 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
         return result;
     }
     const std::deque<OrphanCheckpoint>& orphans = *orphansOpt;
+
+    // A4 (R05-001): a durable discard intent wins over ordinary orphan
+    // policy. It may claim only a matching UNFINALIZED row (never a
+    // finalized one -- a reused/corrupt identity must not delete real
+    // history); either way the tombstone is resolved below once its fate
+    // is settled, so it cannot linger as unresolvable work.
+    const std::optional<std::vector<SegmentId>> intentsOpt = loadDiscardIntents();
+    if (!intentsOpt.has_value()) {
+        Logger::Log("[DB] recoverStartupCheckpoints: discard-intent load failed — marker preserved, no reconciliation");
+        result.ok = false;
+        return result;
+    }
+    std::vector<SegmentId> unmatchedIntents = *intentsOpt;
+
     if (orphans.empty()) {
+        // No unfinalized rows at all: any leftover discard intents cannot
+        // match anything (already deleted, or never existed) -- resolve them
+        // so they don't linger as unresolvable work.
+        clearDiscardIntents(unmatchedIntents);
         // No orphans: delete the marker (clean state) and return.
         if (markerResult.has_value()) {
             deleteLastCleanShutdownMarker();
@@ -1662,10 +1820,31 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
         return result;
     }
 
-    std::vector<OrphanCheckpoint> toFinalize;
-    std::vector<long long> dropIds;
-
+    // Partition orphans whose segment_id has a durable discard intent: these
+    // are force-dropped (outright, bypassing overlap policy) regardless of
+    // duration/age, and never contribute to recovered_seconds or notification.
+    std::vector<long long> forcedDropIds;
+    std::vector<SegmentId> resolvedIntents;
+    std::deque<OrphanCheckpoint> remainingOrphans;
     for (const auto& orphan : orphans) {
+        auto it = std::find(unmatchedIntents.begin(), unmatchedIntents.end(), orphan.segment_id);
+        if (it != unmatchedIntents.end()) {
+            forcedDropIds.push_back(orphan.id);
+            resolvedIntents.push_back(orphan.segment_id);
+            unmatchedIntents.erase(it);
+        } else {
+            remainingOrphans.push_back(orphan);
+        }
+    }
+    // Any intent left unmatched named no unfinalized row -- either already
+    // deleted, or (a reused/corrupt identity) it now names a finalized row.
+    // Either way there is nothing left to delete; just resolve the tombstone.
+    resolvedIntents.insert(resolvedIntents.end(), unmatchedIntents.begin(), unmatchedIntents.end());
+
+    std::vector<OrphanCheckpoint> toFinalize;
+    std::vector<long long> dropIds = forcedDropIds;
+
+    for (const auto& orphan : remainingOrphans) {
         const bool tooShort = orphan.duration < kMinRecoverableOrphanDurationMs;
         const bool stale = orphan.endTime.isValid() && (orphan.endTime.msecsTo(now) > kOrphanStaleAgeMs);
         // A backward clock jump since the checkpoint was written can leave the
@@ -1686,6 +1865,10 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
         result.ok = false;
         return result;
     }
+
+    // Reconciliation succeeded: the force-dropped rows are gone (or never
+    // existed), so it is now safe to resolve their tombstones.
+    clearDiscardIntents(resolvedIntents);
 
     // Reconciliation succeeded: now it is safe to consume the marker.
     if (markerResult.has_value()) {

@@ -68,6 +68,11 @@ private slots:
     // reopen proves ordinary startup recovery finalizes only that durable
     // portion, without duplication or resurrecting the in-memory-only tail.
     void test_A3_exit_anyway_leaves_checkpoint_untouched_for_recovery();
+
+    // A4 (R05-001): a checkpoint-discard failure's intent is durable across
+    // a real close/reopen -- the rejected segment can never be resurrected
+    // as credited history.
+    void test_A4_watchdog_discard_failure_survives_reopen_never_credited();
 };
 
 #endif // TEST_INTEGRATION_H

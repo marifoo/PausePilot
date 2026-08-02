@@ -72,6 +72,10 @@ public:
     SessionStoreResult commitSessionResult = SessionStoreResult::success();
     SessionStoreResult replaceDurationsResult = SessionStoreResult::success();
     SessionStoreResult saveCheckpointResult = SessionStoreResult::success();
+    /// Result returned by discardCheckpoint(). On anything other than
+    /// Success (including Disabled) savedCheckpoints is left untouched --
+    /// Disabled and every failure category must be a no-op, not a mutation.
+    SessionStoreResult discardCheckpointResult = SessionStoreResult::success();
     SchemaStatus checkSchemaResult = SchemaStatus::Ready;
     SessionStoreResult setMarkerResult = SessionStoreResult::success();
     SessionStoreResult flushToDiscResult = SessionStoreResult::success();

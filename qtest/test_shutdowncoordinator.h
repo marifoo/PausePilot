@@ -51,6 +51,11 @@ private slots:
     void test_A3_direct_and_drainevents_modes_produce_same_result();
     // Forced OS shutdown (Direct) on failure: no user warning, no marker.
     void test_A3_direct_mode_failure_emits_no_warning_and_no_marker();
+
+    // A4 (R05-001): an unresolved checkpoint-discard intent blocks clean
+    // marking exactly like a pending commit, including under a forced OS
+    // shutdown (best-effort termination: no warning, but still no marker).
+    void test_A4_forced_shutdown_with_unresolved_discard_writes_no_marker();
 };
 
 #endif // TEST_SHUTDOWNCOORDINATOR_H

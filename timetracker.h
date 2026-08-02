@@ -9,6 +9,8 @@
 #include <QTimer>
 #include <optional>
 #include <deque>
+#include <vector>
+#include <algorithm>
 #include <memory>
 #include <utility>
 #include <functional>
@@ -194,6 +196,43 @@ private:
         std::optional<DrainResult> first_drain_failure_;
     };
 
+    /**
+     * PendingDiscards — durable-discard-intent tracking (A4/R05-001).
+     *
+     * TimeTracker deliberately rejects a live segment (currently: the
+     * cross-midnight watchdog/scheduled-stop path) by asking the store to
+     * discard its unfinalized checkpoint row. begin() records the segment's
+     * stable identity BEFORE the store call is made, so the identity is
+     * never lost even if the store call itself fails -- the identity is all
+     * TimeTracker needs to keep retrying; the store owns making the discard
+     * itself durable (a tombstone written before the physical row delete --
+     * see SqliteSessionStore::discardCheckpoint()).
+     *
+     * Multiple intents can be outstanding at once (e.g. a second
+     * cross-midnight discard before an earlier one resolves), so this holds
+     * a small set rather than a single payload like PendingCommit. Each
+     * entry is independent and safe to retry repeatedly.
+     */
+    class PendingDiscards {
+    public:
+        bool hasPending() const { return !ids_.empty(); }
+        const std::vector<SegmentId>& pending() const { return ids_; }
+
+        /// Records a new discard intent. No-op if already pending.
+        void begin(const SegmentId& id) {
+            if (std::find(ids_.begin(), ids_.end(), id) == ids_.end())
+                ids_.push_back(id);
+        }
+
+        /// Marks one intent resolved (store confirms Success or Disabled).
+        void resolve(const SegmentId& id) {
+            ids_.erase(std::remove(ids_.begin(), ids_.end(), id), ids_.end());
+        }
+
+    private:
+        std::vector<SegmentId> ids_;
+    };
+
     const Settings & settings_;
     /// Wall-clock source for the engine. Defaults to QDateTime::currentDateTime;
     /// tests inject a controllable clock via setNowProvider_dbg(). Every internal
@@ -202,6 +241,7 @@ private:
     QElapsedTimer timer_;
     SessionState session_;
     PendingCommit pending_commit_;
+    PendingDiscards pending_discards_;
     Mode mode_;
     bool autopause_pending_resume_;
     bool is_locked_;     // Track if desktop is currently locked (to prevent checkpoints while locked)
@@ -266,6 +306,9 @@ private:
     // (None -> Activity only). Performs exactly one retry attempt.
     // Returns true if startTimer should continue, false if it should abort.
     bool retryUnsavedDurations();
+    // Retries any durable-discard intents (A4/R05-001) against the store.
+    // Safe to call any time, including when nothing is pending (no-op).
+    void retryPendingDiscards();
     bool maybeReanchorCheckpoint(const TimeDuration& seg);
     /// Locked variant of getOngoingDuration() for callers that already hold mutex_.
     std::optional<TimeDuration> getOngoingDuration_locked() const;
@@ -508,6 +551,17 @@ public:
     std::deque<TimeDuration> pendingCommitPayload_dbg() const {
         return pending_commit_.hasPending() ? pending_commit_.payload() : std::deque<TimeDuration>{};
     }
+
+    /// True iff one or more durable-discard intents (A4/R05-001) are still
+    /// unresolved (blocks clean-shutdown marking until resolved).
+    bool hasPendingDiscards_dbg() const { return pending_discards_.hasPending(); }
+
+    /// Copy of the currently pending discard segment ids, or empty if none.
+    std::vector<SegmentId> pendingDiscardIds_dbg() const { return pending_discards_.pending(); }
+
+    /// Directly injects a discard intent, bypassing the normal discard path,
+    /// for tests that need to arrange a pre-existing unresolved intent.
+    void injectPendingDiscard_dbg(const SegmentId& id) { pending_discards_.begin(id); }
 
     /// Expose frequently-checked flags for test assertions.
     bool isDialogOpen_dbg() const { return dialog_open_; }

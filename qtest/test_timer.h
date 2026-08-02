@@ -267,6 +267,31 @@ private slots:
     void test_A3_user_retry_reports_fresh_failure_message();
     // The destructor is a no-op on the normal path (drain already resolved).
     void test_A3_destructor_is_noop_after_successful_drain();
+
+    // ========================================================================
+    // A4 (R05-001): a failed checkpoint discard must retain a durable intent
+    // (not just log-and-forget) that blocks clean marking until resolved,
+    // survives Transient/Fatal failures, retries at normal persistence
+    // opportunities and at drainForShutdown(), and never mutates fake state
+    // on Disabled or failure.
+    // ========================================================================
+
+    // A transient discard failure retains the intent and forbids clean marking.
+    void test_A4_discard_transient_failure_retains_intent_and_blocks_clean_mark();
+    // Same, but Fatal -- also retained (C4 owns the latch; A4 only retains).
+    void test_A4_discard_fatal_failure_retains_intent_and_blocks_clean_mark();
+    // Disabled resolves the intent as a contractual no-op and does not mutate
+    // the fake's checkpoint records.
+    void test_A4_discard_disabled_resolves_intent_without_mutating_checkpoints();
+    // Start is a normal retry opportunity but must not itself be blocked by
+    // an unresolved discard intent.
+    void test_A4_start_retries_pending_discard_without_blocking_start();
+    // drainForShutdown() retries an unresolved discard intent; once the store
+    // recovers, the drain becomes clean and the intent clears.
+    void test_A4_drain_retries_pending_discard_then_succeeds();
+    // Same setup, but the store keeps failing: drain stays Incomplete and the
+    // intent remains -- no clean marker may be written.
+    void test_A4_drain_incomplete_while_discard_unresolved();
 };
 
 #endif // TEST_TIMER_H

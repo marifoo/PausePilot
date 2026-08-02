@@ -97,12 +97,16 @@ SessionStoreResult FakeSessionStore::discardCheckpoint(const SegmentId& segmentI
     if (segmentId.isEmpty()) {
         return SessionStoreResult::callerBug("empty segment_id");
     }
+    if (discardCheckpointResult.category != SessionStoreResult::Success) {
+        // Disabled or a failure category: a deliberate no-op, not a mutation.
+        return discardCheckpointResult;
+    }
     // Mirror deleting the unfinalized rows: drop any recorded checkpoints for this id.
     savedCheckpoints.erase(
         std::remove_if(savedCheckpoints.begin(), savedCheckpoints.end(),
                        [&](const CheckpointRecord& cp) { return cp.segmentId == segmentId; }),
         savedCheckpoints.end());
-    return SessionStoreResult::success();
+    return discardCheckpointResult;
 }
 
 SchemaStatus FakeSessionStore::checkSchemaOnStartup()

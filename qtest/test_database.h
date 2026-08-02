@@ -137,6 +137,31 @@ private slots:
     void test_ensureSettingsTable_rebuilds_malformed_table();
     void test_ensureSettingsTable_rebuilds_constraint_malformed_table();
     void test_ensureSettingsTable_leaves_healthy_table_untouched();
+
+    // ========================================================================
+    // A4 (R05-001): a failed checkpoint discard must leave a DURABLE intent
+    // (a store-owned tombstone) surviving a transient row-delete failure, and
+    // startup recovery must honor it -- deleting only a matching unfinalized
+    // row, never a finalized one.
+    // ========================================================================
+
+    // Ordinary success: the tombstone is recorded then resolved in the same
+    // call, alongside the physical row delete.
+    void test_A4_discardCheckpoint_success_leaves_no_residual_intent();
+    // A row-delete failure after the tombstone commit leaves the intent
+    // durable and the (still unfinalized) row untouched.
+    void test_A4_discardCheckpoint_row_delete_failure_leaves_durable_intent();
+    // Repeating discardCheckpoint() for the same segment is idempotent.
+    void test_A4_discardCheckpoint_repeated_application_is_idempotent();
+    // Disabled history performs no mutation.
+    void test_A4_discardCheckpoint_disabled_history_no_mutation();
+    // Real close-and-reopen: a durable intent surviving a row-delete failure
+    // is honored by the NEXT recovery -- the unfinalized row is deleted, not
+    // finalized/credited, and the tombstone is resolved.
+    void test_A4_recovery_after_reopen_deletes_row_matching_durable_intent();
+    // A discard intent that (by a reused/corrupt identity) matches a
+    // FINALIZED row must never delete it; only the tombstone is resolved.
+    void test_A4_recovery_never_deletes_finalized_row_matching_intent();
 };
 
 #endif // TEST_DATABASE_H

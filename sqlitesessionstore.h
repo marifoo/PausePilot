@@ -86,6 +86,10 @@ private:
     bool schema_creation_failed_ = false;
 #ifndef QT_NO_DEBUG
     bool force_reconcile_failure_dbg_ = false;
+    // A4 (R05-001) test seam: makes discardCheckpoint()'s physical row-delete
+    // step fail after the tombstone write has already committed, so tests can
+    // prove the discard intent survives that failure durably.
+    bool force_discard_row_delete_failure_dbg_ = false;
 #endif
 
     // Guards all public entry points so that no two operations can interleave.
@@ -100,6 +104,16 @@ private:
     bool ensureSchema();
     void closeConnection();
     bool ensureSettingsTable();
+    // A4 (R05-001): the discard_intents table is a durable tombstone recording
+    // that the engine has deliberately rejected a segment. Additive DDL, safe
+    // to (re)create on any DB (mirrors idx_segment_id/idx_start_utc).
+    bool ensureDiscardIntentsTable();
+    // Loads all durable discard-intent segment ids. nullopt on a real DB error
+    // (distinct from "table empty").
+    std::optional<std::vector<SegmentId>> loadDiscardIntents();
+    // Best-effort: clears resolved discard intents. Failure is logged only --
+    // a leftover tombstone is safely re-resolved (no-op) on the next recovery.
+    void clearDiscardIntents(const std::vector<SegmentId>& ids);
     BackupResult createBackup(const std::deque<TimeDuration>& durations, TransactionMode mode);
     void performRetentionCleanup();
     void pruneOldBackups(int keepCount = 5);
@@ -155,6 +169,10 @@ public:
     /// Forces reconcileUnfinalizedCheckpoints to return ok=false, for testing
     /// that recoverStartupCheckpoints does not mutate the marker on failure.
     void setForceReconcileFailure_dbg(bool v) { force_reconcile_failure_dbg_ = v; }
+
+    /// Forces discardCheckpoint()'s row-delete step to fail, for testing that
+    /// the discard intent (tombstone) survives durably despite the failure.
+    void setForceDiscardRowDeleteFailure_dbg(bool v) { force_discard_row_delete_failure_dbg_ = v; }
 #endif // QT_NO_DEBUG
 
 };

@@ -2818,3 +2818,239 @@ void DatabaseTest::test_ensureSettingsTable_leaves_healthy_table_untouched()
     QCOMPARE(q.value(0).toString(), now.toUTC().toString(Qt::ISODateWithMs));
     manager.closeConnection_dbg();
 }
+
+// ============================================================================
+// A4 (R05-001): durable checkpoint-discard intent.
+// ============================================================================
+
+static int countDiscardIntents(SqliteSessionStore& manager, const SegmentId& id)
+{
+    QSqlQuery q(manager.rawDb_dbg());
+    q.prepare("SELECT COUNT(*) FROM discard_intents WHERE segment_id = :id");
+    q.bindValue(":id", id.toString());
+    if (!q.exec() || !q.next()) return -1;
+    return q.value(0).toInt();
+}
+
+static int countDurationsForSegment(SqliteSessionStore& manager, const SegmentId& id)
+{
+    QSqlQuery q(manager.rawDb_dbg());
+    q.prepare("SELECT COUNT(*) FROM durations WHERE segment_id = :id");
+    q.bindValue(":id", id.toString());
+    if (!q.exec() || !q.next()) return -1;
+    return q.value(0).toInt();
+}
+
+void DatabaseTest::test_A4_discardCheckpoint_success_leaves_no_residual_intent()
+{
+    // Arrange: an unfinalized checkpoint row.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    const SegmentId segId = SegmentId::mint();
+    const QDateTime start = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime end   = QDateTime(QDate(2025, 6, 1), QTime(10, 5, 0), Qt::UTC);
+    QVERIFY(manager.saveCheckpoint(DurationType::Activity, start, end, segId).ok());
+
+    // Act
+    const SessionStoreResult result = manager.discardCheckpoint(segId);
+
+    // Assert: success, row gone, no residual tombstone.
+    QVERIFY(result.ok());
+    QVERIFY(manager.ensureOpen_dbg());
+    QCOMPARE(countDurationsForSegment(manager, segId), 0);
+    QCOMPARE(countDiscardIntents(manager, segId), 0);
+    manager.closeConnection_dbg();
+}
+
+void DatabaseTest::test_A4_discardCheckpoint_row_delete_failure_leaves_durable_intent()
+{
+    // Arrange: an unfinalized checkpoint row, and the row-delete step forced
+    // to fail (simulating a transient failure AFTER the tombstone commits).
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    const SegmentId segId = SegmentId::mint();
+    const QDateTime start = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime end   = QDateTime(QDate(2025, 6, 1), QTime(10, 5, 0), Qt::UTC);
+    QVERIFY(manager.saveCheckpoint(DurationType::Activity, start, end, segId).ok());
+
+    manager.setForceDiscardRowDeleteFailure_dbg(true);
+
+    // Act
+    const SessionStoreResult result = manager.discardCheckpoint(segId);
+
+    // Assert: TransientError, but the intent is durably recorded and the
+    // (still unfinalized) row is untouched -- nothing was lost.
+    QCOMPARE(result.category, SessionStoreResult::TransientError);
+    QVERIFY(manager.ensureOpen_dbg());
+    QCOMPARE(countDiscardIntents(manager, segId), 1);
+    QCOMPARE(countDurationsForSegment(manager, segId), 1);
+    QSqlQuery checkFinalized(manager.rawDb_dbg());
+    checkFinalized.prepare("SELECT is_finalized FROM durations WHERE segment_id = :id");
+    checkFinalized.bindValue(":id", segId.toString());
+    QVERIFY(checkFinalized.exec());
+    QVERIFY(checkFinalized.next());
+    QCOMPARE(checkFinalized.value(0).toInt(), 0);
+
+    manager.setForceDiscardRowDeleteFailure_dbg(false);
+    manager.closeConnection_dbg();
+}
+
+void DatabaseTest::test_A4_discardCheckpoint_repeated_application_is_idempotent()
+{
+    // Arrange: discard once (row and tombstone both gone).
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    const SegmentId segId = SegmentId::mint();
+    const QDateTime start = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime end   = QDateTime(QDate(2025, 6, 1), QTime(10, 5, 0), Qt::UTC);
+    QVERIFY(manager.saveCheckpoint(DurationType::Activity, start, end, segId).ok());
+    QVERIFY(manager.discardCheckpoint(segId).ok());
+
+    // Act: discard the SAME segment id again -- nothing left to do.
+    const SessionStoreResult second = manager.discardCheckpoint(segId);
+
+    // Assert: still a clean success, no error, state unchanged.
+    QVERIFY(second.ok());
+    QVERIFY(manager.ensureOpen_dbg());
+    QCOMPARE(countDurationsForSegment(manager, segId), 0);
+    QCOMPARE(countDiscardIntents(manager, segId), 0);
+    manager.closeConnection_dbg();
+}
+
+void DatabaseTest::test_A4_discardCheckpoint_disabled_history_no_mutation()
+{
+    // Arrange: history storage disabled -- no DB file is even created.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 0));
+    SqliteSessionStore manager(settings);
+
+    // Act
+    const SessionStoreResult result = manager.discardCheckpoint(SegmentId::mint());
+
+    // Assert: a deliberate no-op, and no DB file was ever created.
+    QCOMPARE(result.category, SessionStoreResult::Disabled);
+    QVERIFY(!QFile::exists(db_path_));
+}
+
+/**
+ * The plan's required real-SQLite close-and-reopen proof: a discard intent
+ * that survived a row-delete failure (durable tombstone, row still present)
+ * must be honored by the NEXT startup recovery after a genuine close and
+ * reopen of the database file -- the row is deleted, never finalized/
+ * credited, and the tombstone is resolved.
+ */
+void DatabaseTest::test_A4_recovery_after_reopen_deletes_row_matching_durable_intent()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+
+    const SegmentId segId = SegmentId::mint();
+    const QDateTime start = QDateTime(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::UTC);
+    const QDateTime end   = QDateTime(QDate(2025, 6, 1), QTime(23, 55, 0), Qt::UTC);
+
+    {
+        // Session 1: a checkpoint exists, the engine deliberately rejects it
+        // (cross-midnight), but the physical row delete fails transiently --
+        // exactly the R05-001 trigger. The process then ends (closes) before
+        // a later retry can resolve it.
+        SqliteSessionStore seed(settings);
+        QCOMPARE(seed.checkSchemaOnStartup(), SchemaStatus::Created);
+        QVERIFY(seed.saveCheckpoint(DurationType::Activity, start, end, segId).ok());
+
+        seed.setForceDiscardRowDeleteFailure_dbg(true);
+        const SessionStoreResult discardResult = seed.discardCheckpoint(segId);
+        QCOMPARE(discardResult.category, SessionStoreResult::TransientError);
+
+        // Sanity: tombstone durable, row still present and unfinalized.
+        QVERIFY(seed.ensureOpen_dbg());
+        QCOMPARE(countDiscardIntents(seed, segId), 1);
+        QCOMPARE(countDurationsForSegment(seed, segId), 1);
+        seed.closeConnection_dbg();
+        // seed is destructed here -- a real close of the database file.
+    }
+
+    // Session 2: a fresh instance over the same file (a real reopen).
+    SqliteSessionStore manager(settings);
+    QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Ready);
+
+    const QDateTime now = QDateTime(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::UTC);
+    const StartupRecoveryResult res = manager.recoverStartupCheckpoints(now);
+
+    // Assert: recovery succeeded, the rejected row was neither finalized nor
+    // credited, and it no longer exists.
+    QVERIFY(res.ok);
+    QCOMPARE(res.finalized_count, 0);
+    QCOMPARE(res.recovered_seconds, qint64(0));
+    QVERIFY(!res.notify_user);
+    QVERIFY(manager.ensureOpen_dbg());
+    QCOMPARE(countDurationsForSegment(manager, segId), 0);
+    QCOMPARE(countDiscardIntents(manager, segId), 0);
+    manager.closeConnection_dbg();
+}
+
+/**
+ * A discard intent whose segment_id happens to name a FINALIZED row (a
+ * reused/corrupt identity, per the plan's explicit guard) must never delete
+ * real history -- only the tombstone itself may be resolved.
+ */
+void DatabaseTest::test_A4_recovery_never_deletes_finalized_row_matching_intent()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+    QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Created);
+
+    // Seed a FINALIZED row under a known segment id.
+    const SegmentId segId = SegmentId::mint();
+    const QDateTime start = QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::UTC);
+    const QDateTime end   = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    std::deque<TimeDuration> finalized;
+    finalized.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, start, end, segId));
+    QVERIFY(manager.updateDurationsById(finalized).ok());
+
+    // Manually plant a discard intent naming the SAME segment id, simulating
+    // a corrupt/reused identity (the only way this state can arise, since the
+    // production discardCheckpoint() path never targets a finalized row).
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery insertIntent(manager.rawDb_dbg());
+    insertIntent.prepare("INSERT INTO discard_intents (segment_id) VALUES (:id)");
+    insertIntent.bindValue(":id", segId.toString());
+    QVERIFY(insertIntent.exec());
+    manager.closeConnection_dbg();
+
+    // Act: recovery runs (no unfinalized rows exist at all).
+    const QDateTime now = QDateTime(QDate(2025, 6, 1), QTime(11, 0, 0), Qt::UTC);
+    const StartupRecoveryResult res = manager.recoverStartupCheckpoints(now);
+
+    // Assert: recovery succeeded, the finalized row survives untouched, and
+    // the tombstone was resolved (not left as permanently unresolvable work).
+    QVERIFY(res.ok);
+    QVERIFY(manager.ensureOpen_dbg());
+    QCOMPARE(countDurationsForSegment(manager, segId), 1);
+    QSqlQuery checkFinalized(manager.rawDb_dbg());
+    checkFinalized.prepare("SELECT is_finalized FROM durations WHERE segment_id = :id");
+    checkFinalized.bindValue(":id", segId.toString());
+    QVERIFY(checkFinalized.exec());
+    QVERIFY(checkFinalized.next());
+    QCOMPARE(checkFinalized.value(0).toInt(), 1);
+    QCOMPARE(countDiscardIntents(manager, segId), 0);
+    manager.closeConnection_dbg();
+}

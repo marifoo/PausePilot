@@ -1254,3 +1254,65 @@ void IntegrationTest::test_A3_exit_anyway_leaves_checkpoint_untouched_for_recove
     QCOMPARE(loaded[0].segment_id.toString(), checkpointSegmentId.toString());
     QCOMPARE(loaded[0].duration, static_cast<qint64>(20000));
 }
+
+// A4 (R05-001): end-to-end proof that a checkpoint-discard failure is
+// durable across a real close/reopen -- the rejected segment can never be
+// resurrected as credited history, even though the in-process discard call
+// itself never succeeded before the process ended (Exit Anyway).
+void IntegrationTest::test_A4_watchdog_discard_failure_survives_reopen_never_credited()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    SegmentId rejectedSegmentId;
+
+    {
+        // Session 1: Start Activity before midnight and durably checkpoint
+        // it, then the machine "sleeps" past midnight. Shutdown finds the
+        // live segment crossed midnight and deliberately rejects it, but the
+        // store's row-delete step fails -- simulating a transient failure
+        // right at the discard call. Exit Anyway: one drain attempt, no
+        // further retry, process terminates.
+        Settings settings(settingsPath);
+        SqliteSessionStore db(settings);
+        TimeTracker tracker(settings, db);
+        const QDateTime preMidnight(QDate::currentDate(), QTime(23, 50, 0), Qt::LocalTime);
+        FakeClock clock(preMidnight);
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+        tracker.useTimerViaButton(Button::Start);
+        clock.advance(60000);
+        tracker.saveCheckpoint_locked_dbg(clock.now());
+        rejectedSegmentId = tracker.sessionState_dbg().segment_id;
+        QVERIFY(!rejectedSegmentId.isEmpty());
+
+        clock.setNow(QDateTime(preMidnight.date().addDays(1), QTime(0, 5, 0), Qt::LocalTime));
+        db.setForceDiscardRowDeleteFailure_dbg(true);
+
+        ShutdownCoordinator coordinator(tracker, db);
+        const DrainResult result = coordinator.run(ShutdownMode::DrainEvents);
+
+        QVERIFY(!result.clean());
+        QVERIFY(tracker.hasPendingDiscards_dbg());
+        // tracker/db destruct here with the row-delete still failing -- the
+        // destructor's own last-resort drain re-attempts and also fails
+        // (shutdown_called_ is already true from run(), so no
+        // orchestration-bug assert fires). The rejected segment is genuinely
+        // NOT deleted yet in-process -- only its tombstone is durable.
+    }
+
+    // Session 2: real reopen. Startup recovery must delete the rejected row
+    // -- never finalize/credit it -- and resolve the tombstone.
+    Settings settings(settingsPath);
+    SqliteSessionStore db2(settings);
+    TimeTracker reopened(settings, db2);
+    reopened.initializeFromStore();
+
+    QCOMPARE(reopened.getStartupRecoveredSeconds(), static_cast<qint64>(0));
+    QVERIFY(!reopened.shouldShowStartupRecoveryNotification());
+
+    SqliteSessionStore db3(settings);
+    auto loaded = db3.loadDurations();
+    QVERIFY(loaded.empty());
+}

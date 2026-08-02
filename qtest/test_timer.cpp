@@ -3676,3 +3676,197 @@ void TimerTest::test_A3_destructor_is_noop_after_successful_drain()
     // segment (no additional commitSession call beyond the explicit drain).
     QCOMPARE(fakeDb.callLog.count("commitSession"), commitsAfterDrain);
 }
+
+// ============================================================================
+// A4 (R05-001): durable checkpoint-discard intent.
+// ============================================================================
+
+void TimerTest::test_A4_discard_transient_failure_retains_intent_and_blocks_clean_mark()
+{
+    // Arrange: an Activity session that crosses midnight.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(preMidnight);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+    const SegmentId segId = tracker.sessionState_dbg().segment_id;
+
+    // The store's discard call keeps failing transiently.
+    fakeDb.discardCheckpointResult = SessionStoreResult::transient("injected discard failure");
+    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime));
+
+    // Act: the watchdog discards the ongoing (cross-midnight) segment.
+    QVERIFY(tracker.discardCrossMidnightOngoingAndStop_dbg(clock.now()));
+
+    // Assert: the intent is retained by its stable segment id, and clean
+    // marking is forbidden while it is unresolved.
+    QVERIFY(tracker.isStopped());
+    QVERIFY(tracker.hasPendingDiscards_dbg());
+    const auto pendingIds = tracker.pendingDiscardIds_dbg();
+    QVERIFY(std::find(pendingIds.begin(), pendingIds.end(), segId) != pendingIds.end());
+    QVERIFY(!tracker.canMarkCleanShutdown());
+
+    // Cleanup so destruction does not find an unresolved intent.
+    fakeDb.discardCheckpointResult = SessionStoreResult::success();
+    QVERIFY(tracker.drainForShutdown().clean());
+}
+
+void TimerTest::test_A4_discard_fatal_failure_retains_intent_and_blocks_clean_mark()
+{
+    // Arrange: same setup, but the store fails Fatal instead of Transient.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(preMidnight);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+
+    fakeDb.discardCheckpointResult = SessionStoreResult::fatal("injected fatal discard failure");
+    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime));
+
+    // Act
+    QVERIFY(tracker.discardCrossMidnightOngoingAndStop_dbg(clock.now()));
+
+    // Assert: retained exactly like Transient (C4 owns latching a fatal
+    // tracker-unavailable state; A4 only guarantees retention here).
+    QVERIFY(tracker.hasPendingDiscards_dbg());
+    QVERIFY(!tracker.canMarkCleanShutdown());
+
+    // Cleanup.
+    fakeDb.discardCheckpointResult = SessionStoreResult::success();
+    QVERIFY(tracker.drainForShutdown().clean());
+}
+
+void TimerTest::test_A4_discard_disabled_resolves_intent_without_mutating_checkpoints()
+{
+    // Arrange: a failed discard leaves an intent pending and a checkpoint
+    // record still present in the fake.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(preMidnight);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    tracker.triggerCheckpoint_dbg();
+    const size_t checkpointsBefore = fakeDb.savedCheckpoints.size();
+    QVERIFY(checkpointsBefore > 0);
+
+    fakeDb.discardCheckpointResult = SessionStoreResult::transient("injected discard failure");
+    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime));
+    QVERIFY(tracker.discardCrossMidnightOngoingAndStop_dbg(clock.now()));
+    QVERIFY(tracker.hasPendingDiscards_dbg());
+
+    // Act: history storage becomes (contractually) disabled -- a deliberate
+    // no-op success, not a real deletion.
+    fakeDb.discardCheckpointResult = SessionStoreResult::disabled();
+    QVERIFY(tracker.drainForShutdown().clean());
+
+    // Assert: the intent resolved (Disabled is a contractual no-op success)
+    // without creating unresolvable work, but the fake's checkpoint records
+    // were NOT mutated -- Disabled must never mutate state.
+    QVERIFY(!tracker.hasPendingDiscards_dbg());
+    QCOMPARE(fakeDb.savedCheckpoints.size(), checkpointsBefore);
+}
+
+void TimerTest::test_A4_start_retries_pending_discard_without_blocking_start()
+{
+    // Arrange: a failed discard leaves an intent pending while stopped.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(preMidnight);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+
+    fakeDb.discardCheckpointResult = SessionStoreResult::transient("injected discard failure");
+    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime));
+    QVERIFY(tracker.discardCrossMidnightOngoingAndStop_dbg(clock.now()));
+    QVERIFY(tracker.hasPendingDiscards_dbg());
+
+    // Act: the store recovers, then the user presses Start.
+    fakeDb.discardCheckpointResult = SessionStoreResult::success();
+    tracker.useTimerViaButton(Button::Start);
+
+    // Assert: Start was NOT blocked by the unresolved discard intent, and
+    // the retry performed at Start resolved it.
+    QVERIFY(tracker.isActive());
+    QVERIFY(!tracker.hasPendingDiscards_dbg());
+}
+
+void TimerTest::test_A4_drain_retries_pending_discard_then_succeeds()
+{
+    // Arrange: a failed discard leaves an intent pending while stopped.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(preMidnight);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+
+    fakeDb.discardCheckpointResult = SessionStoreResult::transient("injected discard failure");
+    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime));
+    QVERIFY(tracker.discardCrossMidnightOngoingAndStop_dbg(clock.now()));
+    QVERIFY(!tracker.drainForShutdown().clean());
+
+    // Act: the store recovers; drainForShutdown() retries without a Start.
+    fakeDb.discardCheckpointResult = SessionStoreResult::success();
+    const DrainResult result = tracker.drainForShutdown();
+
+    // Assert
+    QVERIFY(result.clean());
+    QVERIFY(!tracker.hasPendingDiscards_dbg());
+    QVERIFY(tracker.canMarkCleanShutdown());
+}
+
+void TimerTest::test_A4_drain_incomplete_while_discard_unresolved()
+{
+    // Arrange: a failed discard leaves an intent pending while stopped.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(preMidnight);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+
+    fakeDb.discardCheckpointResult = SessionStoreResult::transient("injected discard failure");
+    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime));
+    QVERIFY(tracker.discardCrossMidnightOngoingAndStop_dbg(clock.now()));
+
+    // Act: the store keeps failing.
+    const DrainResult result = tracker.drainForShutdown();
+
+    // Assert: no clean-marker eligibility, intent still retained.
+    QVERIFY(!result.clean());
+    QVERIFY(tracker.hasPendingDiscards_dbg());
+    QVERIFY(!tracker.canMarkCleanShutdown());
+
+    // Cleanup so destruction does not find an unresolved intent.
+    fakeDb.discardCheckpointResult = SessionStoreResult::success();
+    QVERIFY(tracker.drainForShutdown().clean());
+}
