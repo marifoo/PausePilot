@@ -22,6 +22,7 @@
 #include "lockstatewatcher.h"
 #include "logger.h"
 #include "types.h"
+#include "startuprecovery.h"
 
 #ifdef Q_OS_LINUX
 // Unix signal handling - safe pattern using socketpair
@@ -146,7 +147,12 @@ int main(int argc, char *argv[])
 	}
 
 	// Schema is Ready or Created — safe to recover from the store.
-	time_tracker.initializeFromStore();
+	// runStartupRecovery() completes (or the user Quits) before the main
+	// window is created below, so no tracking is possible before recovery
+	// succeeds (B2, section 2 "Resolved product and domain policies").
+	if (!runStartupRecovery(time_tracker)) {
+		return 1;
+	}
 
 	ShutdownCoordinator shutdown_coordinator(time_tracker, session_store);
 	MainWin main_win(settings, time_tracker, session_store, shutdown_coordinator);

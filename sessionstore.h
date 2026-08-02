@@ -135,26 +135,64 @@ struct LoadResult {
 };
 
 /**
- * Result returned by recoverStartupCheckpoints().
+ * Result returned by recoverStartupCheckpoints() (B2/R08-001..003,005,
+ * R05-004).
  *
- * The store loads unfinalized checkpoint rows, applies the too-short (<1 s) /
- * stale (>24 h) and overlap policies, finalizes qualifying rows, and decides
- * whether the user needs to be notified of unclean recovery.
+ * The store loads and classifies every unfinalized checkpoint row, then --
+ * within one atomic disposition -- deletes malformed rows, applies the
+ * too-short (<1 s) / stale (>24 h) / future-dated and overlap policies,
+ * finalizes qualifying rows, resolves durable discard intents (A4), and
+ * consumes the clean-shutdown marker.  A failure at any stage rolls back the
+ * ENTIRE disposition: no row is mutated and the marker (if any) is preserved.
  *
- *   ok == true  — recovery ran to completion (even if zero rows were finalized).
- *   ok == false — a critical store failure (e.g. marker read error) prevented
- *                 reconciliation; no rows were mutated.  TimeTracker must treat
- *                 recovered_seconds as 0 and must NOT show a notification.
+ *   status == Success        — recovery committed (even if zero rows were
+ *                               finalized/dropped).  finalized_count,
+ *                               policy_dropped_count, and recovered_msec
+ *                               describe exactly the rows physically mutated
+ *                               by this call.
+ *   status == Disabled       — history storage is off; a deliberate no-op.
+ *                               All counts are zero and notify_user is false.
+ *   status == TransientError
+ *   status == FatalError     — a critical store failure (marker read, orphan
+ *                               load, or the recovery transaction itself)
+ *                               prevented reconciliation.  NO row was
+ *                               mutated and the marker (if any) was
+ *                               preserved.  message describes the failure.
+ *                               Caller must treat all counts as 0 and must
+ *                               NOT show a recovery notification.
  *
- * When history storage is disabled (history_days_to_keep_ == 0) the store
- * returns ok=true with all counts zero and notify_user false.
+ * CallerBug is not applicable.
+ *
+ * policy_dropped_count counts rows deleted for a recovery POLICY reason
+ * (too-short, stale, future-dated, overlap-rejected, or a durable A4 discard
+ * intent) -- never a repaired-row count. Malformed rows (invalid timestamp/
+ * type, empty id, non-positive interval) are also deleted as part of the
+ * same atomic disposition, but are store-internal cleanup rather than a
+ * policy decision: their count is logged only and is not part of this
+ * struct.
  */
 struct StartupRecoveryResult {
-    qint64 recovered_seconds = 0;
+    SessionStoreResult::Category status = SessionStoreResult::Success;
+    QString message;
+    qint64 recovered_msec = 0;
     int finalized_count = 0;
-    int dropped_count = 0;
+    int policy_dropped_count = 0;
     bool notify_user = false;
-    bool ok = true;
+
+    bool ok() const { return status == SessionStoreResult::Success; }
+    bool okOrDisabled() const { return status == SessionStoreResult::Success || status == SessionStoreResult::Disabled; }
+
+    static StartupRecoveryResult disabled() {
+        StartupRecoveryResult r;
+        r.status = SessionStoreResult::Disabled;
+        return r;
+    }
+    static StartupRecoveryResult failure(SessionStoreResult::Category cat, QString msg) {
+        StartupRecoveryResult r;
+        r.status = cat;
+        r.message = std::move(msg);
+        return r;
+    }
 };
 
 /**

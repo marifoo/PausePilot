@@ -30,6 +30,18 @@ private slots:
     void test_exit_anyway_is_not_asked_again_on_aboutToQuit();
     // OS-forced (Direct) shutdown failure must show no modal at all.
     void test_forced_os_shutdown_failure_shows_no_modal();
+
+    // B2 (R08-001..003,005, R05-004): runStartupRecovery()'s Retry/Quit loop,
+    // exercised before any MainWin/ContentWidget exists -- proving no
+    // tracking is structurally possible before recovery succeeds.
+    //
+    // Recovery fails once; Retry repeats the whole atomic recovery and
+    // succeeds: exactly two recoverStartupCheckpoints() calls.
+    void test_startup_recovery_retry_repeats_recovery_until_success();
+    // Recovery fails; Quit declines without a second attempt.
+    void test_startup_recovery_quit_declines_without_retry();
+    // Recovery succeeds immediately: no modal at all.
+    void test_startup_recovery_success_shows_no_modal();
 };
 
 #endif // TEST_APPSHELL_H

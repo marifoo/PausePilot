@@ -1064,7 +1064,7 @@ void TimerTest::test_D_timetracker_public_surface_regression()
     bool crossMidnight = tracker.isOngoingSegmentCrossMidnight();
     QVERIFY(!crossMidnight); // started now, so not cross-midnight
 
-    qint64 recovered = tracker.getStartupRecoveredSeconds();
+    qint64 recovered = tracker.getStartupRecoveredMsec();
     QCOMPARE(recovered, static_cast<qint64>(0)); // fresh db, nothing to recover
 
     bool showNotification = tracker.shouldShowStartupRecoveryNotification();
@@ -1999,10 +1999,11 @@ void TimerTest::test_C6_replaceCurrentDurations_writes_checkpoint_after_endExclu
 
 void TimerTest::test_S12_marker_error_skips_reconciliation()
 {
-    // When recoverStartupCheckpoints() returns ok=false (e.g. marker read error),
-    // TimeTracker must treat recovered seconds as 0 and must NOT show a notification.
-    // The store is responsible for skipping reconciliation on error; TimeTracker only
-    // acts on the domain facts returned.
+    // When recoverStartupCheckpoints() returns a TransientError/FatalError
+    // status (e.g. marker read error), TimeTracker must treat recovered_msec
+    // as 0 and must NOT show a notification. The store is responsible for
+    // skipping reconciliation on error; TimeTracker only acts on the domain
+    // facts returned when the status is Success/Disabled (okOrDisabled()).
 
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -2010,15 +2011,13 @@ void TimerTest::test_S12_marker_error_skips_reconciliation()
     FakeSessionStore fakeDb;
 
     // Simulate store-level failure (marker error or other critical failure).
-    fakeDb.startupRecoveryResult.ok = false;
-    fakeDb.startupRecoveryResult.recovered_seconds = 0;
-    fakeDb.startupRecoveryResult.notify_user = false;
+    fakeDb.startupRecoveryResult = StartupRecoveryResult::failure(SessionStoreResult::TransientError, "marker read failed");
 
     TimeTracker tracker(settings, fakeDb);
     tracker.initializeFromStore();
 
-    // No seconds recovered; notification suppressed.
-    QCOMPARE(tracker.getStartupRecoveredSeconds(), (qint64)0);
+    // No milliseconds recovered; notification suppressed.
+    QCOMPARE(tracker.getStartupRecoveredMsec(), (qint64)0);
     QVERIFY(!tracker.shouldShowStartupRecoveryNotification());
     QVERIFY(fakeDb.callLog.contains("recoverStartupCheckpoints"));
 }

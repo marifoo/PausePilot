@@ -52,7 +52,7 @@ private slots:
     // recoverStartupCheckpoints: overlap rejection and count reporting
     void test_recoverStartupCheckpoints_overlap_rejected_not_counted();
     void test_recoverStartupCheckpoints_reports_finalized_and_dropped_counts();
-    void test_timer_startup_recovery_uses_store_recovered_seconds();
+    void test_timer_startup_recovery_uses_store_recovered_msec();
 
     // Step 19 (C9 timezone): parameterized timezone tests for hasEntriesForDate.
     void test_hasEntriesForDate_timezone_data();

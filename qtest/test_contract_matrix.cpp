@@ -356,22 +356,21 @@ void ContractMatrixTest::test_setLastCleanShutdownMarker_disabled_returns_Disabl
 
 // ── recoverStartupCheckpoints ────────────────────────────────────────────────
 
-// Disabled: returns ok=true with zero counts and no notification.
-// Note: recoverStartupCheckpoints uses ok=true/false rather than SessionStoreResult::Category
-// because it carries domain data (counts, notify_user).  The disabled convention is
-// ok=true + all-zero counts rather than a Disabled category, matching StartupRecoveryResult design.
-void ContractMatrixTest::test_recoverStartupCheckpoints_disabled_returns_ok_zero_counts()
+// Disabled: returns status == Disabled with zero counts and no notification
+// (B2: recoverStartupCheckpoints now uses the same SessionStoreResult::Category
+// vocabulary as every other method, in the same struct as its domain data).
+void ContractMatrixTest::test_recoverStartupCheckpoints_disabled_returns_Disabled()
 {
     resetDatabaseFile();
     QTemporaryDir dir; QVERIFY(dir.isValid());
     SqliteSessionStore db(Settings(disabledSettings(dir)));
 
     const StartupRecoveryResult r = db.recoverStartupCheckpoints(QDateTime::currentDateTime());
-    QVERIFY(r.ok);
-    QCOMPARE(r.recovered_seconds, static_cast<qint64>(0));
+    QCOMPARE(r.status, SessionStoreResult::Disabled);
+    QCOMPARE(r.recovered_msec, static_cast<qint64>(0));
     QCOMPARE(r.finalized_count, 0);
-    QCOMPARE(r.dropped_count, 0);
+    QCOMPARE(r.policy_dropped_count, 0);
     QVERIFY(!r.notify_user);
-    // transient/fatal: marker read failure sets ok=false (tested in DatabaseTest)
+    // transient/fatal: marker read failure sets status to TransientError (tested in DatabaseTest)
     // CallerBug: N/A — recoverStartupCheckpoints takes only a timestamp (cannot be wrong)
 }

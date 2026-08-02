@@ -2060,6 +2060,16 @@ void DatabaseTest::test_finalizeIfNoOverlap_returns_error_on_commit_failure()
  * A second, genuinely overlapping orphan in the same batch still lands in
  * `dropped`, proving Error and OverlapRejected remain distinguishable.
  */
+/**
+ * B2: reconcileUnfinalizedCheckpoints() now assumes an already-open outer
+ * transaction and stops immediately (ok=false) on the FIRST failure, instead
+ * of continuing to mutate later rows -- a real SQL failure on one orphan must
+ * roll back the ENTIRE disposition, so a later orphan in the same batch (B,
+ * which would otherwise be a clean OverlapRejected deletion) must NOT be
+ * touched either. The reconcileUnfinalizedCheckpoints_dbg() wrapper mirrors
+ * production by wrapping this call in its own transaction and rolling back
+ * on ok=false, so both rows survive completely untouched.
+ */
 void DatabaseTest::test_reconcileUnfinalizedCheckpoints_sql_error_is_not_reported_as_dropped()
 {
     resetDatabaseFile();
@@ -2077,7 +2087,8 @@ void DatabaseTest::test_reconcileUnfinalizedCheckpoints_sql_error_is_not_reporte
 
     QVERIFY(manager.ensureOpen_dbg());
     // Orphan A: 12:00 - 12:30, no overlap -- would finalize, but UPDATE is blocked.
-    // Orphan B: 10:30 - 11:30, overlaps existing -- OverlapRejected as before.
+    // Orphan B: 10:30 - 11:30, overlaps existing -- would be OverlapRejected,
+    // but A's failure must stop reconciliation before B is even reached.
     const QDateTime aStartUtc = QDateTime(QDate(2025, 1, 1), QTime(12, 0, 0), Qt::UTC);
     const QDateTime aEndUtc   = QDateTime(QDate(2025, 1, 1), QTime(12, 30, 0), Qt::UTC);
     const QDateTime bStartUtc = QDateTime(QDate(2025, 1, 1), QTime(10, 30, 0), Qt::UTC);
@@ -2102,15 +2113,14 @@ void DatabaseTest::test_reconcileUnfinalizedCheckpoints_sql_error_is_not_reporte
 
     QVERIFY(!result.ok);
     QVERIFY(result.finalized.empty());
-    // A's UPDATE error must not be misreported as a dropped/policy row.
-    QCOMPARE(result.dropped.size(), (size_t)1);
-    QCOMPARE(result.dropped[0], bId);
+    // A's UPDATE error must not be misreported as a dropped/policy row, and
+    // the whole disposition rolled back before B's overlap deletion applied.
+    QVERIFY(result.policy_dropped.empty());
 
     QVERIFY(trig.exec("DROP TRIGGER block_reconcile_update_b1_test"));
 
-    // Raw state: A untouched (rolled back), B still is_finalized = 0 (a
-    // dropped orphan is left in place by reconcile itself, only outright
-    // drops delete rows).
+    // Raw state: both A and B untouched -- the outer transaction rolled back
+    // in full, so B was never even reached, let alone deleted.
     QSqlQuery verify(manager.rawDb_dbg());
     verify.prepare("SELECT id, is_finalized FROM durations WHERE id IN (:a, :b) ORDER BY id");
     verify.bindValue(":a", aId);
@@ -2165,7 +2175,8 @@ void DatabaseTest::test_recoverStartupCheckpoints_marker_intact_on_finalize_sql_
     StartupRecoveryResult res = manager.recoverStartupCheckpoints(now);
 
     // Assert: recovery reports failure, not a false success with a bogus drop.
-    QVERIFY(!res.ok);
+    QVERIFY(!res.ok());
+    QCOMPARE(res.status, SessionStoreResult::TransientError);
 
     QVERIFY(q.exec("DROP TRIGGER block_recovery_update_b1_test"));
 
@@ -2225,25 +2236,26 @@ void DatabaseTest::test_reconcileUnfinalizedCheckpoints_reports_finalized_and_dr
     QVERIFY(result.ok);
     QCOMPARE(result.finalized.size(), (size_t)1);
     QCOMPARE(result.finalized[0], aId);
-    QCOMPARE(result.dropped.size(), (size_t)1);
-    QCOMPARE(result.dropped[0], bId);
+    // B2 (R08-002): an overlap-rejected orphan is now physically deleted
+    // (not left is_finalized=0 to recur every launch), and its deletion IS a
+    // policy-drop count, unlike before.
+    QCOMPARE(result.policy_dropped.size(), (size_t)1);
+    QCOMPARE(result.policy_dropped[0], bId);
 
-    // Verify DB state: A is finalised, B remains unfinalised.
+    // Verify DB state: A is finalised, B is gone entirely.
     QVERIFY(manager.ensureOpen_dbg());
-    QSqlQuery verify(manager.rawDb_dbg());
-    verify.prepare("SELECT id, is_finalized FROM durations WHERE id IN (:a, :b) ORDER BY id");
-    verify.bindValue(":a", aId);
-    verify.bindValue(":b", bId);
-    QVERIFY(verify.exec());
-    int seen = 0;
-    while (verify.next()) {
-        const qint64 id = verify.value(0).toLongLong();
-        const int fin = verify.value(1).toInt();
-        if (id == aId)      QCOMPARE(fin, 1);
-        else if (id == bId) QCOMPARE(fin, 0);
-        seen++;
-    }
-    QCOMPARE(seen, 2);
+    QSqlQuery verifyA(manager.rawDb_dbg());
+    verifyA.prepare("SELECT is_finalized FROM durations WHERE id = :a");
+    verifyA.bindValue(":a", aId);
+    QVERIFY(verifyA.exec());
+    QVERIFY(verifyA.next());
+    QCOMPARE(verifyA.value(0).toInt(), 1);
+
+    QSqlQuery verifyB(manager.rawDb_dbg());
+    verifyB.prepare("SELECT id FROM durations WHERE id = :b");
+    verifyB.bindValue(":b", bId);
+    QVERIFY(verifyB.exec());
+    QVERIFY(!verifyB.next());
     manager.closeConnection_dbg();
 }
 
@@ -2275,7 +2287,10 @@ void DatabaseTest::test_reconcileUnfinalizedCheckpoints_outright_drops_are_delet
     QVERIFY(result.ok);
     QCOMPARE(result.finalized.size(), (size_t)1);
     QCOMPARE(result.finalized[0], aId);
-    QCOMPARE(result.dropped.size(), (size_t)0); // outright drops are not reported in `dropped`
+    // B2: policy_dropped now reports every row deleted for a policy reason,
+    // including outright (caller-supplied) drops like B here.
+    QCOMPARE(result.policy_dropped.size(), (size_t)1);
+    QCOMPARE(result.policy_dropped[0], bId);
 
     // Verify DB state: A finalised, B deleted entirely.
     QVERIFY(manager.ensureOpen_dbg());
@@ -2792,7 +2807,7 @@ void DatabaseTest::test_recoverStartupCheckpoints_marker_intact_on_reconcile_fai
     StartupRecoveryResult res = manager.recoverStartupCheckpoints(now);
 
     // Assert: recovery reports failure.
-    QVERIFY(!res.ok);
+    QVERIFY(!res.ok());
 
     // Assert: marker is still present (no rows were mutated).
     QVERIFY(manager.ensureOpen_dbg());
@@ -2848,7 +2863,7 @@ void DatabaseTest::test_recoverStartupCheckpoints_marker_intact_on_load_failure(
     StartupRecoveryResult res = manager.recoverStartupCheckpoints(now);
 
     // Assert: recovery reports failure.
-    QVERIFY(!res.ok);
+    QVERIFY(!res.ok());
 
     // Assert: marker is still present (not consumed).
     QVERIFY(manager.ensureOpen_dbg());
@@ -2903,7 +2918,7 @@ void DatabaseTest::test_recoverStartupCheckpoints_notifies_when_marker_covers_on
 
     // Assert: recovery succeeded, both orphans finalized, and the user is notified
     // because the newest finalized orphan ends after the marker.
-    QVERIFY(res.ok);
+    QVERIFY(res.ok());
     QCOMPARE(res.finalized_count, 2);
     QVERIFY2(res.notify_user,
              "must notify: newest finalized orphan ends after the clean-shutdown marker");
@@ -2941,9 +2956,9 @@ void DatabaseTest::test_recoverStartupCheckpoints_drops_future_dated_orphan()
     // Assert: recovery succeeded, but the future-dated orphan was dropped, not finalized.
     // Outright drops are deleted from the table entirely (see
     // reconcileUnfinalizedCheckpoints), so no row survives with is_finalized == 0.
-    QVERIFY(res.ok);
+    QVERIFY(res.ok());
     QCOMPARE(res.finalized_count, 0);
-    QCOMPARE(res.dropped_count, 1);
+    QCOMPARE(res.policy_dropped_count, 1);
 
     QVERIFY(manager.ensureOpen_dbg());
     QSqlQuery checkOrphan(manager.rawDb_dbg());
@@ -2953,6 +2968,313 @@ void DatabaseTest::test_recoverStartupCheckpoints_drops_future_dated_orphan()
     QVERIFY(checkOrphan.next());
     QCOMPARE(checkOrphan.value(0).toInt(), 0);
     manager.closeConnection_dbg();
+}
+
+// ============================================================================
+// B2 (R08-001..003,005, R05-004): atomic recovery disposition, exact
+// millisecond aggregation, malformed-row cleanup, and idempotency.
+// ============================================================================
+
+/**
+ * B2 (R08-003): malformed unfinalized rows (invalid timestamp, invalid type,
+ * empty id, non-positive interval) are explicit delete work, not a silent
+ * omission -- they are deleted transactionally as part of the SAME recovery
+ * disposition as a genuine valid orphan, but their count is logged only and
+ * never appears in the public finalized/policy_dropped counts (only a real
+ * recovery POLICY decision does).
+ */
+void DatabaseTest::test_recoverStartupCheckpoints_deletes_malformed_rows_without_public_count()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QVERIFY(manager.ensureOpen_dbg());
+
+    // A genuinely valid orphan that should finalize normally.
+    const QDateTime validStart = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime validEnd   = QDateTime(QDate(2025, 6, 1), QTime(10, 5, 0), Qt::UTC);
+    const qint64 validId = seedOrphanRow(manager, validStart, validEnd);
+    QVERIFY(validId > 0);
+
+    QSqlQuery pragmaOn(manager.rawDb_dbg());
+    QVERIFY(pragmaOn.exec("PRAGMA ignore_check_constraints = ON"));
+
+    // Malformed: empty segment_id.
+    QSqlQuery emptyId(manager.rawDb_dbg());
+    emptyId.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                     "VALUES ('', 0, :s, :e, 0)");
+    emptyId.bindValue(":s", QDateTime(QDate(2025, 6, 1), QTime(11, 0, 0), Qt::UTC).toString(Qt::ISODateWithMs));
+    emptyId.bindValue(":e", QDateTime(QDate(2025, 6, 1), QTime(11, 5, 0), Qt::UTC).toString(Qt::ISODateWithMs));
+    QVERIFY(emptyId.exec());
+    const qint64 emptyIdRow = emptyId.lastInsertId().toLongLong();
+
+    // Malformed: invalid type value.
+    QSqlQuery badType(manager.rawDb_dbg());
+    badType.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                     "VALUES (:seg, 99, :s, :e, 0)");
+    badType.bindValue(":seg", SegmentId::mint().toString());
+    badType.bindValue(":s", QDateTime(QDate(2025, 6, 1), QTime(12, 0, 0), Qt::UTC).toString(Qt::ISODateWithMs));
+    badType.bindValue(":e", QDateTime(QDate(2025, 6, 1), QTime(12, 5, 0), Qt::UTC).toString(Qt::ISODateWithMs));
+    QVERIFY(badType.exec());
+    const qint64 badTypeRow = badType.lastInsertId().toLongLong();
+
+    // Malformed: invalid (unparseable) timestamp.
+    QSqlQuery badTs(manager.rawDb_dbg());
+    badTs.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                  "VALUES (:seg, 0, 'not-a-date', 'also-not-a-date', 0)");
+    badTs.bindValue(":seg", SegmentId::mint().toString());
+    QVERIFY(badTs.exec());
+    const qint64 badTsRow = badTs.lastInsertId().toLongLong();
+
+    // Malformed: non-positive interval (start >= end).
+    QSqlQuery badInterval(manager.rawDb_dbg());
+    badInterval.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                         "VALUES (:seg, 0, :s, :e, 0)");
+    badInterval.bindValue(":seg", SegmentId::mint().toString());
+    const QString sameTs = QDateTime(QDate(2025, 6, 1), QTime(13, 0, 0), Qt::UTC).toString(Qt::ISODateWithMs);
+    badInterval.bindValue(":s", sameTs);
+    badInterval.bindValue(":e", sameTs);
+    QVERIFY(badInterval.exec());
+    const qint64 badIntervalRow = badInterval.lastInsertId().toLongLong();
+
+    manager.closeConnection_dbg();
+
+    const QDateTime now = QDateTime(QDate(2025, 6, 1), QTime(14, 0, 0), Qt::UTC);
+    const StartupRecoveryResult res = manager.recoverStartupCheckpoints(now);
+
+    // Assert: recovery committed; the valid orphan finalized normally, and
+    // NONE of the four malformed rows appear in either public count -- they
+    // are store-internal cleanup, not a recovery policy decision.
+    QVERIFY(res.ok());
+    QCOMPARE(res.finalized_count, 1);
+    QCOMPARE(res.policy_dropped_count, 0);
+    QCOMPARE(res.recovered_msec, validStart.msecsTo(validEnd));
+
+    // Assert: all four malformed rows are physically gone (deleted
+    // transactionally, logged only -- no UI notification is possible since
+    // no public field even carries this count).
+    QVERIFY(manager.ensureOpen_dbg());
+    for (qint64 id : {emptyIdRow, badTypeRow, badTsRow, badIntervalRow}) {
+        QSqlQuery check(manager.rawDb_dbg());
+        check.prepare("SELECT COUNT(*) FROM durations WHERE id = :id");
+        check.bindValue(":id", id);
+        QVERIFY(check.exec());
+        QVERIFY(check.next());
+        QCOMPARE(check.value(0).toInt(), 0);
+    }
+    // The valid orphan is finalized, not deleted.
+    QSqlQuery checkValid(manager.rawDb_dbg());
+    checkValid.prepare("SELECT is_finalized FROM durations WHERE id = :id");
+    checkValid.bindValue(":id", validId);
+    QVERIFY(checkValid.exec());
+    QVERIFY(checkValid.next());
+    QCOMPARE(checkValid.value(0).toInt(), 1);
+    manager.closeConnection_dbg();
+}
+
+/**
+ * B2: several sub-second/fractional-second orphans prove recovered_msec is
+ * accumulated EXACTLY from the underlying millisecond endpoints, with no
+ * per-row truncation or final rounding anywhere in the path (R08-005). Naive
+ * per-row integer-second truncation would report 1+1+2 = 4000 ms here;
+ * the true sum is 1400+1700+2900 = 6000 ms.
+ */
+void DatabaseTest::test_recoverStartupCheckpoints_aggregates_exact_milliseconds_no_truncation()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QVERIFY(manager.ensureOpen_dbg());
+
+    const QDateTime base = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const qint64 aId = seedOrphanRow(manager, base, base.addMSecs(1400));
+    const qint64 bId = seedOrphanRow(manager, base.addSecs(10), base.addSecs(10).addMSecs(1700));
+    const qint64 cId = seedOrphanRow(manager, base.addSecs(20), base.addSecs(20).addMSecs(2900));
+    QVERIFY(aId > 0 && bId > 0 && cId > 0);
+    manager.closeConnection_dbg();
+
+    const QDateTime now = base.addSecs(60);
+    const StartupRecoveryResult res = manager.recoverStartupCheckpoints(now);
+
+    QVERIFY(res.ok());
+    QCOMPARE(res.finalized_count, 3);
+    QCOMPARE(res.recovered_msec, static_cast<qint64>(1400 + 1700 + 2900));
+}
+
+/**
+ * B2 (B1 follow-up): the Missing outcome (a row that vanished between load
+ * and finalize) is impossible in the single-process recoverStartupCheckpoints
+ * flow -- db_mutex_ has been held continuously since the load -- so it is
+ * escalated to an internal error rather than a silent policy no-op, and (per
+ * B2's single-transaction invariant) the whole batch is rolled back rather
+ * than proceeding to the next candidate.
+ */
+void DatabaseTest::test_reconcileUnfinalizedCheckpoints_missing_row_is_internal_error()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QVERIFY(manager.ensureOpen_dbg());
+    const QDateTime aStartUtc = QDateTime(QDate(2025, 1, 1), QTime(12, 0, 0), Qt::UTC);
+    const QDateTime aEndUtc   = QDateTime(QDate(2025, 1, 1), QTime(12, 30, 0), Qt::UTC);
+    const qint64 aId = seedOrphanRow(manager, aStartUtc, aEndUtc);
+    QVERIFY(aId > 0);
+
+    // The row vanishes before reconcile runs (e.g. deleted by something else
+    // in-process between load and reconcile -- cannot legitimately happen via
+    // the real recoverStartupCheckpoints() call path, but is directly
+    // reachable here as a white-box regression for the escalation itself).
+    QSqlQuery del(manager.rawDb_dbg());
+    del.prepare("DELETE FROM durations WHERE id = :id");
+    del.bindValue(":id", aId);
+    QVERIFY(del.exec());
+
+    std::vector<SqliteSessionStore::OrphanCheckpoint_dbg> toFinalize;
+    SqliteSessionStore::OrphanCheckpoint_dbg a; a.id = aId; a.startTime = aStartUtc.toLocalTime(); a.endTime = aEndUtc.toLocalTime();
+    toFinalize.push_back(a);
+
+    const SqliteSessionStore::ReconcileResult_dbg result = manager.reconcileUnfinalizedCheckpoints_dbg(toFinalize, {});
+
+    QVERIFY(!result.ok);
+    QVERIFY(result.finalized.empty());
+    QVERIFY(result.policy_dropped.empty());
+    manager.closeConnection_dbg();
+}
+
+/**
+ * B2 (R08-001): a marker-consumption failure (the DELETE statement itself
+ * fails) inside the recovery transaction must roll back the WHOLE
+ * disposition, leaving the marker present -- not just "checked and ignored"
+ * as before.
+ */
+void DatabaseTest::test_recoverStartupCheckpoints_marker_delete_failure_preserves_marker()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery q(manager.rawDb_dbg());
+    QVERIFY(q.exec(
+        "INSERT OR REPLACE INTO app_settings (key, value) "
+        "VALUES ('last_clean_shutdown', '2025-06-01T10:05:00.000Z')"
+    ));
+
+    // Block the marker DELETE with a real trigger-raised SQLite error.
+    QVERIFY(q.exec(
+        "CREATE TRIGGER block_marker_delete_b2_test BEFORE DELETE ON app_settings "
+        "WHEN old.key = 'last_clean_shutdown' "
+        "BEGIN SELECT RAISE(ABORT, 'B2 test: blocked marker delete'); END"
+    ));
+    manager.closeConnection_dbg();
+
+    const QDateTime now = QDateTime(QDate(2025, 6, 1), QTime(10, 10, 0), Qt::UTC);
+    const StartupRecoveryResult res = manager.recoverStartupCheckpoints(now);
+
+    QVERIFY(!res.ok());
+    QCOMPARE(res.status, SessionStoreResult::TransientError);
+
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery drop(manager.rawDb_dbg());
+    QVERIFY(drop.exec("DROP TRIGGER block_marker_delete_b2_test"));
+
+    QSqlQuery checkMarker(manager.rawDb_dbg());
+    QVERIFY(checkMarker.exec("SELECT COUNT(*) FROM app_settings WHERE key = 'last_clean_shutdown'"));
+    QVERIFY(checkMarker.next());
+    QCOMPARE(checkMarker.value(0).toInt(), 1);
+    manager.closeConnection_dbg();
+}
+
+/**
+ * B2: a discard-intent resolution failure inside the recovery transaction
+ * must also roll back the whole disposition -- an unmatched tombstone (named
+ * no live row) is left exactly as it was, not silently dropped.
+ */
+void DatabaseTest::test_recoverStartupCheckpoints_discard_intent_clear_failure_preserves_everything()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+    QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Created);
+
+    // An unmatched discard intent: names no unfinalized row, so it is
+    // "resolved" (deleted) unless the delete itself fails.
+    const SegmentId segId = SegmentId::mint();
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery insertIntent(manager.rawDb_dbg());
+    insertIntent.prepare("INSERT INTO discard_intents (segment_id) VALUES (:id)");
+    insertIntent.bindValue(":id", segId.toString());
+    QVERIFY(insertIntent.exec());
+
+    QSqlQuery q(manager.rawDb_dbg());
+    QVERIFY(q.exec(
+        "CREATE TRIGGER block_intent_delete_b2_test BEFORE DELETE ON discard_intents "
+        "BEGIN SELECT RAISE(ABORT, 'B2 test: blocked intent delete'); END"
+    ));
+    manager.closeConnection_dbg();
+
+    const QDateTime now = QDateTime(QDate(2025, 6, 1), QTime(11, 0, 0), Qt::UTC);
+    const StartupRecoveryResult res = manager.recoverStartupCheckpoints(now);
+
+    QVERIFY(!res.ok());
+
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery drop(manager.rawDb_dbg());
+    QVERIFY(drop.exec("DROP TRIGGER block_intent_delete_b2_test"));
+
+    QSqlQuery checkIntent(manager.rawDb_dbg());
+    checkIntent.prepare("SELECT COUNT(*) FROM discard_intents WHERE segment_id = :id");
+    checkIntent.bindValue(":id", segId.toString());
+    QVERIFY(checkIntent.exec());
+    QVERIFY(checkIntent.next());
+    QCOMPARE(checkIntent.value(0).toInt(), 1);
+    manager.closeConnection_dbg();
+}
+
+/**
+ * B2: a second startup over already-resolved rows must be a true no-op --
+ * zero NEW finalized/policy-dropped counts and zero new recovered_msec.
+ * Idempotency is what makes retrying startup after a Retry/Quit choice safe.
+ */
+void DatabaseTest::test_recoverStartupCheckpoints_second_startup_is_idempotent()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QVERIFY(manager.ensureOpen_dbg());
+    const QDateTime startUtc = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime endUtc   = QDateTime(QDate(2025, 6, 1), QTime(10, 5, 0), Qt::UTC);
+    QVERIFY(seedOrphanRow(manager, startUtc, endUtc) > 0);
+    manager.closeConnection_dbg();
+
+    const QDateTime now = QDateTime(QDate(2025, 6, 1), QTime(10, 10, 0), Qt::UTC);
+    const StartupRecoveryResult first = manager.recoverStartupCheckpoints(now);
+    QVERIFY(first.ok());
+    QCOMPARE(first.finalized_count, 1);
+    QCOMPARE(first.recovered_msec, startUtc.msecsTo(endUtc));
+
+    const StartupRecoveryResult second = manager.recoverStartupCheckpoints(now);
+    QVERIFY(second.ok());
+    QCOMPARE(second.finalized_count, 0);
+    QCOMPARE(second.policy_dropped_count, 0);
+    QCOMPARE(second.recovered_msec, static_cast<qint64>(0));
+    QVERIFY(!second.notify_user);
 }
 
 /**
@@ -3353,9 +3675,9 @@ void DatabaseTest::test_A4_recovery_after_reopen_deletes_row_matching_durable_in
 
     // Assert: recovery succeeded, the rejected row was neither finalized nor
     // credited, and it no longer exists.
-    QVERIFY(res.ok);
+    QVERIFY(res.ok());
     QCOMPARE(res.finalized_count, 0);
-    QCOMPARE(res.recovered_seconds, qint64(0));
+    QCOMPARE(res.recovered_msec, qint64(0));
     QVERIFY(!res.notify_user);
     QVERIFY(manager.ensureOpen_dbg());
     QCOMPARE(countDurationsForSegment(manager, segId), 0);
@@ -3401,7 +3723,7 @@ void DatabaseTest::test_A4_recovery_never_deletes_finalized_row_matching_intent(
 
     // Assert: recovery succeeded, the finalized row survives untouched, and
     // the tombstone was resolved (not left as permanently unresolvable work).
-    QVERIFY(res.ok);
+    QVERIFY(res.ok());
     QVERIFY(manager.ensureOpen_dbg());
     QCOMPARE(countDurationsForSegment(manager, segId), 1);
     QSqlQuery checkFinalized(manager.rawDb_dbg());

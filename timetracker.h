@@ -273,7 +273,7 @@ private:
     mutable QRecursiveMutex mutex_;  // Protects state transitions from concurrent access
     QTimer checkpointTimer_;  // TimeTracker for periodic checkpoint saving
     qint64 checkpoint_interval_msec_; // Checkpoint interval (0 = disabled)
-    qint64 startup_recovered_seconds_;
+    qint64 startup_recovered_msec_;
     bool startup_recovery_notification_needed_;
     DayBoundaryWatcher day_boundary_watcher_; // Must be last: constructed after all other members
 
@@ -411,7 +411,12 @@ public:
     /// Must be called once after checkSchemaOnStartup() returns Ready or Created,
     /// and before the event loop starts.  The TimeTracker constructor performs no
     /// persistence side effects; this method is where recovery happens.
-    void initializeFromStore();
+    /// Returns the store's typed recovery result so startup composition (see
+    /// runStartupRecovery()) can decide whether to proceed, retry, or quit
+    /// before the main UI is created. On Success/Disabled, the recovered-time
+    /// and notification facts below reflect the result; on TransientError/
+    /// FatalError they are left at their prior (default zero/false) value.
+    StartupRecoveryResult initializeFromStore();
 
     qint64 getActiveTime() const;
     qint64 getPauseTime() const;
@@ -452,7 +457,7 @@ public:
     // Cheap thread-safe predicate used by the MainWin watchdog. Returns true
     // iff there is an ongoing segment whose start date is earlier than today.
     bool isOngoingSegmentCrossMidnight() const;
-    qint64 getStartupRecoveredSeconds() const;
+    qint64 getStartupRecoveredMsec() const;
     bool shouldShowStartupRecoveryNotification() const;
     void setDurationType(size_t idx, DurationType type);
     SessionStoreResult replaceAll(const Timeline& history, const Timeline& session);

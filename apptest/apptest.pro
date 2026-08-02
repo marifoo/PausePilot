@@ -31,7 +31,8 @@ SOURCES += \
     $$PWD/../timeformat.cpp \
     $$PWD/../settings.cpp \
     $$PWD/../logger.cpp \
-    $$PWD/../timeline.cpp
+    $$PWD/../timeline.cpp \
+    $$PWD/../startuprecovery.cpp
 
 HEADERS += \
     test_appshell.h \
@@ -54,4 +55,5 @@ HEADERS += \
     $$PWD/../logger.h \
     $$PWD/../types.h \
     $$PWD/../historydialog.h \
-    $$PWD/../timeline.h
+    $$PWD/../timeline.h \
+    $$PWD/../startuprecovery.h

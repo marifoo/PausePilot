@@ -82,9 +82,10 @@ private slots:
 
     // ── recoverStartupCheckpoints ────────────────────────────────────
     // success (no orphans): already covered by DatabaseTest
-    // disabled: returns ok=true with zero counts (behavior contract, not status enum)
-    void test_recoverStartupCheckpoints_disabled_returns_ok_zero_counts();
-    // transient/fatal/CallerBug: marker read failure sets ok=false (covered by DatabaseTest)
+    // disabled: returns status == Disabled with zero counts (B2)
+    void test_recoverStartupCheckpoints_disabled_returns_Disabled();
+    // transient/fatal/CallerBug: marker read failure sets status to
+    // TransientError (covered by DatabaseTest)
 };
 
 #endif // TEST_CONTRACT_MATRIX_H

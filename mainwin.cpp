@@ -21,6 +21,7 @@
 #include <QCoreApplication>
 #include <QStatusBar>
 #include "logger.h"
+#include "timeformat.h"
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -175,10 +176,13 @@ void MainWin::start()
 		// The pressedButton signal will trigger midnight scheduling
 	}
 
-	const qint64 recoveredSeconds = timetracker_.getStartupRecoveredSeconds();
-	if (recoveredSeconds > 0 && timetracker_.shouldShowStartupRecoveryNotification()) {
-		const QString message = QString("Recovered %1 seconds from the last session after an unclean shutdown.")
-			.arg(recoveredSeconds);
+	// B2: the store returns exact recovered milliseconds; this formatter
+	// consumes them directly -- no seconds conversion/rounding happens
+	// anywhere in the path leading here.
+	const qint64 recoveredMsec = timetracker_.getStartupRecoveredMsec();
+	if (recoveredMsec > 0 && timetracker_.shouldShowStartupRecoveryNotification()) {
+		const QString message = QString("Recovered %1 from the last session after an unclean shutdown.")
+			.arg(convMSecToTimeStr(recoveredMsec));
 		statusBar()->showMessage(message, 10000);
 		if (tray_icon_ && tray_icon_->isVisible()) {
 			tray_icon_->showMessage("uTimer Recovery", message, QSystemTrayIcon::Information, 10000);

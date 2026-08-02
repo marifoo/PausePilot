@@ -142,6 +142,15 @@ private slots:
     // A14: a backward clock jump must not resurrect a future-dated orphan
     void test_recoverStartupCheckpoints_drops_future_dated_orphan();
 
+    // B2 (R08-001..003,005, R05-004): atomic recovery disposition, exact
+    // millisecond aggregation, malformed-row cleanup, and idempotency.
+    void test_recoverStartupCheckpoints_deletes_malformed_rows_without_public_count();
+    void test_recoverStartupCheckpoints_aggregates_exact_milliseconds_no_truncation();
+    void test_reconcileUnfinalizedCheckpoints_missing_row_is_internal_error();
+    void test_recoverStartupCheckpoints_marker_delete_failure_preserves_marker();
+    void test_recoverStartupCheckpoints_discard_intent_clear_failure_preserves_everything();
+    void test_recoverStartupCheckpoints_second_startup_is_idempotent();
+
     // F6: ensureSettingsTable() must validate the shape of a pre-existing app_settings table
     void test_ensureSettingsTable_rebuilds_malformed_table();
     void test_ensureSettingsTable_rebuilds_constraint_malformed_table();

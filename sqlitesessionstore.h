@@ -69,6 +69,15 @@ private:
         QDateTime startTime;
         QDateTime endTime;
     };
+    // B2 (R08-003): loadUnfinalizedCheckpoints() classifies EVERY unfinalized
+    // row before any mutation. `valid` are candidates for the normal
+    // policy/finalize path; `malformedIds` (invalid timestamp/type, empty id,
+    // non-positive interval) are explicit delete work owned by the store --
+    // never a silent omission.
+    struct OrphanLoadResult {
+        std::deque<OrphanCheckpoint> valid;
+        std::vector<long long> malformedIds;
+    };
     // R07-002 (B1): typed outcome for finalizeIfNoOverlap() so a deliberate
     // policy decision (overlap rejection, missing row) can never be reported
     // as -- or silently substitute for -- a real transaction/SQL failure.
@@ -77,9 +86,16 @@ private:
         FinalizeOutcome outcome = FinalizeOutcome::Error;
         QString errorMessage;  // populated only when outcome == Error
     };
+    // B2: policy_dropped counts every row deleted for a recovery POLICY
+    // reason -- outright (too-short/stale/future/A4 discard-forced) drops
+    // supplied by the caller AND overlap-rejected rows discovered while
+    // finalizing (R08-002: these are now physically deleted here, not left
+    // unfinalized to recur every launch). malformed_deleted is a logged-only
+    // count, matching StartupRecoveryResult's public/internal split.
     struct ReconcileResult {
         std::vector<long long> finalized;
-        std::vector<long long> dropped;
+        std::vector<long long> policy_dropped;
+        int malformed_deleted = 0;
         bool ok = true;
     };
     struct MarkerResult {
@@ -119,21 +135,38 @@ private:
     // Loads all durable discard-intent segment ids. nullopt on a real DB error
     // (distinct from "table empty").
     std::optional<std::vector<SegmentId>> loadDiscardIntents();
-    // Best-effort: clears resolved discard intents. Failure is logged only --
-    // a leftover tombstone is safely re-resolved (no-op) on the next recovery.
-    void clearDiscardIntents(const std::vector<SegmentId>& ids);
     BackupResult createBackup(const std::deque<TimeDuration>& durations, TransactionMode mode);
     void performRetentionCleanup();
     void pruneOldBackups(int keepCount = 5);
     bool insertRows(QSqlQuery& query, const std::deque<TimeDuration>& rows);
 
     // Startup recovery helpers (implementation details of recoverStartupCheckpoints).
-    std::optional<std::deque<OrphanCheckpoint>> loadUnfinalizedCheckpoints();
+    // B2: loads AND classifies every unfinalized row before any externally
+    // visible mutation (R08-003) -- malformed rows are never a silent omission.
+    std::optional<OrphanLoadResult> loadUnfinalizedCheckpoints();
+    // Self-transacting single-row finalize (BEGIN/COMMIT/ROLLBACK owned here).
+    // Kept for direct/isolated use (finalizeIfNoOverlap_dbg); B2's atomic
+    // recovery transaction instead calls finalizeOrOverlapWithinOpenTransaction
+    // directly so the whole disposition shares one transaction.
     FinalizeResult finalizeIfNoOverlap(qint64 rowId, const QDateTime& startUtc, const QDateTime& endUtc);
+    // Pure probe-and-finalize logic (no BEGIN/COMMIT/ROLLBACK of its own);
+    // assumes the caller already holds an open transaction.
+    FinalizeResult finalizeOrOverlapWithinOpenTransaction(qint64 rowId, const QDateTime& startUtc, const QDateTime& endUtc);
+    // B2: assumes the caller already holds an open transaction (recoverStartupCheckpoints
+    // folds this into its single atomic disposition). Deletes malformedIds and
+    // policyDropIds outright, then finalizes each orphansToFinalize candidate --
+    // deleting it instead if overlap-rejected (R08-002). A Missing outcome (row
+    // vanished since load, impossible in this single-process flow) is treated as
+    // an internal error, same as a real SQL failure: ok=false, stop immediately.
     ReconcileResult reconcileUnfinalizedCheckpoints(const std::vector<OrphanCheckpoint>& orphansToFinalize,
-                                                    const std::vector<long long>& outrightDropIds);
+                                                    const std::vector<long long>& policyDropIds,
+                                                    const std::vector<long long>& malformedIds);
     std::optional<MarkerResult> readLastCleanShutdownMarker();
-    bool deleteLastCleanShutdownMarker();
+    // Assumes the caller already holds an open transaction; does not commit
+    // or roll back. Replaces the old self-transacting deleteLastCleanShutdownMarker()
+    // now that marker consumption is folded into recoverStartupCheckpoints'
+    // single atomic transaction (R08-001).
+    bool deleteMarkerRow();
 
 #ifndef QT_NO_DEBUG
     /// Debug-build verification: checks that no segment_id appears more than
@@ -164,15 +197,44 @@ public:
     using ReconcileResult_dbg  = ReconcileResult;
     using FinalizeOutcome_dbg  = FinalizeOutcome;
     using FinalizeResult_dbg   = FinalizeResult;
-    std::deque<OrphanCheckpoint> loadUnfinalizedCheckpoints_dbg() { return loadUnfinalizedCheckpoints().value_or(std::deque<OrphanCheckpoint>{}); }
+    std::deque<OrphanCheckpoint> loadUnfinalizedCheckpoints_dbg() {
+        const auto r = loadUnfinalizedCheckpoints();
+        return r.has_value() ? r->valid : std::deque<OrphanCheckpoint>{};
+    }
+    /// Malformed-row ids (invalid timestamp/type, empty id, non-positive
+    /// interval) found by the SAME load that loadUnfinalizedCheckpoints_dbg()
+    /// just exposed. Re-runs the load; only for tests that need both halves.
+    std::vector<long long> loadUnfinalizedCheckpointsMalformedIds_dbg() {
+        const auto r = loadUnfinalizedCheckpoints();
+        return r.has_value() ? r->malformedIds : std::vector<long long>{};
+    }
     FinalizeResult finalizeIfNoOverlap_dbg(qint64 rowId, const QDateTime& s, const QDateTime& e) {
         return finalizeIfNoOverlap(rowId, s, e);
     }
+    /// Wraps reconcileUnfinalizedCheckpoints() (which itself assumes an
+    /// already-open transaction, matching how recoverStartupCheckpoints()
+    /// uses it) in its own BEGIN/COMMIT-or-ROLLBACK so isolated tests can
+    /// call it standalone, exactly mirroring production usage.
     ReconcileResult reconcileUnfinalizedCheckpoints_dbg(
         const std::vector<OrphanCheckpoint>& toFinalize,
-        const std::vector<long long>& outrightDropIds)
+        const std::vector<long long>& policyDropIds,
+        const std::vector<long long>& malformedIds = {})
     {
-        return reconcileUnfinalizedCheckpoints(toFinalize, outrightDropIds);
+        if (!ensureOpen() || !db.transaction()) {
+            ReconcileResult r;
+            r.ok = false;
+            return r;
+        }
+        ReconcileResult result = reconcileUnfinalizedCheckpoints(toFinalize, policyDropIds, malformedIds);
+        if (result.ok) {
+            if (!db.commit()) {
+                db.rollback();
+                result.ok = false;
+            }
+        } else {
+            db.rollback();
+        }
+        return result;
     }
     QString dbConnectionName_dbg() const { return db.connectionName(); }
 

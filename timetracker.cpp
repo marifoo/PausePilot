@@ -348,7 +348,7 @@ TimeTracker::TimeTracker(const Settings &settings, SessionStore& db, QObject *pa
       autopause_pending_resume_(false), is_locked_(false),
       dialog_open_(false), db_(db),
       checkpoint_interval_msec_(settings.getCheckpointIntervalMsec()),
-      startup_recovered_seconds_(0), startup_recovery_notification_needed_(false),
+      startup_recovered_msec_(0), startup_recovery_notification_needed_(false),
       day_boundary_watcher_(*this)
 {
     // Setup checkpoint timer (disabled if interval is 0)
@@ -367,13 +367,14 @@ TimeTracker::TimeTracker(const Settings &settings, SessionStore& db, QObject *pa
     // Call initializeFromStore() after checkSchemaOnStartup() returns Ready/Created.
 }
 
-void TimeTracker::initializeFromStore()
+StartupRecoveryResult TimeTracker::initializeFromStore()
 {
     const StartupRecoveryResult recovery = db_.recoverStartupCheckpoints(now_provider_());
-    if (recovery.ok) {
-        startup_recovered_seconds_ = recovery.recovered_seconds;
+    if (recovery.okOrDisabled()) {
+        startup_recovered_msec_ = recovery.recovered_msec;
         startup_recovery_notification_needed_ = recovery.notify_user;
     }
+    return recovery;
 }
 
 TimeTracker::~TimeTracker()
@@ -1052,10 +1053,10 @@ std::optional<TimeDuration> TimeTracker::getOngoingDuration_locked() const
     return TimeDuration::fromLiveSession(type, session_.segment_start_time, now, session_.segment_id);
 }
 
-qint64 TimeTracker::getStartupRecoveredSeconds() const
+qint64 TimeTracker::getStartupRecoveredMsec() const
 {
     QMutexLocker locker(&mutex_);
-    return startup_recovered_seconds_;
+    return startup_recovered_msec_;
 }
 
 bool TimeTracker::shouldShowStartupRecoveryNotification() const

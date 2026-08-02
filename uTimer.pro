@@ -17,7 +17,8 @@ HEADERS = \
    $$PWD/logger.h \
    $$PWD/historydialog.h \
    $$PWD/historyeditsession.h \
-   $$PWD/timeline.h
+   $$PWD/timeline.h \
+   $$PWD/startuprecovery.h
 
 SOURCES = \
    $$PWD/contentwidget.cpp \
@@ -34,7 +35,8 @@ SOURCES = \
    $$PWD/settings.cpp \
    $$PWD/timeformat.cpp \
    $$PWD/logger.cpp \
-   $$PWD/timeline.cpp
+   $$PWD/timeline.cpp \
+   $$PWD/startuprecovery.cpp
 
 INCLUDEPATH = \
     $$PWD/.

@@ -74,7 +74,7 @@ void IntegrationTest::test_integration_checkpoint_recovery_on_restart()
         SqliteSessionStore db(settings);
         TimeTracker tracker(settings, db);
         tracker.initializeFromStore();
-        QVERIFY(tracker.getStartupRecoveredSeconds() > 0);
+        QVERIFY(tracker.getStartupRecoveredMsec() > 0);
 
         SqliteSessionStore db2(settings);
         auto loaded = db2.loadDurations();
@@ -119,7 +119,7 @@ void IntegrationTest::test_integration_orphan_reconciliation_is_idempotent()
         SqliteSessionStore db(settings);
         TimeTracker tracker(settings, db);
         tracker.initializeFromStore();
-        QCOMPARE(tracker.getStartupRecoveredSeconds() >= 1, true);
+        QCOMPARE(tracker.getStartupRecoveredMsec() >= 1, true);
     }
 
     {
@@ -127,7 +127,7 @@ void IntegrationTest::test_integration_orphan_reconciliation_is_idempotent()
         SqliteSessionStore db(settings);
         TimeTracker tracker(settings, db);
         tracker.initializeFromStore();
-        QCOMPARE(tracker.getStartupRecoveredSeconds(), static_cast<qint64>(0));
+        QCOMPARE(tracker.getStartupRecoveredMsec(), static_cast<qint64>(0));
         SqliteSessionStore db2(settings);
         auto loaded = db2.loadDurations();
         QCOMPARE(loaded.size(), static_cast<size_t>(1));
@@ -182,7 +182,7 @@ void IntegrationTest::test_integration_orphan_reconciliation_drops_stale_and_too
     SqliteSessionStore db2(settings);
     TimeTracker tracker(settings, db2);
     tracker.initializeFromStore();
-    QCOMPARE(tracker.getStartupRecoveredSeconds(), static_cast<qint64>(0));
+    QCOMPARE(tracker.getStartupRecoveredMsec(), static_cast<qint64>(0));
 
     auto loaded = db.loadDurations();
     QCOMPARE(loaded.size(), static_cast<size_t>(0));
@@ -220,7 +220,7 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_present_is_s
         SqliteSessionStore db(settings);
         TimeTracker tracker(settings, db);
         tracker.initializeFromStore();
-        QVERIFY(tracker.getStartupRecoveredSeconds() > 0);
+        QVERIFY(tracker.getStartupRecoveredMsec() > 0);
         QVERIFY(!tracker.shouldShowStartupRecoveryNotification());
     }
 }
@@ -251,7 +251,7 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_absent_shows
         SqliteSessionStore db(settings);
         TimeTracker tracker(settings, db);
         tracker.initializeFromStore();
-        QVERIFY(tracker.getStartupRecoveredSeconds() > 0);
+        QVERIFY(tracker.getStartupRecoveredMsec() > 0);
         QVERIFY(tracker.shouldShowStartupRecoveryNotification());
     }
 }
@@ -825,13 +825,23 @@ void IntegrationTest::test_recoverStartupCheckpoints_overlap_rejected_not_counte
     const QDateTime now = QDateTime(QDate(2025, 1, 1), QTime(13, 0, 0), Qt::UTC).toLocalTime();
     StartupRecoveryResult result = db.recoverStartupCheckpoints(now);
 
-    QVERIFY(result.ok);
+    QVERIFY(result.ok());
     QCOMPARE(result.finalized_count, 1);    // A finalized
-    QCOMPARE(result.recovered_seconds, (qint64)1800); // 30 min = 1800 s
+    QCOMPARE(result.recovered_msec, (qint64)1800000); // 30 min = 1,800,000 ms
     // No clean-shutdown marker → notify_user = true (unclean exit).
     QVERIFY(result.notify_user);
-    // B's 3600 s must NOT appear in recovered_seconds (overlap-rejected).
-    QVERIFY(result.recovered_seconds < 3600);
+    // B's 3,600,000 ms must NOT appear in recovered_msec (overlap-rejected).
+    QVERIFY(result.recovered_msec < 3600000);
+
+    // B2 (R08-002): an overlap-rejected orphan is now physically deleted
+    // (not left is_finalized=0 to recur every future launch).
+    QVERIFY(db.ensureOpen_dbg());
+    QSqlQuery checkB(db.rawDb_dbg());
+    checkB.prepare("SELECT COUNT(*) FROM durations WHERE start_utc = :s AND is_finalized = 0");
+    checkB.bindValue(":s", bStartUtc.toString(Qt::ISODateWithMs));
+    QVERIFY(checkB.exec());
+    QVERIFY(checkB.next());
+    QCOMPARE(checkB.value(0).toInt(), 0);
 }
 
 /**
@@ -893,35 +903,37 @@ void IntegrationTest::test_recoverStartupCheckpoints_reports_finalized_and_dropp
     const QDateTime now = QDateTime(QDate(2025, 1, 1), QTime(13, 0, 0), Qt::UTC).toLocalTime();
     StartupRecoveryResult result = db.recoverStartupCheckpoints(now);
 
-    QVERIFY(result.ok);
-    QCOMPARE(result.finalized_count, 1);   // A finalized
-    QVERIFY(result.dropped_count >= 1);    // B overlap-dropped (counted in dropped_count)
-    QCOMPARE(result.recovered_seconds, (qint64)1800); // only A's 30 min
+    QVERIFY(result.ok());
+    QCOMPARE(result.finalized_count, 1);         // A finalized
+    QCOMPARE(result.policy_dropped_count, 1);    // B overlap-dropped (deleted, counted)
+    QCOMPARE(result.recovered_msec, (qint64)1800000); // only A's 30 min
 }
 
 /**
- * TimeTracker correctly uses recovered_seconds from recoverStartupCheckpoints.
+ * TimeTracker correctly uses recovered_msec from recoverStartupCheckpoints.
  *
- * Verifies the TimeTracker → store boundary: TimeTracker passes the recovered_seconds
- * from the store result directly to getStartupRecoveredSeconds().
+ * Verifies the TimeTracker → store boundary: TimeTracker passes the exact
+ * recovered_msec from the store result directly to getStartupRecoveredMsec()
+ * (B2: no seconds conversion or rounding happens at this boundary).
  */
-void IntegrationTest::test_timer_startup_recovery_uses_store_recovered_seconds()
+void IntegrationTest::test_timer_startup_recovery_uses_store_recovered_msec()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
 
-    // Configure the store to report 60 seconds recovered (e.g. A finalized, B overlap-dropped).
-    fakeDb.startupRecoveryResult.ok = true;
-    fakeDb.startupRecoveryResult.recovered_seconds = 60;
+    // Configure the store to report 60,900 ms recovered (e.g. A finalized, B
+    // overlap-dropped) -- a non-round-second value to prove exact ms passthrough.
+    fakeDb.startupRecoveryResult.status = SessionStoreResult::Success;
+    fakeDb.startupRecoveryResult.recovered_msec = 60900;
     fakeDb.startupRecoveryResult.notify_user = true;
 
     TimeTracker tracker(settings, fakeDb);
     tracker.initializeFromStore();
 
     // TimeTracker should report exactly what the store returned.
-    QCOMPARE(tracker.getStartupRecoveredSeconds(), (qint64)60);
+    QCOMPARE(tracker.getStartupRecoveredMsec(), (qint64)60900);
     QVERIFY(tracker.shouldShowStartupRecoveryNotification());
 }
 
@@ -1162,7 +1174,7 @@ void IntegrationTest::test_A_toggle_ongoing_to_pause_crash_recovery_uses_refresh
         // Run recovery.
         const QDateTime now = QDateTime::currentDateTime();
         StartupRecoveryResult result = db.recoverStartupCheckpoints(now);
-        QVERIFY(result.ok);
+        QVERIFY(result.ok());
         QVERIFY(result.finalized_count >= 1);
 
         // After recovery, the finalized row's end_utc must still be the refreshed time.
@@ -1246,7 +1258,7 @@ void IntegrationTest::test_A3_exit_anyway_leaves_checkpoint_untouched_for_recove
     TimeTracker reopened(settings, db2);
     reopened.initializeFromStore();
 
-    QCOMPARE(reopened.getStartupRecoveredSeconds(), static_cast<qint64>(20));
+    QCOMPARE(reopened.getStartupRecoveredMsec(), static_cast<qint64>(20000));
 
     SqliteSessionStore db3(settings);
     auto loaded = db3.loadDurations();
@@ -1309,7 +1321,7 @@ void IntegrationTest::test_A4_watchdog_discard_failure_survives_reopen_never_cre
     TimeTracker reopened(settings, db2);
     reopened.initializeFromStore();
 
-    QCOMPARE(reopened.getStartupRecoveredSeconds(), static_cast<qint64>(0));
+    QCOMPARE(reopened.getStartupRecoveredMsec(), static_cast<qint64>(0));
     QVERIFY(!reopened.shouldShowStartupRecoveryNotification());
 
     SqliteSessionStore db3(settings);

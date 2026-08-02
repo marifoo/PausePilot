@@ -3,6 +3,7 @@
 #include "mainwin.h"
 #include "shutdowncoordinator.h"
 #include "timetracker.h"
+#include "startuprecovery.h"
 #include <QtTest>
 #include <QApplication>
 #include <QMessageBox>
@@ -252,6 +253,82 @@ void AppShellTest::test_exit_anyway_is_not_asked_again_on_aboutToQuit()
     // Cleanup: resolve the payload so destruction finds no unresolved commit.
     fakeDb.commitSessionResult = SessionStoreResult::success();
     QVERIFY(tracker.drainForShutdown().clean());
+}
+
+// ============================================================================
+// B2 (R08-001..003,005, R05-004): runStartupRecovery()'s Retry/Quit loop.
+// Production composition (main.cpp) calls this BEFORE ShutdownCoordinator or
+// MainWin is constructed, so a Quit here structurally means no window, no
+// buttons, and no possible tracking ever existed for this launch -- these
+// tests exercise runStartupRecovery() directly, at the same narrow seam A3
+// established for the shutdown modal loop.
+// ============================================================================
+
+void AppShellTest::test_startup_recovery_retry_repeats_recovery_until_success()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    fakeDb.startupRecoveryResult = StartupRecoveryResult::failure(SessionStoreResult::TransientError, "injected recovery failure");
+    TimeTracker tracker(settings, fakeDb);
+
+    // Act: the initial recovery (inside runStartupRecovery()'s first
+    // initializeFromStore() call) fails and shows the Retry/Quit modal.
+    // Schedule a click on Retry that also fixes the store, so the one new
+    // recovery attempt it triggers succeeds.
+    auto poller = armModalClick(QMessageBox::AcceptRole, [&fakeDb]() {
+        fakeDb.startupRecoveryResult = StartupRecoveryResult{};
+    });
+    const bool proceeded = runStartupRecovery(tracker);
+
+    // Assert: recovery ultimately succeeded via exactly one Retry -- two
+    // total recoverStartupCheckpoints() calls.
+    QVERIFY(proceeded);
+    QCOMPARE(fakeDb.callLog.count("recoverStartupCheckpoints"), 2);
+}
+
+void AppShellTest::test_startup_recovery_quit_declines_without_retry()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    fakeDb.startupRecoveryResult = StartupRecoveryResult::failure(SessionStoreResult::TransientError, "injected recovery failure");
+    TimeTracker tracker(settings, fakeDb);
+
+    // Act: the initial recovery fails; the user clicks Quit instead of Retry.
+    auto poller = armModalClick(QMessageBox::DestructiveRole);
+    const bool proceeded = runStartupRecovery(tracker);
+
+    // Assert: Quit is honored without a second attempt -- existing rows/
+    // marker are left exactly as recoverStartupCheckpoints() (a no-op on
+    // TransientError) already left them. Production (main.cpp) exits here
+    // before ShutdownCoordinator or MainWin is ever constructed, so no
+    // tracking session could have started this launch.
+    QVERIFY(!proceeded);
+    QCOMPARE(fakeDb.callLog.count("recoverStartupCheckpoints"), 1);
+}
+
+void AppShellTest::test_startup_recovery_success_shows_no_modal()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;  // default startupRecoveryResult: Success, zero facts.
+    TimeTracker tracker(settings, fakeDb);
+
+    // Act
+    bool proceeded = false;
+    const bool stayedSilent = runExpectingNoModal([&]() { proceeded = runStartupRecovery(tracker); });
+
+    // Assert
+    QVERIFY2(stayedSilent, "a successful recovery must not show any modal");
+    QVERIFY(proceeded);
+    QCOMPARE(fakeDb.callLog.count("recoverStartupCheckpoints"), 1);
 }
 
 // The OS-forced (Direct) path must attempt once and exit with NO warning and

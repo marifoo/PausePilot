@@ -311,7 +311,7 @@ void HistoryCommitTest::test_merge_save_survives_late_crash_recovery()
     // relaunch >24 h later.  Stale-orphan policy would drop any unfinalized row.
     const QDateTime later = memEnd.addSecs(25 * 3600);
     const StartupRecoveryResult res = db.recoverStartupCheckpoints(later);
-    QVERIFY(res.ok);
+    QVERIFY(res.ok());
 
     // The merged row must survive: it was finalized on save, not demoted.
     const auto loaded = db.loadDurations();

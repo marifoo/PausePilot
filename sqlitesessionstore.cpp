@@ -1391,19 +1391,19 @@ SessionStoreResult SqliteSessionStore::flushToDisc()
     return SessionStoreResult::success();
 }
 
-std::optional<std::deque<SqliteSessionStore::OrphanCheckpoint>> SqliteSessionStore::loadUnfinalizedCheckpoints()
+std::optional<SqliteSessionStore::OrphanLoadResult> SqliteSessionStore::loadUnfinalizedCheckpoints()
 {
     QMutexLocker locker(&db_mutex_);
 
     if (history_days_to_keep_ == 0) {
-        return std::deque<OrphanCheckpoint>{};
+        return OrphanLoadResult{};
     }
 
     if (!ensureOpen()) {
         return std::nullopt;
     }
 
-    std::deque<OrphanCheckpoint> orphans;
+    OrphanLoadResult result;
 
     QSqlQuery query(db);
     query.prepare("SELECT id, segment_id, type, start_utc, end_utc FROM durations WHERE is_finalized = 0 ORDER BY id ASC");
@@ -1413,72 +1413,62 @@ std::optional<std::deque<SqliteSessionStore::OrphanCheckpoint>> SqliteSessionSto
     }
 
     while (query.next()) {
+        const long long rowId = query.value(0).toLongLong();
+
         // An empty segment_id is a corrupt row (SegmentId::fromString asserts
-        // non-empty in debug). Skip it rather than assert-aborting.
+        // non-empty in debug). B2 (R08-003): malformed rows are explicit
+        // delete work owned by the store, not a silent omission -- record the
+        // id so recoverStartupCheckpoints() can delete it transactionally.
         const QString segmentIdStr = query.value(1).toString();
         if (segmentIdStr.isEmpty()) {
-            Logger::Log("[DB] loadUnfinalizedCheckpoints: skipped row with empty segment_id");
+            Logger::Log("[DB] loadUnfinalizedCheckpoints: malformed row (empty segment_id), id=" + QString::number(rowId));
+            result.malformedIds.push_back(rowId);
             continue;
         }
         const int typeInt = query.value(2).toInt();
         if (typeInt != static_cast<int>(DurationType::Activity) &&
             typeInt != static_cast<int>(DurationType::Pause)) {
+            Logger::Log(QString("[DB] loadUnfinalizedCheckpoints: malformed row (invalid type %1), id=%2").arg(typeInt).arg(rowId));
+            result.malformedIds.push_back(rowId);
             continue;
         }
 
         const QDateTime startTime = QDateTime::fromString(query.value(3).toString(), Qt::ISODateWithMs).toLocalTime();
         const QDateTime endTime   = QDateTime::fromString(query.value(4).toString(), Qt::ISODateWithMs).toLocalTime();
         if (!startTime.isValid() || !endTime.isValid()) {
-            Logger::Log(QString("[DB] loadUnfinalizedCheckpoints: skipped row with invalid timestamp(s): start=%1 end=%2")
-                .arg(query.value(3).toString()).arg(query.value(4).toString()));
+            Logger::Log(QString("[DB] loadUnfinalizedCheckpoints: malformed row (invalid timestamp(s)), id=%1 start=%2 end=%3")
+                .arg(rowId).arg(query.value(3).toString()).arg(query.value(4).toString()));
+            result.malformedIds.push_back(rowId);
             continue;
         }
         if (startTime >= endTime) {
-            Logger::Log(QString("[DB] loadUnfinalizedCheckpoints: skipped row with start >= end: start=%1 end=%2")
-                .arg(startTime.toString(Qt::ISODateWithMs)).arg(endTime.toString(Qt::ISODateWithMs)));
+            Logger::Log(QString("[DB] loadUnfinalizedCheckpoints: malformed row (start >= end), id=%1 start=%2 end=%3")
+                .arg(rowId).arg(startTime.toString(Qt::ISODateWithMs)).arg(endTime.toString(Qt::ISODateWithMs)));
+            result.malformedIds.push_back(rowId);
             continue;
         }
 
         OrphanCheckpoint checkpoint;
-        checkpoint.id = query.value(0).toLongLong();
+        checkpoint.id = rowId;
         checkpoint.segment_id = SegmentId::fromString(query.value(1).toString());
         checkpoint.type = static_cast<DurationType>(typeInt);
         checkpoint.duration = startTime.msecsTo(endTime);
         checkpoint.startTime = startTime;
         checkpoint.endTime = endTime;
-        orphans.push_back(checkpoint);
+        result.valid.push_back(checkpoint);
     }
 
-    return orphans;
+    return result;
 }
 
-SqliteSessionStore::FinalizeResult SqliteSessionStore::finalizeIfNoOverlap(qint64 rowId, const QDateTime& startUtc, const QDateTime& endUtc)
+/**
+ * Pure probe-and-finalize logic (R07-002/B1's overlap policy), extracted so
+ * B2's recovery transaction can run it as one step among several sharing a
+ * single outer transaction. Assumes the caller already holds an open
+ * transaction; never begins, commits, or rolls back.
+ */
+SqliteSessionStore::FinalizeResult SqliteSessionStore::finalizeOrOverlapWithinOpenTransaction(qint64 rowId, const QDateTime& startUtc, const QDateTime& endUtc)
 {
-    QMutexLocker locker(&db_mutex_);
-
-    // Rolls back the open transaction on an error/no-op exit. The rollback
-    // failing is secondary evidence, logged without replacing the primary
-    // failure already reported by the caller.
-    auto rollbackAfter = [this](const char* context) {
-        if (!db.rollback()) {
-            Logger::Log(QString("[DB] Warning: rollback after %1 also failed: ").arg(context) + db.lastError().text());
-        }
-    };
-
-    if (history_days_to_keep_ == 0) {
-        return {FinalizeOutcome::Error, "history persistence is disabled"};
-    }
-
-    if (!ensureOpen()) {
-        return {FinalizeOutcome::Error, "failed to open database connection"};
-    }
-
-    if (!db.transaction()) {
-        const QString err = db.lastError().text();
-        Logger::Log("[DB] Error starting finalizeIfNoOverlap transaction: " + err);
-        return {FinalizeOutcome::Error, err};
-    }
-
     // Probe for any *other* finalised row that overlaps [startUtc, endUtc).
     // Two intervals [a, b) and [c, d) overlap iff a < d AND c < b.
     // ISO-8601 strings compare lexicographically in chronological order.
@@ -1502,13 +1492,14 @@ SqliteSessionStore::FinalizeResult SqliteSessionStore::finalizeIfNoOverlap(qint6
     if (!probe.exec()) {
         const QString err = probe.lastError().text();
         Logger::Log("[DB] Error probing for orphan overlap: " + err);
-        rollbackAfter("overlap probe failure");
         return {FinalizeOutcome::Error, err};
     }
 
     if (probe.next()) {
-        // Overlap detected: leave the row unchanged.
-        rollbackAfter("overlap rejection");
+        // Overlap detected: leave the row unchanged here (the caller decides
+        // what to do with an OverlapRejected outcome -- B2's recovery
+        // transaction deletes it; the standalone finalizeIfNoOverlap() wrapper
+        // just rolls back, leaving the row as it was).
         return {FinalizeOutcome::OverlapRejected, QString()};
     }
 
@@ -1518,30 +1509,85 @@ SqliteSessionStore::FinalizeResult SqliteSessionStore::finalizeIfNoOverlap(qint6
     if (!updateQuery.exec()) {
         const QString err = updateQuery.lastError().text();
         Logger::Log("[DB] Error finalising orphan row: " + err);
-        rollbackAfter("UPDATE failure");
         return {FinalizeOutcome::Error, err};
     }
 
-    const bool updated = updateQuery.numRowsAffected() > 0;
-    if (!updated) {
-        // Row missing or already finalised — nothing to commit, but treat as a
-        // no-op rather than a failure.
-        rollbackAfter("missing-row no-op");
+    if (updateQuery.numRowsAffected() == 0) {
+        // Row missing or already finalised.
         return {FinalizeOutcome::Missing, QString()};
-    }
-
-    if (!db.commit()) {
-        const QString err = db.lastError().text();
-        Logger::Log("[DB] Error committing finalizeIfNoOverlap: " + err);
-        rollbackAfter("commit failure");
-        return {FinalizeOutcome::Error, err};
     }
 
     return {FinalizeOutcome::Finalized, QString()};
 }
 
+/**
+ * Self-transacting single-row finalize: owns its own BEGIN/COMMIT/ROLLBACK
+ * around finalizeOrOverlapWithinOpenTransaction() so it remains usable (and
+ * independently testable) as one atomic unit on its own. B2's recovery
+ * transaction does not call this -- it calls the inner helper directly so
+ * multiple rows' worth of work share ONE outer transaction (see
+ * reconcileUnfinalizedCheckpoints()).
+ */
+SqliteSessionStore::FinalizeResult SqliteSessionStore::finalizeIfNoOverlap(qint64 rowId, const QDateTime& startUtc, const QDateTime& endUtc)
+{
+    QMutexLocker locker(&db_mutex_);
+
+    if (history_days_to_keep_ == 0) {
+        return {FinalizeOutcome::Error, "history persistence is disabled"};
+    }
+
+    if (!ensureOpen()) {
+        return {FinalizeOutcome::Error, "failed to open database connection"};
+    }
+
+    if (!db.transaction()) {
+        const QString err = db.lastError().text();
+        Logger::Log("[DB] Error starting finalizeIfNoOverlap transaction: " + err);
+        return {FinalizeOutcome::Error, err};
+    }
+
+    const FinalizeResult inner = finalizeOrOverlapWithinOpenTransaction(rowId, startUtc, endUtc);
+
+    if (inner.outcome == FinalizeOutcome::Finalized) {
+        if (!db.commit()) {
+            const QString err = db.lastError().text();
+            Logger::Log("[DB] Error committing finalizeIfNoOverlap: " + err);
+            if (!db.rollback()) {
+                Logger::Log("[DB] Warning: rollback after commit failure also failed: " + db.lastError().text());
+            }
+            return {FinalizeOutcome::Error, err};
+        }
+        return inner;
+    }
+
+    // Error, OverlapRejected, or Missing: nothing to keep -- roll back so the
+    // row is left exactly as it was found.
+    if (!db.rollback()) {
+        Logger::Log("[DB] Warning: rollback after finalizeIfNoOverlap non-success outcome also failed: " + db.lastError().text());
+    }
+    return inner;
+}
+
+/**
+ * B2: applies the entire row-mutation half of startup recovery's disposition
+ * -- malformed-row deletion, policy drops (too-short/stale/future/A4
+ * discard-forced), and finalize-or-delete-on-overlap -- as steps sharing ONE
+ * transaction that the CALLER already opened (recoverStartupCheckpoints()).
+ * This method itself never begins, commits, or rolls back; on the first
+ * failure it sets ok=false and returns immediately so the caller can roll
+ * back the entire disposition (R08-002/R07-002: a real failure, an overlap
+ * rejection, and a genuine drop must never be conflated, and a partial
+ * mutation must never survive a reported failure).
+ *
+ * A Missing outcome (the row vanished between load and finalize) cannot
+ * legitimately happen in this single-process flow -- db_mutex_ has been held
+ * by the caller since the row was loaded -- so it is treated the same as a
+ * real SQL error rather than a silent policy no-op (resolves B1's deferred
+ * Low).
+ */
 SqliteSessionStore::ReconcileResult SqliteSessionStore::reconcileUnfinalizedCheckpoints(const std::vector<OrphanCheckpoint>& orphansToFinalize,
-                                                                                       const std::vector<long long>& outrightDropIds)
+                                                                                       const std::vector<long long>& policyDropIds,
+                                                                                       const std::vector<long long>& malformedIds)
 {
     QMutexLocker locker(&db_mutex_);
 
@@ -1559,64 +1605,69 @@ SqliteSessionStore::ReconcileResult SqliteSessionStore::reconcileUnfinalizedChec
         return result;
     }
 
-    if (orphansToFinalize.empty() && outrightDropIds.empty()) {
+    if (orphansToFinalize.empty() && policyDropIds.empty() && malformedIds.empty()) {
         return result;
     }
 
-    if (!ensureOpen()) {
-        result.ok = false;
-        return result;
-    }
+    QSqlQuery dropQuery(db);
+    dropQuery.prepare("DELETE FROM durations WHERE id = :id AND is_finalized = 0");
 
-    // Outright drops happen first in their own transaction so they survive even
-    // if a subsequent finalize call fails.  Finalise calls are then issued one
-    // by one via finalizeIfNoOverlap, each in its own atomic transaction.
-    if (!outrightDropIds.empty()) {
-        if (!db.transaction()) {
-            Logger::Log("[DB] Error starting orphan drop transaction: " + db.lastError().text());
-            result.ok = false;
-            return result;
-        }
-
-        QSqlQuery dropQuery(db);
-        dropQuery.prepare("DELETE FROM durations WHERE id = :id AND is_finalized = 0");
-        for (long long id : outrightDropIds) {
-            dropQuery.bindValue(":id", static_cast<qlonglong>(id));
-            if (!dropQuery.exec()) {
-                Logger::Log("[DB] Error dropping orphan row: " + dropQuery.lastError().text());
-                db.rollback();
-                result.ok = false;
-                return result;
-            }
-        }
-
-        if (!db.commit()) {
-            Logger::Log("[DB] Error committing orphan drop transaction: " + db.lastError().text());
-            db.rollback();
+    // Malformed rows: logged-only count (StartupRecoveryResult does not
+    // expose it -- this is store-internal cleanup, not a recovery policy
+    // decision).
+    for (long long id : malformedIds) {
+        dropQuery.bindValue(":id", static_cast<qlonglong>(id));
+        if (!dropQuery.exec()) {
+            Logger::Log("[DB] Error deleting malformed orphan row: " + dropQuery.lastError().text());
             result.ok = false;
             return result;
         }
     }
+    result.malformed_deleted = static_cast<int>(malformedIds.size());
+
+    // Policy drops supplied by the caller (too-short/stale/future/A4 discard-forced).
+    for (long long id : policyDropIds) {
+        dropQuery.bindValue(":id", static_cast<qlonglong>(id));
+        if (!dropQuery.exec()) {
+            Logger::Log("[DB] Error dropping orphan row: " + dropQuery.lastError().text());
+            result.ok = false;
+            return result;
+        }
+    }
+    result.policy_dropped = policyDropIds;
 
     for (const auto& orphan : orphansToFinalize) {
         const QDateTime startUtc = orphan.startTime.toUTC();
         const QDateTime endUtc   = orphan.endTime.toUTC();
-        const FinalizeResult finalizeResult = finalizeIfNoOverlap(orphan.id, startUtc, endUtc);
+        const FinalizeResult finalizeResult = finalizeOrOverlapWithinOpenTransaction(orphan.id, startUtc, endUtc);
         switch (finalizeResult.outcome) {
         case FinalizeOutcome::Finalized:
             result.finalized.push_back(orphan.id);
             break;
         case FinalizeOutcome::OverlapRejected:
-        case FinalizeOutcome::Missing:
-            result.dropped.push_back(orphan.id);
+            // R08-002: an overlap-rejected orphan is now physically deleted
+            // (transactionally, as part of this same disposition) instead of
+            // being left is_finalized=0 to recur on every future launch.
+            dropQuery.bindValue(":id", static_cast<qlonglong>(orphan.id));
+            if (!dropQuery.exec()) {
+                Logger::Log("[DB] Error deleting overlap-rejected orphan row: " + dropQuery.lastError().text());
+                result.ok = false;
+                return result;
+            }
+            result.policy_dropped.push_back(orphan.id);
             break;
+        case FinalizeOutcome::Missing:
+            Logger::Log(QString("[DB] recoverStartupCheckpoints: internal error -- orphan row %1 vanished during recovery").arg(orphan.id));
+            result.ok = false;
+            return result;
         case FinalizeOutcome::Error:
             // A real SQL/transaction failure is not a policy decision: it must
             // not be silently reported as a dropped row. Mark reconciliation
-            // unsuccessful so the caller preserves the clean-shutdown marker.
-            Logger::Log(QString("[DB] finalizeIfNoOverlap failed for orphan row %1: ").arg(orphan.id) + finalizeResult.errorMessage);
+            // unsuccessful and stop -- the caller rolls back the ENTIRE
+            // disposition, including drops already applied above.
+            Logger::Log(QString("[DB] finalizeOrOverlap failed for orphan row %1: ").arg(orphan.id) + finalizeResult.errorMessage);
             result.ok = false;
-            break;
+            return result;
         }
     }
 
@@ -1694,32 +1745,19 @@ std::optional<SqliteSessionStore::MarkerResult> SqliteSessionStore::readLastClea
     return MarkerResult { {}, MarkerResult::Status::NotFound };
 }
 
-bool SqliteSessionStore::deleteLastCleanShutdownMarker()
+/**
+ * Deletes the clean-shutdown marker row (R08-001). Assumes the caller
+ * already holds an open transaction; does not begin, commit, or roll back --
+ * marker consumption is folded into recoverStartupCheckpoints()' single
+ * atomic disposition so a later failure in that same transaction correctly
+ * un-deletes it too.
+ */
+bool SqliteSessionStore::deleteMarkerRow()
 {
-    QMutexLocker locker(&db_mutex_);
-
-    if (!ensureOpen()) {
-        return false;
-    }
-
-    if (!db.transaction()) {
-        return false;
-    }
-
     QSqlQuery deleteQuery(db);
     deleteQuery.prepare("DELETE FROM app_settings WHERE key = :key");
     deleteQuery.bindValue(":key", QString::fromLatin1(kLastCleanShutdownKey));
-    if (!deleteQuery.exec()) {
-        db.rollback();
-        return false;
-    }
-
-    if (!db.commit()) {
-        db.rollback();
-        return false;
-    }
-
-    return true;
+    return deleteQuery.exec();
 }
 
 /**
@@ -1761,64 +1799,49 @@ std::optional<std::vector<SegmentId>> SqliteSessionStore::loadDiscardIntents()
 }
 
 /**
- * Clears resolved discard intents (A4/R05-001). Best-effort: a failure here
- * is logged only -- a leftover tombstone is safely re-resolved as a no-op on
- * the next recovery, since it never matches a still-live row by then.
- */
-void SqliteSessionStore::clearDiscardIntents(const std::vector<SegmentId>& ids)
-{
-    QMutexLocker locker(&db_mutex_);
-
-    if (ids.empty()) {
-        return;
-    }
-
-    QSqlQuery q(db);
-    q.prepare("DELETE FROM discard_intents WHERE segment_id = :id");
-    for (const auto& id : ids) {
-        q.bindValue(":id", id.toString());
-        if (!q.exec()) {
-            Logger::Log("[DB] Warning: failed to clear discard intent for " + id.toString()
-                        + ": " + q.lastError().text());
-        }
-    }
-}
-
-/**
- * Startup checkpoint recovery.
+ * Startup checkpoint recovery (B2/R08-001..003,005, R05-004, R05-001).
  *
- * Consumes the last-clean-shutdown marker, loads unfinalized checkpoint rows,
- * applies the durable-discard-intent (A4/R05-001), too-short (<1 s), stale
- * (>24 h), and overlap policies, finalizes qualifying rows, and decides
- * whether the user needs to be notified.
+ * Loads and classifies every unfinalized checkpoint row and every durable
+ * discard intent (A4) BEFORE any externally visible mutation, then applies
+ * malformed-row deletion, policy drops (too-short <1s / stale >24h /
+ * future-dated / A4 discard-forced), overlap-guarded finalization (deleting
+ * overlap-rejected rows instead of leaving them to recur every launch), and
+ * clean-marker consumption all within ONE transaction. A failure at any
+ * mutation stage rolls back that entire transaction, so no partial
+ * disposition can ever be reported as either success or (falsely) as a
+ * "dropped" row -- and the marker is preserved.
  *
- * All internal mechanics (row ids, finalize/drop lists, marker timestamps) stay
- * inside this method.  TimeTracker receives only domain facts via StartupRecoveryResult.
+ * All internal mechanics (row ids, marker timestamps) stay inside this
+ * method. TimeTracker receives only domain facts via StartupRecoveryResult,
+ * whose counts describe exactly what this transaction committed.
  */
 StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateTime& now)
 {
-    StartupRecoveryResult result;
+    QMutexLocker locker(&db_mutex_);
 
-    // Read the marker first (without deleting it).  If the read fails, do not
+    if (history_days_to_keep_ == 0) {
+        return StartupRecoveryResult::disabled();
+    }
+
+    // ---- Phase 1: read-only load and classification (no mutation yet) ----
+
+    // Read the marker first (without deleting it). If the read fails, do not
     // reconcile — DB state is unknown and finalising rows could conflict with
-    // in-progress data.  The marker is only deleted after reconciliation succeeds
-    // so that ok==false never leaves the store in a mutated state.
+    // in-progress data. The marker is only deleted inside the recovery
+    // transaction below, so a failure here never leaves the store mutated.
     const std::optional<MarkerResult> markerResult = readLastCleanShutdownMarker();
     if (markerResult.has_value() && markerResult->status == MarkerResult::Status::Error) {
         Logger::Log("[DB] recoverStartupCheckpoints: marker read failed — skipping orphan reconciliation");
-        result.ok = false;
-        return result;
+        return StartupRecoveryResult::failure(SessionStoreResult::TransientError, "Failed to read clean-shutdown marker");
     }
-    // When markerResult is nullopt (history disabled), loadUnfinalizedCheckpoints()
-    // returns an empty deque (disabled is a clean no-op), so reconciliation is a safe no-op.
 
-    const std::optional<std::deque<OrphanCheckpoint>> orphansOpt = loadUnfinalizedCheckpoints();
+    const std::optional<OrphanLoadResult> orphansOpt = loadUnfinalizedCheckpoints();
     if (!orphansOpt.has_value()) {
         Logger::Log("[DB] recoverStartupCheckpoints: orphan load failed — marker preserved, no reconciliation");
-        result.ok = false;
-        return result;
+        return StartupRecoveryResult::failure(SessionStoreResult::TransientError, "Failed to load unfinalized checkpoints");
     }
-    const std::deque<OrphanCheckpoint>& orphans = *orphansOpt;
+    const std::deque<OrphanCheckpoint>& orphans = orphansOpt->valid;
+    const std::vector<long long>& malformedIds = orphansOpt->malformedIds;
 
     // A4 (R05-001): a durable discard intent wins over ordinary orphan
     // policy. It may claim only a matching UNFINALIZED row (never a
@@ -1828,33 +1851,20 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
     const std::optional<std::vector<SegmentId>> intentsOpt = loadDiscardIntents();
     if (!intentsOpt.has_value()) {
         Logger::Log("[DB] recoverStartupCheckpoints: discard-intent load failed — marker preserved, no reconciliation");
-        result.ok = false;
-        return result;
+        return StartupRecoveryResult::failure(SessionStoreResult::TransientError, "Failed to load discard intents");
     }
     std::vector<SegmentId> unmatchedIntents = *intentsOpt;
 
-    if (orphans.empty()) {
-        // No unfinalized rows at all: any leftover discard intents cannot
-        // match anything (already deleted, or never existed) -- resolve them
-        // so they don't linger as unresolvable work.
-        clearDiscardIntents(unmatchedIntents);
-        // No orphans: delete the marker (clean state) and return.
-        if (markerResult.has_value()) {
-            deleteLastCleanShutdownMarker();
-        }
-        return result;
-    }
-
     // Partition orphans whose segment_id has a durable discard intent: these
-    // are force-dropped (outright, bypassing overlap policy) regardless of
-    // duration/age, and never contribute to recovered_seconds or notification.
-    std::vector<long long> forcedDropIds;
+    // are force-dropped (outright, bypassing overlap/age policy) regardless
+    // of duration/age, and never contribute to recovered_msec or notification.
+    std::vector<long long> policyDropIds;
     std::vector<SegmentId> resolvedIntents;
     std::deque<OrphanCheckpoint> remainingOrphans;
     for (const auto& orphan : orphans) {
         auto it = std::find(unmatchedIntents.begin(), unmatchedIntents.end(), orphan.segment_id);
         if (it != unmatchedIntents.end()) {
-            forcedDropIds.push_back(orphan.id);
+            policyDropIds.push_back(orphan.id);
             resolvedIntents.push_back(orphan.segment_id);
             unmatchedIntents.erase(it);
         } else {
@@ -1867,8 +1877,6 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
     resolvedIntents.insert(resolvedIntents.end(), unmatchedIntents.begin(), unmatchedIntents.end());
 
     std::vector<OrphanCheckpoint> toFinalize;
-    std::vector<long long> dropIds = forcedDropIds;
-
     for (const auto& orphan : remainingOrphans) {
         const bool tooShort = orphan.duration < kMinRecoverableOrphanDurationMs;
         const bool stale = orphan.endTime.isValid() && (orphan.endTime.msecsTo(now) > kOrphanStaleAgeMs);
@@ -1878,36 +1886,82 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
         const bool futureDated = orphan.endTime.isValid() && (now.msecsTo(orphan.endTime) > kOrphanFutureSlackMs);
 
         if (tooShort || stale || futureDated) {
-            dropIds.push_back(orphan.id);
+            policyDropIds.push_back(orphan.id);
         } else {
             toFinalize.push_back(orphan);
         }
     }
 
-    ReconcileResult reconcile = reconcileUnfinalizedCheckpoints(toFinalize, dropIds);
+    // ---- Phase 2: one atomic transaction for the entire disposition ----
+
+    const bool hasMarkerToConsume = markerResult.has_value() && markerResult->status == MarkerResult::Status::Found;
+    const bool hasWorkToDo = !malformedIds.empty() || !policyDropIds.empty() || !toFinalize.empty()
+        || !resolvedIntents.empty() || hasMarkerToConsume;
+
+    if (!hasWorkToDo) {
+        return StartupRecoveryResult{};
+    }
+
+    if (!ensureOpen()) {
+        Logger::Log("[DB] recoverStartupCheckpoints: could not open DB for recovery transaction");
+        return StartupRecoveryResult::failure(SessionStoreResult::FatalError, "DB connection could not be opened");
+    }
+
+    if (!db.transaction()) {
+        const QString err = db.lastError().text();
+        Logger::Log("[DB] recoverStartupCheckpoints: could not start recovery transaction: " + err);
+        return StartupRecoveryResult::failure(SessionStoreResult::TransientError, "Failed to start recovery transaction: " + err);
+    }
+
+    ReconcileResult reconcile = reconcileUnfinalizedCheckpoints(toFinalize, policyDropIds, malformedIds);
     if (!reconcile.ok) {
-        Logger::Log("[DB] recoverStartupCheckpoints: reconciliation transaction failed");
-        result.ok = false;
-        return result;
+        Logger::Log("[DB] recoverStartupCheckpoints: reconciliation failed — rolling back entire disposition");
+        db.rollback();
+        return StartupRecoveryResult::failure(SessionStoreResult::TransientError, "Startup recovery reconciliation failed");
     }
 
-    // Reconciliation succeeded: the force-dropped rows are gone (or never
-    // existed), so it is now safe to resolve their tombstones.
-    clearDiscardIntents(resolvedIntents);
-
-    // Reconciliation succeeded: now it is safe to consume the marker.
-    if (markerResult.has_value()) {
-        deleteLastCleanShutdownMarker();
+    // Resolve discard intents within the same transaction.
+    if (!resolvedIntents.empty()) {
+        QSqlQuery clearQuery(db);
+        clearQuery.prepare("DELETE FROM discard_intents WHERE segment_id = :id");
+        for (const auto& id : resolvedIntents) {
+            clearQuery.bindValue(":id", id.toString());
+            if (!clearQuery.exec()) {
+                Logger::Log("[DB] recoverStartupCheckpoints: failed to clear discard intent: " + clearQuery.lastError().text());
+                db.rollback();
+                return StartupRecoveryResult::failure(SessionStoreResult::TransientError, "Failed to resolve discard intent");
+            }
+        }
     }
 
+    // Consume the marker within the same transaction (R08-001): its deletion
+    // now shares fate with every row mutation above instead of being a
+    // fire-and-forget call whose result was ignored.
+    if (hasMarkerToConsume && !deleteMarkerRow()) {
+        Logger::Log("[DB] recoverStartupCheckpoints: failed to consume clean-shutdown marker: " + db.lastError().text());
+        db.rollback();
+        return StartupRecoveryResult::failure(SessionStoreResult::TransientError, "Failed to consume clean-shutdown marker");
+    }
+
+    if (!db.commit()) {
+        const QString err = db.lastError().text();
+        Logger::Log("[DB] recoverStartupCheckpoints: commit failed: " + err);
+        db.rollback();
+        return StartupRecoveryResult::failure(SessionStoreResult::TransientError, "Failed to commit recovery transaction: " + err);
+    }
+
+    // ---- Committed: build the truthful public result from what was mutated ----
+
+    StartupRecoveryResult result;
     result.finalized_count = static_cast<int>(reconcile.finalized.size());
-    result.dropped_count   = static_cast<int>(dropIds.size()) + static_cast<int>(reconcile.dropped.size());
+    result.policy_dropped_count = static_cast<int>(reconcile.policy_dropped.size());
 
-    // Count seconds only for rows the store actually finalized.
+    // Accumulate exact milliseconds only for rows the store actually
+    // finalized (R08-005: no per-row truncation, no seconds conversion).
     for (const auto& orphan : toFinalize) {
         if (std::find(reconcile.finalized.begin(), reconcile.finalized.end(), orphan.id)
                 != reconcile.finalized.end()) {
-            result.recovered_seconds += orphan.duration / 1000;
+            result.recovered_msec += orphan.duration;
         }
     }
 
@@ -1943,11 +1997,11 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
         result.notify_user = showNotification;
     }
 
-    Logger::Log(QString("[DB] Startup checkpoint recovery: finalized=%1, dropped=%2, overlap_rejected=%3, recovered_seconds=%4")
+    Logger::Log(QString("[DB] Startup checkpoint recovery: finalized=%1, policy_dropped=%2, malformed_deleted=%3, recovered_msec=%4")
         .arg(reconcile.finalized.size())
-        .arg(dropIds.size())
-        .arg(reconcile.dropped.size())
-        .arg(result.recovered_seconds));
+        .arg(reconcile.policy_dropped.size())
+        .arg(reconcile.malformed_deleted)
+        .arg(result.recovered_msec));
 
     return result;
 }
