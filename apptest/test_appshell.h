@@ -31,6 +31,15 @@ private slots:
     // OS-forced (Direct) shutdown failure must show no modal at all.
     void test_forced_os_shutdown_failure_shows_no_modal();
 
+    // C1 (R15-001): startup must fail closed whenever ownership is not
+    // established, while QLockFile still recovers a stale lock.
+    void test_lock_decision_maps_all_tryLock_failures();
+    void test_production_permission_failure_fails_closed();
+    void test_production_start_reclaims_stale_lock();
+    void test_production_active_owner_survives_old_lock_timestamp();
+    void test_production_loser_cannot_mutate_database_with_active_owner();
+    void test_two_simultaneous_starts_have_one_owner_and_one_loser();
+
     // B2 (R08-001..003,005, R05-004): runStartupRecovery()'s Retry/Quit loop,
     // exercised before any MainWin/ContentWidget exists -- proving no
     // tracking is structurally possible before recovery succeeds.

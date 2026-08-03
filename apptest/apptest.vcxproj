@@ -67,12 +67,20 @@
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)qtest</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <!-- Project-relative rather than $(SolutionDir): apptest.vcxproj is not
+           a member of uTimer.sln, so SolutionDir is not reliably defined for
+           it. MSBuildProjectDirectory is always defined for any project.
+           .Replace('\','/') avoids emitting literal backslash-letter pairs
+           (e.g. \U, \u) that MSVC's preprocessor would otherwise parse as
+           (possibly invalid) universal-character-name escapes. -->
+      <PreprocessorDefinitions>UTIMER_PRODUCTION_BINARY="$(MSBuildProjectDirectory.Replace('\','/'))/../debug/uTimer.exe";%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)qtest</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <PreprocessorDefinitions>UTIMER_PRODUCTION_BINARY="$(MSBuildProjectDirectory.Replace('\','/'))/../release/uTimer.exe";%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|Win32'" Label="Configuration">
@@ -147,6 +155,7 @@
     <ClInclude Include="..\types.h" />
     <ClInclude Include="..\timeline.h" />
     <ClInclude Include="..\startuprecovery.h" />
+    <ClInclude Include="..\lockdecision.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Condition="Exists('$(QtMsBuild)\qt.targets')">

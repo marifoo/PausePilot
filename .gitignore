@@ -3,6 +3,7 @@ utimer.log
 user-settings.ini
 uTimer
 uTimer.sqlite
+uTimer.lock
 *.sqlite.*.backup
 *.durations.txt
 qtest/qtest

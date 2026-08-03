@@ -1,10 +1,12 @@
 #include <QApplication>
 #include <QDebug>
 #include <QEvent>
+#include <QGuiApplication>
 #include <QLockFile>
 #include <QMessageBox>
 #include <QStyleFactory>
 #include <QTimer>
+#include <cstdio>
 #ifdef Q_OS_LINUX
 #include <QLoggingCategory>
 #include <QSocketNotifier>
@@ -23,6 +25,7 @@
 #include "logger.h"
 #include "types.h"
 #include "startuprecovery.h"
+#include "lockdecision.h"
 
 #ifdef Q_OS_LINUX
 // Unix signal handling - safe pattern using socketpair
@@ -107,18 +110,32 @@ int main(int argc, char *argv[])
 	// reopen against a concurrently-written file) can corrupt the database.
 	// QLockFile also detects and clears a stale lock left by a crashed process,
 	// so a crash does not lock the user out permanently.
+	//
+	// Fail closed on every tryLock() failure (R15-001): the data directory
+	// (schema check, recovery, store writes, window construction -- all
+	// below this block) must only be touched once exclusive ownership is
+	// proven, not merely when the failure happens to look like "another
+	// instance is running". The diagnostic is always printed to stderr so a
+	// non-interactive session (no window manager, offscreen QPA, a service
+	// supervisor) still gets it and startup is never blocked waiting on a
+	// modal; the message box is shown in addition wherever a user is present
+	// to dismiss it.
 	QLockFile instanceLock(AppPaths::instanceLockFile());
 	if (!instanceLock.tryLock(100)) {
-		if (instanceLock.error() == QLockFile::LockFailedError) {
-			QMessageBox::critical(nullptr, "µTimer Already Running",
-				"Another instance of µTimer is already running.\n\n"
-				"Please close it before starting a new one.");
-			return 1;
-		}
-		// Any other error (e.g. the app directory is not writable) is not a
-		// second-instance conflict -- fall through and let the existing
-		// DB-writability check in checkSchemaOnStartup() report it accurately.
-		qWarning() << "Could not create instance lock file, error code:" << instanceLock.error();
+		const LockDecision::Outcome outcome = LockDecision::classify(instanceLock.error());
+		const QString text = LockDecision::message(outcome);
+
+		std::fprintf(stderr, "[LOCK] %s\n", text.toLocal8Bit().constData());
+		std::fflush(stderr);
+
+		// "minimal" has no user to dismiss a modal either (like "offscreen")
+		// but still creates windows, so QMessageBox::critical would block
+		// forever there instead of returning immediately.
+		const QString platform = QGuiApplication::platformName();
+		if (platform != "offscreen" && platform != "minimal")
+			QMessageBox::critical(nullptr, "µTimer", text);
+
+		return LockDecision::exitCode(outcome);
 	}
 
 	QTimer timer;

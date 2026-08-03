@@ -4,17 +4,135 @@
 #include "shutdowncoordinator.h"
 #include "timetracker.h"
 #include "startuprecovery.h"
+#include "lockdecision.h"
 #include <QtTest>
 #include <QApplication>
+#include <QDateTime>
+#include <QDir>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
 #include <QMessageBox>
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QPushButton>
 #include <QTimer>
 #include <functional>
 #include <memory>
+#ifdef Q_OS_UNIX
+#include <unistd.h>
+#endif
 
 using TestCommon::createSettingsFile;
 
 namespace {
+
+// The production binary's location is not derivable from this test binary's
+// own applicationDirPath() in a shadow build (a build directory separate
+// from the checkout): the two targets need not share a parent directory.
+// UTIMER_PRODUCTION_BINARY is injected by apptest.pro/apptest.vcxproj as an
+// absolute, checkout-relative path resolved at qmake/project time instead;
+// UTIMER_BIN lets the harness override it for a binary built elsewhere.
+QString productionExecutable()
+{
+    const QString overridePath = qEnvironmentVariable("UTIMER_BIN");
+    if (!overridePath.isEmpty())
+        return QDir::fromNativeSeparators(overridePath);
+    return QStringLiteral(UTIMER_PRODUCTION_BINARY);
+}
+
+// Names the exact resolved path a failed start attempted, so a bare Qt
+// "execve: No such file or directory" (which does not itself name a path)
+// can never appear unexplained -- notably for an apptest-only shadow build
+// with no sibling production binary.
+QString startFailureMessage(const QProcess& process)
+{
+    return QString("could not start production binary \"%1\" (%2); "
+                    "set UTIMER_BIN to override the resolved path")
+        .arg(productionExecutable(), process.errorString());
+}
+
+QProcessEnvironment productionEnvironment(const QString& dataDirectory)
+{
+    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+    environment.insert("QT_QPA_PLATFORM", "offscreen");
+    environment.insert("UTIMER_DATA_DIR", dataDirectory);
+    return environment;
+}
+
+bool startProduction(QProcess& process, const QString& dataDirectory)
+{
+    process.setProgram(productionExecutable());
+    process.setProcessEnvironment(productionEnvironment(dataDirectory));
+    process.start();
+    return process.waitForStarted(5000);
+}
+
+bool waitForFile(const QString& path, int timeoutMsec)
+{
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (elapsed.elapsed() < timeoutMsec) {
+        if (QFileInfo::exists(path))
+            return true;
+        QTest::qWait(20);
+    }
+    return QFileInfo::exists(path);
+}
+
+// Polls a QLockFile's first line (its PID field) until it names `pid`. Used
+// to prove a stale lock was actually reclaimed and rewritten by the new
+// owner, as opposed to merely still existing on disk (true from the very
+// first poll when the test itself wrote the seed file before starting the
+// process).
+bool waitForLockPid(const QString& path, qint64 pid, int timeoutMsec)
+{
+    const QByteArray expected = QByteArray::number(pid);
+    QElapsedTimer elapsed;
+    elapsed.start();
+    do {
+        QFile file(path);
+        if (file.open(QIODevice::ReadOnly)) {
+            if (file.readLine().trimmed() == expected)
+                return true;
+        }
+        QTest::qWait(20);
+    } while (elapsed.elapsed() < timeoutMsec);
+    return false;
+}
+
+bool stopProduction(QProcess& process)
+{
+    if (process.state() == QProcess::NotRunning)
+        return true;
+    process.terminate();
+    if (process.waitForFinished(5000))
+        return true;
+    process.kill();
+    return process.waitForFinished(5000);
+}
+
+struct ProcessGuard
+{
+    QProcess process;
+
+    ~ProcessGuard()
+    {
+        stopProduction(process);
+    }
+};
+
+bool waitForEither(QProcess& first, QProcess& second, int timeoutMsec)
+{
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (elapsed.elapsed() < timeoutMsec) {
+        if (first.state() == QProcess::NotRunning || second.state() == QProcess::NotRunning)
+            return true;
+        QTest::qWait(20);
+    }
+    return first.state() == QProcess::NotRunning || second.state() == QProcess::NotRunning;
+}
 
 /// Owning handle for a modal-click poller. Destroying it stops and destroys
 /// the QTimer, so a poller armed by one test can never survive into a later
@@ -368,4 +486,238 @@ void AppShellTest::test_forced_os_shutdown_failure_shows_no_modal()
     // Cleanup: resolve the payload so destruction finds no unresolved commit.
     fakeDb.commitSessionResult = SessionStoreResult::success();
     QVERIFY(tracker.drainForShutdown().clean());
+}
+
+void AppShellTest::test_lock_decision_maps_all_tryLock_failures()
+{
+    // Arrange
+    const QLockFile::LockError errors[] = {
+        QLockFile::LockFailedError,
+        QLockFile::PermissionError,
+        QLockFile::UnknownError
+    };
+
+    // Act / Assert
+    QCOMPARE(LockDecision::classify(errors[0]), LockDecision::Outcome::AnotherInstance);
+    QVERIFY(LockDecision::message(LockDecision::Outcome::AnotherInstance)
+                .contains("Another instance"));
+    QCOMPARE(LockDecision::exitCode(LockDecision::Outcome::AnotherInstance), 2);
+
+    for (int i = 1; i < 3; ++i) {
+        QCOMPARE(LockDecision::classify(errors[i]), LockDecision::Outcome::OwnershipUnknown);
+        QVERIFY(LockDecision::message(LockDecision::Outcome::OwnershipUnknown)
+                    .contains("ownership"));
+        QCOMPARE(LockDecision::exitCode(LockDecision::Outcome::OwnershipUnknown), 3);
+    }
+}
+
+// Covers only the "lock file cannot be created" half of R15-001's trigger.
+// The other half (the existing SQLite database remains accessible while the
+// lock cannot be created) would need the data directory unwritable for the
+// lock file but the database file within it still writable, which is not
+// reachable via a single directory permission without root.
+void AppShellTest::test_production_permission_failure_fails_closed()
+{
+#ifndef Q_OS_UNIX
+    QSKIP("filesystem permission subprocess coverage is Unix-specific");
+#else
+    // Arrange
+    if (geteuid() == 0)
+        QSKIP("root can bypass the directory permission under test");
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QVERIFY(QFile::setPermissions(tempDir.path(),
+                                  QFileDevice::ReadOwner | QFileDevice::ExeOwner
+                                  | QFileDevice::ReadGroup | QFileDevice::ExeGroup
+                                  | QFileDevice::ReadOther | QFileDevice::ExeOther));
+
+    // Act
+    ProcessGuard denied;
+    QVERIFY2(startProduction(denied.process, tempDir.path()),
+             qPrintable(startFailureMessage(denied.process)));
+    QVERIFY2(denied.process.waitForFinished(5000),
+             qPrintable(denied.process.errorString()));
+
+    // Assert
+    const QByteArray output = denied.process.readAllStandardError()
+        + denied.process.readAllStandardOutput();
+    const QString diagnostics = QString::fromLocal8Bit(output);
+    QCOMPARE(denied.process.exitStatus(), QProcess::NormalExit);
+    QCOMPARE(denied.process.exitCode(), 3);
+    QVERIFY2(diagnostics.contains("exclusive ownership"), output.constData());
+    QVERIFY(!QFileInfo::exists(QDir(tempDir.path()).filePath("uTimer.lock")));
+    QVERIFY(!QFileInfo::exists(QDir(tempDir.path()).filePath("uTimer.sqlite")));
+    QVERIFY(!QFileInfo::exists(QDir(tempDir.path()).filePath("user-settings.ini")));
+#endif
+}
+
+void AppShellTest::test_production_start_reclaims_stale_lock()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString lockPath = QDir(tempDir.path()).filePath("uTimer.lock");
+    // unlock() removes the seed file, so write a valid-looking stale payload
+    // directly instead of trying to read it after releasing the seed lock.
+    const QByteArray staleLockData =
+        // Empty host/host-id/boot-id fields make QLockFile use the local
+        // process check, where this deliberately nonexistent PID is stale.
+        "999999999\nuTimer\n\n\n\n";
+    QFile staleLock(lockPath);
+    QVERIFY(staleLock.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    QCOMPARE(staleLock.write(staleLockData), qint64(staleLockData.size()));
+    staleLock.close();
+
+    // Act
+    ProcessGuard owner;
+    QVERIFY2(startProduction(owner.process, tempDir.path()), qPrintable(startFailureMessage(owner.process)));
+    const bool databaseReady = waitForFile(QDir(tempDir.path()).filePath("uTimer.sqlite"), 5000);
+    const QByteArray ownerDiagnostics = owner.process.readAllStandardError()
+        + owner.process.readAllStandardOutput();
+    QVERIFY2(databaseReady, ownerDiagnostics.constData());
+
+    // Assert: the lock file's PID now names the new owner process, proving
+    // QLockFile actually reclaimed and rewrote the stale seed file above.
+    // waitForFile(lockPath, ...) cannot show this: this test wrote lockPath
+    // itself before the process ever started, so its mere existence is true
+    // on the very first poll regardless of whether reclaim happened.
+    QVERIFY2(waitForLockPid(lockPath, owner.process.processId(), 5000),
+             "production process did not reclaim the stale lock (PID unchanged)");
+    QVERIFY2(owner.process.state() == QProcess::Running,
+             qPrintable(owner.process.readAllStandardError()));
+}
+
+// Seeds press_start_button_on_app_start=false in the owner's settings file.
+// The default (true) makes MainWin::start() press Start, entering
+// Mode::Activity; LockStateWatcher then polls the real desktop session over
+// the inherited D-Bus address, and if the host happens to be locked,
+// timetracker.cpp writes a checkpoint a few hundred ms later. That is
+// designed behavior gated on Mode::Activity, not a defect, but it makes the
+// data directory's mutation depend on the host's desktop-lock state instead
+// of the loser under test. With autostart disabled, saveCheckpoint_locked()
+// and the ordinary checkpoint timer both stay inactive, so the owner's
+// database is provably static and a real byte comparison across the loser's
+// run is meaningful evidence, not a source of flakiness.
+void AppShellTest::test_production_active_owner_survives_old_lock_timestamp()
+{
+#ifndef Q_OS_UNIX
+    QSKIP("stale-lock threshold regression is Unix-specific");
+#else
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString lockPath = QDir(tempDir.path()).filePath("uTimer.lock");
+    const QString dbPath = QDir(tempDir.path()).filePath("uTimer.sqlite");
+    QSettings ownerSettings(createSettingsFile(tempDir.path(), 7), QSettings::IniFormat);
+    ownerSettings.setValue("uTimer/press_start_button_on_app_start", false);
+    ownerSettings.sync();
+
+    ProcessGuard owner;
+    QVERIFY2(startProduction(owner.process, tempDir.path()), qPrintable(startFailureMessage(owner.process)));
+    QVERIFY2(waitForFile(lockPath, 5000), "production owner did not acquire the lock");
+    QVERIFY2(waitForFile(dbPath, 5000), "production owner did not initialize the database");
+    QTest::qWait(150);
+    QFile dbBeforeFile(dbPath);
+    QVERIFY(dbBeforeFile.open(QIODevice::ReadOnly));
+    const QByteArray dbBefore = dbBeforeFile.readAll();
+    dbBeforeFile.close();
+
+    QFile oldLock(lockPath);
+    QVERIFY(oldLock.open(QIODevice::ReadWrite));
+    QVERIFY(oldLock.setFileTime(QDateTime::currentDateTime().addSecs(-60),
+                                QFileDevice::FileModificationTime));
+    oldLock.close();
+    QVERIFY(QFileInfo(lockPath).lastModified()
+            <= QDateTime::currentDateTime().addSecs(-30));
+
+    // Act
+    ProcessGuard loser;
+    QVERIFY2(startProduction(loser.process, tempDir.path()), qPrintable(startFailureMessage(loser.process)));
+    QVERIFY2(loser.process.waitForFinished(5000), qPrintable(loser.process.errorString()));
+
+    // Assert
+    const QByteArray loserOutput = loser.process.readAllStandardError()
+        + loser.process.readAllStandardOutput();
+    const QString loserStderr = QString::fromLocal8Bit(loserOutput);
+    QCOMPARE(loser.process.exitStatus(), QProcess::NormalExit);
+    QCOMPARE(loser.process.exitCode(), 2);
+    QVERIFY2(loserStderr.contains("Another instance"), loserOutput.constData());
+    QVERIFY(owner.process.state() == QProcess::Running);
+
+    QFile dbAfterFile(dbPath);
+    QVERIFY(dbAfterFile.open(QIODevice::ReadOnly));
+    const QByteArray dbAfter = dbAfterFile.readAll();
+    dbAfterFile.close();
+    QCOMPARE(dbAfter, dbBefore);
+#endif
+}
+
+void AppShellTest::test_production_loser_cannot_mutate_database_with_active_owner()
+{
+    // Arrange: press_start_button_on_app_start=false (see the comment above
+    // test_production_active_owner_survives_old_lock_timestamp) keeps the
+    // owner's database static so the byte comparison below is meaningful.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString dbPath = QDir(tempDir.path()).filePath("uTimer.sqlite");
+    QSettings ownerSettings(createSettingsFile(tempDir.path(), 7), QSettings::IniFormat);
+    ownerSettings.setValue("uTimer/press_start_button_on_app_start", false);
+    ownerSettings.sync();
+
+    ProcessGuard owner;
+    QVERIFY2(startProduction(owner.process, tempDir.path()), qPrintable(startFailureMessage(owner.process)));
+    QVERIFY2(waitForFile(QDir(tempDir.path()).filePath("uTimer.lock"), 5000),
+             "production owner did not acquire the lock");
+    QVERIFY2(waitForFile(dbPath, 5000), "production owner did not initialize the database");
+    QTest::qWait(150);
+    QFile dbBeforeFile(dbPath);
+    QVERIFY(dbBeforeFile.open(QIODevice::ReadOnly));
+    const QByteArray dbBefore = dbBeforeFile.readAll();
+    dbBeforeFile.close();
+
+    // Act
+    ProcessGuard loser;
+    QVERIFY2(startProduction(loser.process, tempDir.path()), qPrintable(startFailureMessage(loser.process)));
+    QVERIFY2(loser.process.waitForFinished(5000), qPrintable(loser.process.errorString()));
+
+    // Assert
+    const QByteArray loserOutput = loser.process.readAllStandardError()
+        + loser.process.readAllStandardOutput();
+    const QString loserStderr = QString::fromLocal8Bit(loserOutput);
+    QCOMPARE(loser.process.exitStatus(), QProcess::NormalExit);
+    QCOMPARE(loser.process.exitCode(), 2);
+    QVERIFY2(loserStderr.contains("Another instance"), loserOutput.constData());
+    QVERIFY(owner.process.state() == QProcess::Running);
+
+    QFile dbAfterFile(dbPath);
+    QVERIFY(dbAfterFile.open(QIODevice::ReadOnly));
+    const QByteArray dbAfter = dbAfterFile.readAll();
+    dbAfterFile.close();
+    QCOMPARE(dbAfter, dbBefore);
+}
+
+void AppShellTest::test_two_simultaneous_starts_have_one_owner_and_one_loser()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    ProcessGuard first;
+    ProcessGuard second;
+    QVERIFY2(startProduction(first.process, tempDir.path()), qPrintable(startFailureMessage(first.process)));
+    QVERIFY2(startProduction(second.process, tempDir.path()), qPrintable(startFailureMessage(second.process)));
+
+    // Act
+    QVERIFY2(waitForEither(first.process, second.process, 5000), "neither simultaneous child exited");
+
+    // Assert
+    QProcess* loser = first.process.state() == QProcess::NotRunning
+        ? &first.process : &second.process;
+    QProcess* owner = loser == &first.process ? &second.process : &first.process;
+    const QByteArray loserOutput = loser->readAllStandardError()
+        + loser->readAllStandardOutput();
+    const QString loserStderr = QString::fromLocal8Bit(loserOutput);
+    QVERIFY2(loser->exitStatus() == QProcess::NormalExit, qPrintable(loserStderr));
+    QCOMPARE(loser->exitCode(), 2);
+    QVERIFY2(loserStderr.contains("Another instance"), loserOutput.constData());
+    QVERIFY(owner->state() == QProcess::Running);
 }

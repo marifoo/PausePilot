@@ -13,6 +13,22 @@ linux {
 
 INCLUDEPATH += $$PWD/.. $$PWD/../qtest
 
+# Absolute path to the production binary. uTimer.pro is apptest.pro's sibling
+# directory, and qmake places a target's output directly under that target's
+# own build directory, so the production binary lands one directory above
+# apptest's own build directory ($$OUT_PWD) for both an in-tree build
+# ($$OUT_PWD == $$PWD, so this is $$PWD/..) and a whole-project shadow build
+# whose shadow tree mirrors the source tree's apptest/ subdirectory. An
+# apptest-only shadow build (no sibling uTimer build) correctly resolves to a
+# path with no binary present; UTIMER_BIN lets the harness override it at
+# test run time for a binary built elsewhere.
+UTIMER_PRODUCTION_DIR = $$absolute_path($$OUT_PWD/..)
+UTIMER_PRODUCTION_BIN = $$UTIMER_PRODUCTION_DIR/uTimer
+win32: UTIMER_PRODUCTION_BIN = $$UTIMER_PRODUCTION_DIR/uTimer.exe
+# shell_quote() is required so a checkout path containing a space still
+# produces a single valid -D switch (a naive \" ... \" is stripped by qmake).
+DEFINES += UTIMER_PRODUCTION_BINARY=$$shell_quote(\"$$UTIMER_PRODUCTION_BIN\")
+
 SOURCES += \
     main.cpp \
     test_appshell.cpp \
@@ -56,4 +72,5 @@ HEADERS += \
     $$PWD/../types.h \
     $$PWD/../historydialog.h \
     $$PWD/../timeline.h \
-    $$PWD/../startuprecovery.h
+    $$PWD/../startuprecovery.h \
+    $$PWD/../lockdecision.h

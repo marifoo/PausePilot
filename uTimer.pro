@@ -18,7 +18,8 @@ HEADERS = \
    $$PWD/historydialog.h \
    $$PWD/historyeditsession.h \
    $$PWD/timeline.h \
-   $$PWD/startuprecovery.h
+   $$PWD/startuprecovery.h \
+   $$PWD/lockdecision.h
 
 SOURCES = \
    $$PWD/contentwidget.cpp \
