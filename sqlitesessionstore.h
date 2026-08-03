@@ -103,6 +103,15 @@ private:
         QDateTime timestamp;  // valid only when status == Found
         Status status = Status::NotFound;
     };
+    // C2 (R07-001 round 2): commitOrRollback()'s result. `committed` is the
+    // single source of truth callers must branch on -- db.commit() can
+    // return false without ever calling setLastError(), so an empty
+    // errorMessage must never be read as success. errorMessage is populated
+    // only when committed is false.
+    struct CommitOutcome {
+        bool committed = false;
+        QString errorMessage;
+    };
 
     QSqlDatabase db;
     uint history_days_to_keep_;
@@ -114,6 +123,34 @@ private:
     // step fail after the tombstone write has already committed, so tests can
     // prove the discard intent survives that failure durably.
     bool force_discard_row_delete_failure_dbg_ = false;
+    // C2 (R07-001) test seam: makes the next commitOrRollback() call treat
+    // COMMIT as having failed, without touching the real connection, so
+    // tests can prove the resulting rollback restores the connection to a
+    // healthy, autocommit-ready state. Only consumed if control reaches
+    // commitOrRollback(); if the caller's own operation fails earlier (e.g.
+    // an empty id, an UPDATE/INSERT error), the flag stays armed and trips
+    // the NEXT commit on this store instance instead. Self-resetting once
+    // consumed.
+    bool force_commit_failure_dbg_ = false;
+    // C2 (R07-001) test seam: combined with force_commit_failure_dbg_, makes
+    // the rollback that follows the injected commit failure ALSO genuinely
+    // fail -- without calling db.rollback() or closing the connection itself,
+    // so the real transaction is left genuinely open and it is
+    // commitOrRollback()'s own cleanup (not this seam) that must close it.
+    // Same "only consumed if reached" caveat as above: it is checked only
+    // after a commit failure, so if armed while no commit fails it stays
+    // armed for the next one.
+    bool force_rollback_failure_dbg_ = false;
+    // C2 (R07-001 round 2) test seam: closes the real connection immediately
+    // before commitOrRollback() calls the real db.commit(), reproducing the
+    // "commit after close" failure mode observed empirically on Qt 5.15.18:
+    // QSqlDatabase::commit()/QSQLiteDriver::commitTransaction() bail on an
+    // unopened driver and return false WITHOUT ever calling setLastError(),
+    // so db.lastError().text() is genuinely empty -- unlike
+    // force_commit_failure_dbg_, which fakes a non-empty message. Proves
+    // callers must branch on CommitOutcome::committed, not on
+    // errorMessage.isEmpty(). Self-resetting once consumed.
+    bool force_commit_close_before_dbg_ = false;
 #endif
 
     // Guards all public entry points so that no two operations can interleave.
@@ -139,6 +176,22 @@ private:
     void performRetentionCleanup();
     void pruneOldBackups(int keepCount = 5);
     bool insertRows(QSqlQuery& query, const std::deque<TimeDuration>& rows);
+    // C2 (R07-001): commits the currently open transaction, rolling back on
+    // any failure -- including the injected debug faults above -- so a
+    // failed COMMIT never leaves the long-lived connection inside its
+    // transaction. If the rollback itself also fails, closes the connection
+    // so the next ensureOpen() reconnects clean instead of every later
+    // db.transaction() failing forever. Returns committed=true on success;
+    // otherwise committed=false and errorMessage carries the primary
+    // commit-failure message, captured before rollback (mirroring
+    // finalizeIfNoOverlap's pattern) so a rollback failure is logged
+    // separately instead of overwriting the caller-visible error. Callers
+    // MUST branch on `committed`, not on errorMessage.isEmpty(): db.commit()
+    // can return false without calling setLastError() (e.g. commit after the
+    // connection was closed), which would otherwise read as success.
+    // logContext names the caller for the log line, matching each site's
+    // pre-existing message text.
+    CommitOutcome commitOrRollback(const QString& logContext);
 
     // Startup recovery helpers (implementation details of recoverStartupCheckpoints).
     // B2: loads AND classifies every unfinalized row before any externally
@@ -245,6 +298,28 @@ public:
     /// Forces discardCheckpoint()'s row-delete step to fail, for testing that
     /// the discard intent (tombstone) survives durably despite the failure.
     void setForceDiscardRowDeleteFailure_dbg(bool v) { force_discard_row_delete_failure_dbg_ = v; }
+
+    /// Forces the next commitOrRollback() call to treat COMMIT as failed and
+    /// roll back, without touching the real connection. Only consumed once
+    /// control reaches commitOrRollback() -- arm it immediately before a
+    /// call expected to reach commit, or it stays armed and affects a later
+    /// one instead. Self-resetting once consumed.
+    void setForceCommitFailure_dbg(bool v) { force_commit_failure_dbg_ = v; }
+
+    /// Combined with setForceCommitFailure_dbg(true): makes the rollback
+    /// that follows also genuinely fail, without calling db.rollback() or
+    /// closing the connection itself -- the real transaction is left open
+    /// for commitOrRollback()'s own cleanup to close. Only consumed once a
+    /// commit failure is reached; same arming caveat as above.
+    void setForceRollbackFailure_dbg(bool v) { force_rollback_failure_dbg_ = v; }
+
+    /// Forces the next commitOrRollback() call to close the real connection
+    /// immediately before calling the real db.commit(), so that call
+    /// genuinely fails with an EMPTY db.lastError().text() -- reproducing
+    /// the "commit after close" failure mode that force_commit_failure_dbg_
+    /// (which fakes a non-empty message) cannot. Only consumed once control
+    /// reaches commitOrRollback(); same arming caveat as the seams above.
+    void setForceCommitCloseBefore_dbg(bool v) { force_commit_close_before_dbg_ = v; }
 #endif // QT_NO_DEBUG
 
 };

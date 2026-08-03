@@ -709,6 +709,66 @@ bool SqliteSessionStore::insertRows(QSqlQuery& query, const std::deque<TimeDurat
     return true;
 }
 
+// C2 (R07-001): see header for the invariant this enforces. Assumes the
+// caller already holds an open transaction and has performed its mutation;
+// never begins one. There is exactly one commit path and one
+// rollback/close path below so an injected test fault falls through the
+// same code a real failure would.
+SqliteSessionStore::CommitOutcome SqliteSessionStore::commitOrRollback(const QString& logContext)
+{
+    bool committed;
+    QString err;
+#ifndef QT_NO_DEBUG
+    if (force_commit_failure_dbg_) {
+        force_commit_failure_dbg_ = false;
+        committed = false;
+        err = "injected commit failure (test)";
+    } else
+#endif
+    {
+#ifndef QT_NO_DEBUG
+        if (force_commit_close_before_dbg_) {
+            force_commit_close_before_dbg_ = false;
+            db.close();
+        }
+#endif
+        committed = db.commit();
+        if (!committed) {
+            err = db.lastError().text();
+        }
+    }
+    if (committed) {
+        return CommitOutcome{true, QString()};
+    }
+
+    Logger::Log("[DB] " + logContext + ": " + err);
+
+    bool rolledBack;
+    QString rollbackErr;
+#ifndef QT_NO_DEBUG
+    if (force_rollback_failure_dbg_) {
+        force_rollback_failure_dbg_ = false;
+        rolledBack = false;
+        rollbackErr = "injected rollback failure (test)";
+    } else
+#endif
+    {
+        rolledBack = db.rollback();
+        if (!rolledBack) {
+            rollbackErr = db.lastError().text();
+        }
+    }
+    if (!rolledBack) {
+        Logger::Log("[DB] Warning: rollback after commit failure also failed: " + rollbackErr);
+        // The connection cannot be trusted to be outside the transaction
+        // anymore -- close it so the next ensureOpen() reconnects clean
+        // rather than leaving every subsequent db.transaction() failing
+        // forever (R07-001).
+        closeConnection();
+    }
+    return CommitOutcome{false, err};
+}
+
 bool SqliteSessionStore::saveDurations(const std::deque<TimeDuration>& durations, TransactionMode mode,
                                      const std::vector<QString>& removedSegmentIds)
 {
@@ -782,10 +842,7 @@ bool SqliteSessionStore::saveDurations(const std::deque<TimeDuration>& durations
     if (!insertRows(query, durations))
         return false;
 
-    bool commitSuccessful = db.commit();
-    if (!commitSuccessful) {
-        Logger::Log("[DB] Error committing save transaction: " + db.lastError().text());
-    }
+    const bool commitSuccessful = commitOrRollback("Error committing save transaction").committed;
 
 #ifndef QT_NO_DEBUG
     if (commitSuccessful) {
@@ -853,9 +910,9 @@ SessionStoreResult SqliteSessionStore::replaceAll(const Timeline& history, const
     if (!insertRows(unfinalizedInsert, currentSessionDurations))
         return SessionStoreResult::transient("Failed to insert session rows");
 
-    if (!db.commit()) {
-        Logger::Log("[DB] Error committing replace transaction: " + db.lastError().text());
-        return SessionStoreResult::transient("Failed to commit replace transaction: " + db.lastError().text());
+    const CommitOutcome commitResult = commitOrRollback("Error committing replace transaction");
+    if (!commitResult.committed) {
+        return SessionStoreResult::transient("Failed to commit replace transaction: " + commitResult.errorMessage);
     }
 
 #ifndef QT_NO_DEBUG
@@ -1080,11 +1137,11 @@ SessionStoreResult SqliteSessionStore::saveCheckpoint(DurationType type, const Q
         return SessionStoreResult::transient("Failed to update checkpoint: " + updateQuery.lastError().text());
     }
 
+    QString commitErrorMsg;
     if (updateQuery.numRowsAffected() > 0) {
-        success = db.commit();
-        if (!success) {
-            Logger::Log("[DB] Error committing checkpoint update: " + db.lastError().text());
-        }
+        const CommitOutcome commitResult = commitOrRollback("Error committing checkpoint update");
+        success = commitResult.committed;
+        commitErrorMsg = commitResult.errorMessage;
     } else {
         QSqlQuery insertQuery(db);
         insertQuery.prepare(
@@ -1118,10 +1175,9 @@ SessionStoreResult SqliteSessionStore::saveCheckpoint(DurationType type, const Q
             return SessionStoreResult::transient("Failed to insert checkpoint: " + insertQuery.lastError().text());
         }
 
-        success = db.commit();
-        if (!success) {
-            Logger::Log("[DB] Error committing checkpoint insert: " + db.lastError().text());
-        }
+        const CommitOutcome commitResult = commitOrRollback("Error committing checkpoint insert");
+        success = commitResult.committed;
+        commitErrorMsg = commitResult.errorMessage;
     }
 
 #ifndef QT_NO_DEBUG
@@ -1132,7 +1188,7 @@ SessionStoreResult SqliteSessionStore::saveCheckpoint(DurationType type, const Q
 
     return success
         ? SessionStoreResult::success()
-        : SessionStoreResult::transient("Checkpoint transaction commit failed: " + db.lastError().text());
+        : SessionStoreResult::transient("Checkpoint transaction commit failed: " + commitErrorMsg);
 }
 
 /**

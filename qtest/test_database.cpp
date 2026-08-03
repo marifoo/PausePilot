@@ -402,8 +402,10 @@ void DatabaseTest::test_database_transaction_rollback_on_replace_failure()
     auto loaded = manager.loadDurations();
     QCOMPARE(loaded.size(), (size_t)2);
     
-    // Make database read-only after DELETE succeeds but before INSERT
-    // This simulates partial transaction failure
+    // Make database read-only before entering saveDurations (R07-004): this
+    // fails the first write inside the transaction (the Replace-mode DELETE),
+    // not a boundary between DELETE and INSERT -- nothing changes permissions
+    // mid-transaction here.
     QFile dbFile(db_path_);
     QVERIFY(dbFile.setPermissions(QFile::ReadOwner | QFile::ReadUser));
     
@@ -3733,5 +3735,390 @@ void DatabaseTest::test_A4_recovery_never_deletes_finalized_row_matching_intent(
     QVERIFY(checkFinalized.next());
     QCOMPARE(checkFinalized.value(0).toInt(), 1);
     QCOMPARE(countDiscardIntents(manager, segId), 0);
+    manager.closeConnection_dbg();
+}
+
+// ============================================================================
+// C2 (R07-001): a failed COMMIT must roll back so the long-lived connection
+// is never left inside that transaction, and later autocommit operations
+// (a fresh write, a checkpoint discard) behave normally afterward.
+// setForceCommitFailure_dbg() makes the NEXT commit inside the store treat
+// COMMIT as having failed and roll back, without needing an environmental
+// fault (e.g. a locked file) to trigger a real one.
+// ============================================================================
+
+void DatabaseTest::test_C2_saveDurations_append_rolls_back_on_commit_failure()
+{
+    // Arrange: one committed baseline row.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QDateTime now = QDateTime::currentDateTime();
+    std::deque<TimeDuration> baseline;
+    baseline.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-90)));
+    QVERIFY(manager.saveDurations(baseline, TransactionMode::Append));
+
+    // Act: inject a COMMIT failure for the next append.
+    manager.setForceCommitFailure_dbg(true);
+    std::deque<TimeDuration> attempted;
+    attempted.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-50), now.addSecs(-40)));
+    QVERIFY(!manager.saveDurations(attempted, TransactionMode::Append));
+
+    // Assert: raw state is still just the baseline row -- the attempted
+    // INSERT was rolled back, not left half-applied inside an open transaction.
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery countAfterFailure(manager.rawDb_dbg());
+    QVERIFY(countAfterFailure.exec("SELECT COUNT(*) FROM durations"));
+    QVERIFY(countAfterFailure.next());
+    QCOMPARE(countAfterFailure.value(0).toInt(), 1);
+
+    // Assert: the connection is not stuck inside the failed transaction --
+    // a second (non-injected) append commits normally.
+    QVERIFY(manager.saveDurations(attempted, TransactionMode::Append));
+    QSqlQuery countAfterSecondWrite(manager.rawDb_dbg());
+    QVERIFY(countAfterSecondWrite.exec("SELECT COUNT(*) FROM durations"));
+    QVERIFY(countAfterSecondWrite.next());
+    QCOMPARE(countAfterSecondWrite.value(0).toInt(), 2);
+
+    // Assert: checkpoint discard, a separate autocommit path, also still works.
+    const SegmentId segId = SegmentId::mint();
+    QVERIFY(manager.saveCheckpoint(DurationType::Activity, now, now.addSecs(10), segId).ok());
+    QVERIFY(manager.discardCheckpoint(segId).ok());
+
+    manager.closeConnection_dbg();
+}
+
+void DatabaseTest::test_C2_replaceAll_rolls_back_on_commit_failure()
+{
+    // Arrange: two committed rows.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QDateTime now = QDateTime::currentDateTime();
+    std::deque<TimeDuration> original;
+    original.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-300), now.addSecs(-200)));
+    original.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-200), now.addSecs(-100)));
+    QVERIFY(manager.saveDurations(original, TransactionMode::Append));
+
+    // Act: inject a COMMIT failure for the replace.
+    manager.setForceCommitFailure_dbg(true);
+    std::deque<TimeDuration> replacement;
+    replacement.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-80), now.addSecs(-40)));
+    QVERIFY(!manager.replaceAll(Timeline(replacement, std::nullopt), Timeline({}, std::nullopt)).ok());
+
+    // Assert: raw state is still the ORIGINAL two rows -- the DELETE+INSERT
+    // was rolled back, not left with the durations table emptied.
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery countAfterFailure(manager.rawDb_dbg());
+    QVERIFY(countAfterFailure.exec("SELECT COUNT(*) FROM durations"));
+    QVERIFY(countAfterFailure.next());
+    QCOMPARE(countAfterFailure.value(0).toInt(), 2);
+
+    // Assert: the connection recovers -- a second (non-injected) replace commits normally.
+    QVERIFY(manager.replaceAll(Timeline(replacement, std::nullopt), Timeline({}, std::nullopt)).ok());
+    QSqlQuery countAfterSecondWrite(manager.rawDb_dbg());
+    QVERIFY(countAfterSecondWrite.exec("SELECT COUNT(*) FROM durations"));
+    QVERIFY(countAfterSecondWrite.next());
+    QCOMPARE(countAfterSecondWrite.value(0).toInt(), 1);
+
+    // Assert: checkpoint discard also still works.
+    const SegmentId segId = SegmentId::mint();
+    QVERIFY(manager.saveCheckpoint(DurationType::Activity, now, now.addSecs(10), segId).ok());
+    QVERIFY(manager.discardCheckpoint(segId).ok());
+
+    manager.closeConnection_dbg();
+}
+
+void DatabaseTest::test_C2_saveCheckpoint_insert_rolls_back_on_commit_failure()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    const SegmentId segId = SegmentId::mint();
+    const QDateTime start = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime end   = QDateTime(QDate(2025, 6, 1), QTime(10, 5, 0), Qt::UTC);
+
+    // Act: inject a COMMIT failure on the first (INSERT branch) checkpoint
+    // write for this segment_id.
+    manager.setForceCommitFailure_dbg(true);
+    QCOMPARE(manager.saveCheckpoint(DurationType::Activity, start, end, segId).category,
+             SessionStoreResult::TransientError);
+
+    // Assert: raw state has no row for this segment -- the INSERT was rolled back.
+    QVERIFY(manager.ensureOpen_dbg());
+    QCOMPARE(countDurationsForSegment(manager, segId), 0);
+
+    // Assert: the connection recovers -- a second (non-injected) checkpoint write commits.
+    QVERIFY(manager.saveCheckpoint(DurationType::Activity, start, end, segId).ok());
+    QCOMPARE(countDurationsForSegment(manager, segId), 1);
+
+    // Assert: checkpoint discard also still works.
+    QVERIFY(manager.discardCheckpoint(segId).ok());
+    QCOMPARE(countDurationsForSegment(manager, segId), 0);
+
+    manager.closeConnection_dbg();
+}
+
+void DatabaseTest::test_C2_saveCheckpoint_update_rolls_back_on_commit_failure()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    const SegmentId segId = SegmentId::mint();
+    const QDateTime start     = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime firstEnd  = QDateTime(QDate(2025, 6, 1), QTime(10, 5, 0), Qt::UTC);
+    const QDateTime secondEnd = QDateTime(QDate(2025, 6, 1), QTime(10, 10, 0), Qt::UTC);
+
+    // Arrange: an existing unfinalized checkpoint row (INSERT branch, no injected fault).
+    QVERIFY(manager.saveCheckpoint(DurationType::Activity, start, firstEnd, segId).ok());
+
+    // Act: inject a COMMIT failure on the UPDATE branch (same segment_id, later end).
+    manager.setForceCommitFailure_dbg(true);
+    QCOMPARE(manager.saveCheckpoint(DurationType::Activity, start, secondEnd, segId).category,
+             SessionStoreResult::TransientError);
+
+    // Assert: raw state still shows the ORIGINAL end, exactly one row, and
+    // the untouched columns (type/start_utc/is_finalized) unchanged -- so a
+    // rollback that only partially undoes the UPDATE (or verify.next()
+    // matching some other row) cannot mask a change.
+    QVERIFY(manager.ensureOpen_dbg());
+    QCOMPARE(countDurationsForSegment(manager, segId), 1);
+    QSqlQuery verify(manager.rawDb_dbg());
+    verify.prepare("SELECT type, start_utc, end_utc, is_finalized FROM durations WHERE segment_id = :id");
+    verify.bindValue(":id", segId.toString());
+    QVERIFY(verify.exec());
+    QVERIFY(verify.next());
+    QCOMPARE(verify.value(0).toInt(), static_cast<int>(DurationType::Activity));
+    QCOMPARE(verify.value(1).toString(), start.toUTC().toString(Qt::ISODateWithMs));
+    QCOMPARE(verify.value(2).toString(), firstEnd.toUTC().toString(Qt::ISODateWithMs));
+    QCOMPARE(verify.value(3).toInt(), 0);
+
+    // Assert: the connection recovers -- a second (non-injected) update commits.
+    QVERIFY(manager.saveCheckpoint(DurationType::Activity, start, secondEnd, segId).ok());
+    QSqlQuery verify2(manager.rawDb_dbg());
+    verify2.prepare("SELECT end_utc FROM durations WHERE segment_id = :id");
+    verify2.bindValue(":id", segId.toString());
+    QVERIFY(verify2.exec());
+    QVERIFY(verify2.next());
+    QCOMPARE(verify2.value(0).toString(), secondEnd.toUTC().toString(Qt::ISODateWithMs));
+
+    // Assert: checkpoint discard also still works.
+    QVERIFY(manager.discardCheckpoint(segId).ok());
+    QCOMPARE(countDurationsForSegment(manager, segId), 0);
+
+    manager.closeConnection_dbg();
+}
+
+/**
+ * C2 round-2 fix (R07-001): db.commit() can return false WITHOUT ever
+ * calling setLastError() -- confirmed empirically for Qt 5.15.18 via a
+ * "commit after close" repro (QSqlDatabase::commit() and
+ * QSQLiteDriver::commitTransaction() both bail on an unopened driver before
+ * touching the error state). The old contract inferred success from
+ * db.lastError().text().isEmpty(), so a commit failure with an empty error
+ * text would have been misreported as success. setForceCommitCloseBefore_dbg()
+ * reproduces that exact mechanism -- closing the real connection immediately
+ * before commitOrRollback()'s real db.commit() call -- so this exercises the
+ * genuine driver behavior, not a fabricated message.
+ */
+void DatabaseTest::test_C2_replaceAll_fails_on_commit_failure_with_empty_error_text()
+{
+    // Arrange: two committed baseline rows.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QDateTime now = QDateTime::currentDateTime();
+    std::deque<TimeDuration> original;
+    original.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-300), now.addSecs(-200)));
+    original.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-200), now.addSecs(-100)));
+    QVERIFY(manager.saveDurations(original, TransactionMode::Append));
+
+    // Act: the replace's COMMIT genuinely fails with an EMPTY error text.
+    manager.setForceCommitCloseBefore_dbg(true);
+    std::deque<TimeDuration> replacement;
+    replacement.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-80), now.addSecs(-40)));
+    const SessionStoreResult result =
+        manager.replaceAll(Timeline(replacement, std::nullopt), Timeline({}, std::nullopt));
+
+    // Assert: a commit failure is a commit failure, even with no message to
+    // report -- callers must never read "no error text" as "success".
+    QVERIFY(!result.ok());
+    QCOMPARE(result.message, QStringLiteral("Failed to commit replace transaction: "));
+
+    // Assert: raw state is still the ORIGINAL two rows -- the replace never
+    // durably committed.
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery count(manager.rawDb_dbg());
+    QVERIFY(count.exec("SELECT COUNT(*) FROM durations"));
+    QVERIFY(count.next());
+    QCOMPARE(count.value(0).toInt(), 2);
+
+    // Assert: the connection recovers for a subsequent write.
+    QVERIFY(manager.replaceAll(Timeline(replacement, std::nullopt), Timeline({}, std::nullopt)).ok());
+    QSqlQuery count2(manager.rawDb_dbg());
+    QVERIFY(count2.exec("SELECT COUNT(*) FROM durations"));
+    QVERIFY(count2.next());
+    QCOMPARE(count2.value(0).toInt(), 1);
+
+    manager.closeConnection_dbg();
+}
+
+/**
+ * Rollback-failure diagnostic (R07-001's proposed direction): if the
+ * rollback that follows a failed COMMIT ALSO fails, the primary commit
+ * error must still be what the caller sees -- not silently overwritten or
+ * replaced by the rollback failure. Uses replaceAll(), not saveDurations()
+ * (which returns only bool and cannot carry a message), so the message can
+ * be asserted directly.
+ *
+ * setForceRollbackFailure_dbg() makes the injected rollback fail WITHOUT
+ * calling db.rollback() or closing the connection itself -- unlike an
+ * earlier version of this seam, it leaves the real transaction genuinely
+ * open on a still-open connection. That means the "connection recovers"
+ * assertion below is an honest test of commitOrRollback()'s own
+ * close-on-failed-rollback cleanup (F3/R07-001), not an artifact of the
+ * injection already having closed the connection.
+ */
+void DatabaseTest::test_C2_replaceAll_preserves_commit_error_when_rollback_also_fails()
+{
+    // Arrange: two committed baseline rows.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QDateTime now = QDateTime::currentDateTime();
+    std::deque<TimeDuration> original;
+    original.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-300), now.addSecs(-200)));
+    original.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-200), now.addSecs(-100)));
+    QVERIFY(manager.saveDurations(original, TransactionMode::Append));
+
+    // Act: inject a COMMIT failure AND make the follow-up rollback also fail.
+    manager.setForceCommitFailure_dbg(true);
+    manager.setForceRollbackFailure_dbg(true);
+    std::deque<TimeDuration> replacement;
+    replacement.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-80), now.addSecs(-40)));
+    const SessionStoreResult result =
+        manager.replaceAll(Timeline(replacement, std::nullopt), Timeline({}, std::nullopt));
+
+    // Assert: the primary commit error is what the caller sees -- not
+    // silently overwritten by the rollback failure.
+    QVERIFY(!result.ok());
+    QVERIFY(result.message.contains("injected commit failure (test)"));
+
+    // Assert: raw state is still the ORIGINAL two rows.
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery count(manager.rawDb_dbg());
+    QVERIFY(count.exec("SELECT COUNT(*) FROM durations"));
+    QVERIFY(count.next());
+    QCOMPARE(count.value(0).toInt(), 2);
+
+    // Assert: the connection still recovers for a subsequent write.
+    QVERIFY(manager.replaceAll(Timeline(replacement, std::nullopt), Timeline({}, std::nullopt)).ok());
+    QSqlQuery count2(manager.rawDb_dbg());
+    QVERIFY(count2.exec("SELECT COUNT(*) FROM durations"));
+    QVERIFY(count2.next());
+    QCOMPARE(count2.value(0).toInt(), 1);
+
+    manager.closeConnection_dbg();
+}
+
+/**
+ * F1 stronger option (R07-001's "Commands and Results" diagnostic):
+ * reproduces a GENUINE COMMIT failure -- not the force_commit_failure_dbg_
+ * seam -- via a second connection to the same file holding an open read
+ * transaction. This app uses SQLite's default rollback-journal mode (see
+ * ensureSchema's doc comment), where a writer's COMMIT must upgrade to an
+ * EXCLUSIVE lock; that upgrade is blocked while another connection holds a
+ * SHARED lock via an open read transaction. Qt's QSQLITE driver DOES install
+ * a busy handler by default (QSQLITE_BUSY_TIMEOUT defaults to 5000 ms), so
+ * on an unmodified connection COMMIT would busy-wait for up to 5 s before
+ * failing with "database is locked" -- measured at ~5019 ms on Qt 5.15.18.
+ * The wait is still bounded and the outcome still deterministic: this test
+ * is single-threaded, so the reader's SHARED lock can never be released
+ * while the writer's busy-wait is running, and the handler always exhausts
+ * and returns SQLITE_BUSY rather than eventually succeeding. To avoid
+ * paying that ~5 s on every run, the writer connection below is reopened
+ * with QSQLITE_BUSY_TIMEOUT=0 via the existing ensureOpen_dbg()/
+ * closeConnection_dbg()/rawDb_dbg() test seams -- this is test-only setup on
+ * this one connection; it does not touch how production opens its
+ * connection. With the timeout at 0, COMMIT fails immediately (measured at
+ * 0 ms) for the same "database is locked" reason. SQLite tracks
+ * same-process multi-connection locking correctly (its unix VFS works
+ * around the POSIX advisory-lock per-process limitation), so two
+ * connections opened by this same test process genuinely contend.
+ *
+ * Done for one representative call site (saveCheckpoint's INSERT branch)
+ * exercising the real db.lastError() capture in commitOrRollback(). Not
+ * repeated for the other three C2 sites: they would each need their own
+ * second live connection for no additional coverage of commitOrRollback()
+ * itself (already shared, already exercised here for real), so the cheaper
+ * force_commit_failure_dbg_ seam above is kept for those.
+ */
+void DatabaseTest::test_C2_saveCheckpoint_insert_rolls_back_on_genuine_commit_lock_failure()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+    // Test-only: reopen with a 0 ms busy timeout so the deterministic
+    // "database is locked" outcome below is reached immediately instead of
+    // after Qt's real 5 s default busy-wait (see comment above). Only this
+    // connection is affected; production's own open path is untouched.
+    manager.closeConnection_dbg();
+    manager.rawDb_dbg().setConnectOptions("QSQLITE_BUSY_TIMEOUT=0");
+    QVERIFY(manager.ensureOpen_dbg());
+
+    const SegmentId segId = SegmentId::mint();
+    const QDateTime start = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime end   = QDateTime(QDate(2025, 6, 1), QTime(10, 5, 0), Qt::UTC);
+
+    {
+        // A second connection to the SAME file holds an open read
+        // transaction, acquiring a SHARED lock that blocks the writer's
+        // COMMIT from upgrading to EXCLUSIVE.
+        QSqlDatabase reader = QSqlDatabase::addDatabase("QSQLITE", "C2_lock_reader");
+        reader.setDatabaseName(db_path_);
+        QVERIFY(reader.open());
+        QVERIFY(reader.transaction());
+        QSqlQuery lockQuery(reader);
+        QVERIFY(lockQuery.exec("SELECT COUNT(*) FROM durations"));
+        QVERIFY(lockQuery.next());
+
+        // Act: the INSERT branch's COMMIT genuinely fails with "database is locked".
+        const SessionStoreResult result = manager.saveCheckpoint(DurationType::Activity, start, end, segId);
+        QCOMPARE(result.category, SessionStoreResult::TransientError);
+        QVERIFY(result.message.contains("locked", Qt::CaseInsensitive));
+
+        reader.rollback();
+        reader.close();
+    }
+    QSqlDatabase::removeDatabase("C2_lock_reader");
+
+    // Assert: raw state has no row for this segment -- the INSERT was rolled back.
+    QVERIFY(manager.ensureOpen_dbg());
+    QCOMPARE(countDurationsForSegment(manager, segId), 0);
+
+    // Assert: the connection recovers now that the lock is released.
+    QVERIFY(manager.saveCheckpoint(DurationType::Activity, start, end, segId).ok());
+    QCOMPARE(countDurationsForSegment(manager, segId), 1);
+
     manager.closeConnection_dbg();
 }

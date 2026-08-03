@@ -180,6 +180,20 @@ private slots:
     // A discard intent that (by a reused/corrupt identity) matches a
     // FINALIZED row must never delete it; only the tombstone is resolved.
     void test_A4_recovery_never_deletes_finalized_row_matching_intent();
+
+    // C2 (R07-001): a failed COMMIT must roll back, leaving the connection
+    // outside the transaction so later autocommit operations behave normally.
+    void test_C2_saveDurations_append_rolls_back_on_commit_failure();
+    void test_C2_replaceAll_rolls_back_on_commit_failure();
+    void test_C2_saveCheckpoint_insert_rolls_back_on_commit_failure();
+    void test_C2_saveCheckpoint_update_rolls_back_on_commit_failure();
+    void test_C2_replaceAll_preserves_commit_error_when_rollback_also_fails();
+    void test_C2_saveCheckpoint_insert_rolls_back_on_genuine_commit_lock_failure();
+    // C2 round-2 fix (R07-001): a commit failure with an EMPTY error text
+    // must still surface as a failure to the caller -- not be misread as
+    // success because the old contract inferred success from message
+    // emptiness.
+    void test_C2_replaceAll_fails_on_commit_failure_with_empty_error_text();
 };
 
 #endif // TEST_DATABASE_H
