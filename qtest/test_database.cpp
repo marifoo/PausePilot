@@ -218,7 +218,11 @@ void DatabaseTest::test_checkpointPreservesStartTimeOnUpdateBySegmentId()
     const SegmentId checkpointSegmentId = SegmentId::mint();
     QVERIFY(manager.saveCheckpoint(DurationType::Activity, start, end1, checkpointSegmentId).ok());
 
-    QDateTime driftedStart = start.addSecs(3600);
+    // "Drifted" only in the sense of differing from the original start passed
+    // above; must stay < end2 (a positive interval) so C3's payload guard
+    // does not itself reject this call -- the point under test is that the
+    // UPDATE path ignores this parameter entirely, not that it is invalid.
+    QDateTime driftedStart = start.addSecs(10);
     QVERIFY(manager.saveCheckpoint(DurationType::Activity, driftedStart, end2, checkpointSegmentId).ok());
 
     const QString connName = "checkpoint_query";
@@ -771,11 +775,193 @@ void DatabaseTest::test_database_load_invalid_type_increments_skipped_and_omits_
     query.bindValue(":start_utc", start.toString(Qt::ISODateWithMs));
     query.bindValue(":end_utc", end.toString(Qt::ISODateWithMs));
     QVERIFY(query.exec());
+    const qint64 rowId = query.lastInsertId().toLongLong();
     manager.closeConnection_dbg();
 
     auto loaded = manager.loadDurations();
     QCOMPARE(loaded.skipped, 1);
     QCOMPARE(loaded.size(), static_cast<size_t>(0));
+
+    // C3 (R13-001/R14-001, extends B2's recovery-time half to ordinary load):
+    // a malformed row must be deleted, not merely omitted from the returned
+    // result -- otherwise it survives to be silently purged later by an
+    // unrelated edited History save.
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery check(manager.rawDb_dbg());
+    check.prepare("SELECT COUNT(*) FROM durations WHERE id = :id");
+    check.bindValue(":id", rowId);
+    QVERIFY(check.exec());
+    QVERIFY(check.next());
+    QCOMPARE(check.value(0).toInt(), 0);
+    manager.closeConnection_dbg();
+}
+
+/**
+ * C3 (R13-001/R14-001): loadDurations() must delete every genuinely malformed
+ * finalized row (invalid timestamp, invalid type, empty id, non-positive
+ * interval) in one transaction and return only the valid row -- mirroring
+ * B2's recoverStartupCheckpoints() malformed-row deletion, extended here to
+ * ordinary (already-finalized) load rather than only unfinalized checkpoints.
+ */
+void DatabaseTest::test_C3_loadDurations_deletes_all_malformed_row_shapes()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QVERIFY(manager.ensureOpen_dbg());
+
+    // A genuinely valid finalized row that must survive and load normally.
+    const QDateTime validStart = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime validEnd   = QDateTime(QDate(2025, 6, 1), QTime(10, 5, 0), Qt::UTC);
+    QSqlQuery validInsert(manager.rawDb_dbg());
+    validInsert.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                         "VALUES (:seg, 0, :s, :e, 1)");
+    validInsert.bindValue(":seg", SegmentId::mint().toString());
+    validInsert.bindValue(":s", validStart.toString(Qt::ISODateWithMs));
+    validInsert.bindValue(":e", validEnd.toString(Qt::ISODateWithMs));
+    QVERIFY(validInsert.exec());
+
+    QSqlQuery pragmaOn(manager.rawDb_dbg());
+    QVERIFY(pragmaOn.exec("PRAGMA ignore_check_constraints = ON"));
+
+    // Malformed: empty segment_id.
+    QSqlQuery emptyId(manager.rawDb_dbg());
+    emptyId.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                     "VALUES ('', 0, :s, :e, 1)");
+    emptyId.bindValue(":s", QDateTime(QDate(2025, 6, 1), QTime(11, 0, 0), Qt::UTC).toString(Qt::ISODateWithMs));
+    emptyId.bindValue(":e", QDateTime(QDate(2025, 6, 1), QTime(11, 5, 0), Qt::UTC).toString(Qt::ISODateWithMs));
+    QVERIFY(emptyId.exec());
+    const qint64 emptyIdRow = emptyId.lastInsertId().toLongLong();
+
+    // Malformed: invalid type value.
+    QSqlQuery badType(manager.rawDb_dbg());
+    badType.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                     "VALUES (:seg, 99, :s, :e, 1)");
+    badType.bindValue(":seg", SegmentId::mint().toString());
+    badType.bindValue(":s", QDateTime(QDate(2025, 6, 1), QTime(12, 0, 0), Qt::UTC).toString(Qt::ISODateWithMs));
+    badType.bindValue(":e", QDateTime(QDate(2025, 6, 1), QTime(12, 5, 0), Qt::UTC).toString(Qt::ISODateWithMs));
+    QVERIFY(badType.exec());
+    const qint64 badTypeRow = badType.lastInsertId().toLongLong();
+
+    // Malformed: invalid (unparseable) timestamp.
+    QSqlQuery badTs(manager.rawDb_dbg());
+    badTs.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                  "VALUES (:seg, 0, 'not-a-date', 'also-not-a-date', 1)");
+    badTs.bindValue(":seg", SegmentId::mint().toString());
+    QVERIFY(badTs.exec());
+    const qint64 badTsRow = badTs.lastInsertId().toLongLong();
+
+    // Malformed: non-positive interval (start >= end).
+    QSqlQuery badInterval(manager.rawDb_dbg());
+    badInterval.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                         "VALUES (:seg, 0, :s, :e, 1)");
+    badInterval.bindValue(":seg", SegmentId::mint().toString());
+    const QString sameTs = QDateTime(QDate(2025, 6, 1), QTime(13, 0, 0), Qt::UTC).toString(Qt::ISODateWithMs);
+    badInterval.bindValue(":s", sameTs);
+    badInterval.bindValue(":e", sameTs);
+    QVERIFY(badInterval.exec());
+    const qint64 badIntervalRow = badInterval.lastInsertId().toLongLong();
+
+    manager.closeConnection_dbg();
+
+    const LoadResult loaded = manager.loadDurations();
+
+    // Assert: only the valid row is returned.
+    QCOMPARE(loaded.size(), static_cast<size_t>(1));
+    QCOMPARE(loaded[0].startTime, validStart.toLocalTime());
+
+    // Assert: all four malformed rows are physically gone (deleted
+    // transactionally, logged once -- no UI notification, matching B2).
+    QVERIFY(manager.ensureOpen_dbg());
+    for (qint64 id : {emptyIdRow, badTypeRow, badTsRow, badIntervalRow}) {
+        QSqlQuery check(manager.rawDb_dbg());
+        check.prepare("SELECT COUNT(*) FROM durations WHERE id = :id");
+        check.bindValue(":id", id);
+        QVERIFY(check.exec());
+        QVERIFY(check.next());
+        QCOMPARE(check.value(0).toInt(), 0);
+    }
+    // The valid row is untouched.
+    QSqlQuery countAll(manager.rawDb_dbg());
+    QVERIFY(countAll.exec("SELECT COUNT(*) FROM durations"));
+    QVERIFY(countAll.next());
+    QCOMPARE(countAll.value(0).toInt(), 1);
+    manager.closeConnection_dbg();
+}
+
+/**
+ * Finding 4 (C3 review, Medium): loadDurations()'s malformed-row deletion
+ * says "will retry on next load" but had no test proving commit-or-rollback
+ * on a genuine commit failure -- the C2 standard for every other write
+ * boundary (see test_C2_*_rolls_back_on_genuine_commit_*). Reuses C2's
+ * existing setForceCommitFailure_dbg() injection seam (loadDurations' delete
+ * now routes through commitOrRollback(), same as every other write path).
+ */
+void DatabaseTest::test_C3_loadDurations_rolls_back_malformed_delete_on_commit_failure_and_retries()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QVERIFY(manager.ensureOpen_dbg());
+
+    // A valid row that must survive and load normally regardless of the
+    // malformed row's fate.
+    const QDateTime validStart = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime validEnd   = QDateTime(QDate(2025, 6, 1), QTime(10, 5, 0), Qt::UTC);
+    QSqlQuery validInsert(manager.rawDb_dbg());
+    validInsert.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                         "VALUES (:seg, 0, :s, :e, 1)");
+    validInsert.bindValue(":seg", SegmentId::mint().toString());
+    validInsert.bindValue(":s", validStart.toString(Qt::ISODateWithMs));
+    validInsert.bindValue(":e", validEnd.toString(Qt::ISODateWithMs));
+    QVERIFY(validInsert.exec());
+
+    // Malformed: non-positive interval (start == end).
+    QSqlQuery badInterval(manager.rawDb_dbg());
+    badInterval.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                         "VALUES (:seg, 0, :s, :e, 1)");
+    badInterval.bindValue(":seg", SegmentId::mint().toString());
+    const QString sameTs = QDateTime(QDate(2025, 6, 1), QTime(13, 0, 0), Qt::UTC).toString(Qt::ISODateWithMs);
+    badInterval.bindValue(":s", sameTs);
+    badInterval.bindValue(":e", sameTs);
+    QVERIFY(badInterval.exec());
+    const qint64 badIntervalRow = badInterval.lastInsertId().toLongLong();
+    manager.closeConnection_dbg();
+
+    // Act: inject a COMMIT failure for the malformed-row delete transaction.
+    manager.setForceCommitFailure_dbg(true);
+    const LoadResult firstLoad = manager.loadDurations();
+
+    // Assert: the returned result is unaffected (built from valid rows before
+    // the delete-commit ever runs), but the malformed row is still PHYSICALLY
+    // present -- the delete was rolled back, not left half-applied.
+    QCOMPARE(firstLoad.size(), static_cast<size_t>(1));
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery stillThere(manager.rawDb_dbg());
+    stillThere.prepare("SELECT COUNT(*) FROM durations WHERE id = :id");
+    stillThere.bindValue(":id", badIntervalRow);
+    QVERIFY(stillThere.exec());
+    QVERIFY(stillThere.next());
+    QCOMPARE(stillThere.value(0).toInt(), 1);
+
+    // Assert: the connection recovers -- a second (non-injected) load
+    // retries the delete and succeeds this time.
+    const LoadResult secondLoad = manager.loadDurations();
+    QCOMPARE(secondLoad.size(), static_cast<size_t>(1));
+    QSqlQuery goneNow(manager.rawDb_dbg());
+    goneNow.prepare("SELECT COUNT(*) FROM durations WHERE id = :id");
+    goneNow.bindValue(":id", badIntervalRow);
+    QVERIFY(goneNow.exec());
+    QVERIFY(goneNow.next());
+    QCOMPARE(goneNow.value(0).toInt(), 0);
+
+    manager.closeConnection_dbg();
 }
 
 void DatabaseTest::test_database_load_200ms_mismatch_increments_repaired_and_uses_computed()
@@ -2972,6 +3158,52 @@ void DatabaseTest::test_recoverStartupCheckpoints_drops_future_dated_orphan()
     manager.closeConnection_dbg();
 }
 
+void DatabaseTest::test_recoverStartupCheckpoints_drops_unfinalized_cross_day_orphan()
+{
+    // MUST-FIX4 (review packet C3): B2's malformed-row definition is exactly
+    // {empty id, invalid type, invalid timestamp, start>=end} -- a cross-day
+    // row is well-formed by that definition, so it would otherwise pass
+    // straight through loadUnfinalizedCheckpoints() and get finalized by
+    // reconcileUnfinalizedCheckpoints() with no day-validity check at all.
+    // Seed an otherwise-recoverable (not too-short/stale/future-dated)
+    // unfinalized row that genuinely spans local midnight and assert
+    // recovery drops it -- never finalizes it into history -- exactly like
+    // the existing too-short/stale/future-dated policy drops above.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QVERIFY(manager.ensureOpen_dbg());
+
+    const QDate yesterday = QDate::currentDate().addDays(-1);
+    const QDateTime localStart(yesterday, QTime(23, 50, 0), Qt::LocalTime);
+    const QDateTime localEnd(QDate::currentDate(), QTime(0, 10, 0), Qt::LocalTime);
+    const qint64 orphanId = seedOrphanRow(manager, localStart.toUTC(), localEnd.toUTC());
+    QVERIFY(orphanId > 0);
+    manager.closeConnection_dbg();
+
+    // Recover shortly after the orphan's end -- well within the stale/future
+    // thresholds, so cross-day is the ONLY reason this row is dropped.
+    const QDateTime now(QDate::currentDate(), QTime(0, 20, 0), Qt::LocalTime);
+    StartupRecoveryResult res = manager.recoverStartupCheckpoints(now);
+
+    QVERIFY(res.ok());
+    QCOMPARE(res.finalized_count, 0);
+    QCOMPARE(res.policy_dropped_count, 1);
+    QCOMPARE(res.recovered_msec, static_cast<qint64>(0));
+
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery checkOrphan(manager.rawDb_dbg());
+    checkOrphan.prepare("SELECT COUNT(*) FROM durations WHERE id = :id");
+    checkOrphan.bindValue(":id", orphanId);
+    QVERIFY(checkOrphan.exec());
+    QVERIFY(checkOrphan.next());
+    QCOMPARE(checkOrphan.value(0).toInt(), 0);
+    manager.closeConnection_dbg();
+}
+
 // ============================================================================
 // B2 (R08-001..003,005, R05-004): atomic recovery disposition, exact
 // millisecond aggregation, malformed-row cleanup, and idempotency.
@@ -4121,4 +4353,219 @@ void DatabaseTest::test_C2_saveCheckpoint_insert_rolls_back_on_genuine_commit_lo
     QCOMPARE(countDurationsForSegment(manager, segId), 1);
 
     manager.closeConnection_dbg();
+}
+
+// ============================================================================
+// C3 (R13-001/R14-001): the day-validity/overlap payload guard (dayvalidity.h)
+// rejects an invalid payload as a CallerBug before any mutation at every
+// uTimer write boundary, uniformly -- including a legacy cross-midnight row
+// (MUST-FIX1, review packet C3: HistoryEditSession drops any such row from
+// the save payload before it ever reaches replaceAll(); see
+// historyeditsession.cpp's buildSavePayload() and
+// qtest/test_historyeditsession.cpp's test_cross_midnight_dropped_from_payload).
+//
+// SHOULD-FIX #6 (review packet C3): these cross-day fixtures are built with
+// Qt::LocalTime, not Qt::UTC. DayValidity::isCrossMidnight() compares
+// QDateTime::date() in the value's OWN timespec (D1 will make this
+// timezone-aware); tagging 23:50->00:10 as UTC would make it cross the UTC
+// date while landing on the SAME local calendar day on this machine
+// (Europe/Berlin, UTC+2 in June), which would not exercise the guard for the
+// reason the test name claims.
+// ============================================================================
+
+void DatabaseTest::test_C3_commitSession_rejects_cross_day_payload()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    // A segment spanning local midnight, built via fromPersistedRows() (as a
+    // caller bypassing TimeDuration::create()/Timeline's normal same-day
+    // debug assertion would) -- commitSession() must catch it as a final
+    // guard rather than writing it.
+    const SegmentId segId = SegmentId::mint();
+    const QDateTime start(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    const QDateTime end(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime);
+    std::deque<TimeDuration> crossDay;
+    crossDay.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, start, end, segId));
+
+    const SessionStoreResult result = manager.commitSession(Timeline::fromPersistedRows(crossDay));
+
+    QCOMPARE(result.category, SessionStoreResult::CallerBug);
+    QCOMPARE(static_cast<int>(manager.loadDurations().size()), 0);
+}
+
+void DatabaseTest::test_C3_saveCheckpoint_rejects_cross_day_interval()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    const SegmentId segId = SegmentId::mint();
+    const QDateTime start(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    const QDateTime end(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime);
+
+    const SessionStoreResult result = manager.saveCheckpoint(DurationType::Activity, start, end, segId);
+
+    QCOMPARE(result.category, SessionStoreResult::CallerBug);
+    QVERIFY(manager.ensureOpen_dbg());
+    QCOMPARE(countDurationsForSegment(manager, segId), 0);
+    manager.closeConnection_dbg();
+}
+
+void DatabaseTest::test_C3_replaceAll_rejects_cross_type_overlap()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    // Seed one pre-existing row that must survive untouched if replaceAll()
+    // correctly rejects the whole payload before any mutation.
+    const QDateTime seedStart = QDateTime(QDate(2025, 6, 1), QTime(8, 0, 0), Qt::UTC);
+    const QDateTime seedEnd   = QDateTime(QDate(2025, 6, 1), QTime(8, 30, 0), Qt::UTC);
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, seedStart, seedEnd));
+    QVERIFY(manager.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    // Activity 10:00-10:30 overlapping Pause 10:15-10:45 -- same day, no
+    // reversed/empty/duplicate id, but an Activity/Pause overlap.
+    const QDateTime aStart = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime aEnd   = QDateTime(QDate(2025, 6, 1), QTime(10, 30, 0), Qt::UTC);
+    const QDateTime pStart = QDateTime(QDate(2025, 6, 1), QTime(10, 15, 0), Qt::UTC);
+    const QDateTime pEnd   = QDateTime(QDate(2025, 6, 1), QTime(10, 45, 0), Qt::UTC);
+    std::deque<TimeDuration> overlapping;
+    overlapping.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, aStart, aEnd));
+    overlapping.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, pStart, pEnd));
+
+    const SessionStoreResult result = manager.replaceAll(Timeline(overlapping, std::nullopt),
+                                                          Timeline({}, std::nullopt));
+
+    QCOMPARE(result.category, SessionStoreResult::CallerBug);
+    // Nothing mutated: the pre-existing seeded row is still exactly there.
+    auto loaded = manager.loadDurations();
+    QCOMPARE(loaded.size(), static_cast<size_t>(1));
+    QCOMPARE(loaded[0].startTime, seedStart.toLocalTime());
+}
+
+void DatabaseTest::test_C3_replaceAll_rejects_cross_day_payload()
+{
+    // MUST-FIX1 (user decision, review packet C3): replaceAll() now rejects a
+    // cross-day row the same uniform way as commitSession()/saveCheckpoint(),
+    // with no allowCrossDay exception. HistoryEditSession is responsible for
+    // never sending one this far (it drops a legacy cross-midnight row from
+    // the save payload instead -- see buildSavePayload()); this test pins
+    // replaceAll()'s own guard as the final backstop for any other caller.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    // Seed one pre-existing row that must survive untouched if replaceAll()
+    // correctly rejects the whole payload before any mutation.
+    const QDateTime seedStart = QDateTime(QDate(2025, 6, 1), QTime(8, 0, 0), Qt::LocalTime);
+    const QDateTime seedEnd   = QDateTime(QDate(2025, 6, 1), QTime(8, 30, 0), Qt::LocalTime);
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, seedStart, seedEnd));
+    QVERIFY(manager.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    const QDateTime cmStart(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    const QDateTime cmEnd(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime);
+    std::deque<TimeDuration> history;
+    history.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, cmStart, cmEnd));
+
+    const SessionStoreResult result = manager.replaceAll(Timeline::fromPersistedRows(history),
+                                                          Timeline({}, std::nullopt));
+
+    QCOMPARE(result.category, SessionStoreResult::CallerBug);
+    // Nothing mutated: the pre-existing seeded row is still exactly there.
+    auto loaded = manager.loadDurations();
+    QCOMPARE(loaded.size(), static_cast<size_t>(1));
+    QCOMPARE(loaded[0].startTime, seedStart.toLocalTime());
+}
+
+void DatabaseTest::test_C3_saveCheckpoint_rejects_nonpositive_interval()
+{
+    // MUST-FIX3 (review packet C3): pin DayValidity::Violation::NonPositive at
+    // the saveCheckpoint() write boundary. Mutation testing showed disabling
+    // this branch caused zero test failures once
+    // test_checkpointPreservesStartTimeOnUpdateBySegmentId's drifted-start
+    // offset was reduced from 3600s to 10s (necessarily, since a 3600s drift
+    // reversed that test's own interval and this guard now correctly rejects
+    // it -- see that test's comment).
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    const SegmentId segId = SegmentId::mint();
+    const QDateTime start(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::LocalTime);
+    const QDateTime end = start; // end <= start: non-positive interval.
+
+    const SessionStoreResult result = manager.saveCheckpoint(DurationType::Activity, start, end, segId);
+
+    QCOMPARE(result.category, SessionStoreResult::CallerBug);
+    QVERIFY(manager.ensureOpen_dbg());
+    QCOMPARE(countDurationsForSegment(manager, segId), 0);
+    manager.closeConnection_dbg();
+}
+
+void DatabaseTest::test_C3_commitSession_rejects_duplicate_id()
+{
+    // MUST-FIX3 (review packet C3): pin DayValidity::Violation::DuplicateId at
+    // the commitSession() write boundary -- mutation testing showed disabling
+    // this branch caused zero test failures.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    const SegmentId sharedId = SegmentId::mint();
+    const QDateTime aStart = QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    const QDateTime aEnd   = QDateTime(QDate(2025, 6, 1), QTime(9, 30, 0), Qt::LocalTime);
+    const QDateTime bStart = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::LocalTime);
+    const QDateTime bEnd   = QDateTime(QDate(2025, 6, 1), QTime(10, 30, 0), Qt::LocalTime);
+    std::deque<TimeDuration> rows;
+    rows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, aStart, aEnd, sharedId));
+    rows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, bStart, bEnd, sharedId));
+
+    const SessionStoreResult result = manager.commitSession(Timeline::fromPersistedRows(rows));
+
+    QCOMPARE(result.category, SessionStoreResult::CallerBug);
+    QCOMPARE(static_cast<int>(manager.loadDurations().size()), 0);
+}
+
+void DatabaseTest::test_C3_commitSession_rejects_invalid_timestamp()
+{
+    // MUST-FIX3 (review packet C3): pin DayValidity::Violation::InvalidTimestamp
+    // at the commitSession() write boundary -- cheaply reachable by passing a
+    // default-constructed (invalid) QDateTime. Both start and end are
+    // invalid here, so QDateTime::msecsTo() between them is 0 and the
+    // NonPositive check ("<= 0") would ALSO reject this row if
+    // InvalidTimestamp were disabled -- assert the specific reported reason
+    // (not just CallerBug) so this test actually pins the InvalidTimestamp
+    // branch rather than being silently covered by NonPositive.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    const SegmentId segId = SegmentId::mint();
+    std::deque<TimeDuration> rows;
+    rows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, QDateTime(), QDateTime(), segId));
+
+    const SessionStoreResult result = manager.commitSession(Timeline::fromPersistedRows(rows));
+
+    QCOMPARE(result.category, SessionStoreResult::CallerBug);
+    QVERIFY2(result.message.contains("invalid timestamp"), qPrintable(result.message));
+    QCOMPARE(static_cast<int>(manager.loadDurations().size()), 0);
 }

@@ -29,6 +29,7 @@
 #include <QFileInfo>
 #include "timeformat.h"
 #include "logger.h"
+#include "dayvalidity.h"
 #include <QSlider>
 #include <QDialogButtonBox>
 #include <QRadioButton>
@@ -160,6 +161,24 @@ bool HistoryDialog::saveChanges()
 
     // Step 2: Build the three save buckets from the session model.
     const HistoryEditSession::SavePayload payload = session_.buildSavePayload();
+
+    // Step 2.5 (C3/R13-001/R14-001): refuse a save that would write an
+    // unsupported row (invalid/non-positive interval, empty/duplicate id, or
+    // an Activity/Pause overlap). SessionStore::replaceAll() also rejects this
+    // as a final guard, but refusing here avoids reaching the DB at all.
+    if (payload.violation != DayValidity::Violation::None) {
+        Logger::Log("[HISTORY] buildSavePayload rejected: " + DayValidity::describe(payload.violation));
+#ifndef QT_NO_DEBUG
+        if (!debugSkipCritical_) {
+            QMessageBox::critical(this, "Invalid Entry",
+                "This change cannot be saved because it contains an invalid time entry.");
+        }
+#else
+        QMessageBox::critical(this, "Invalid Entry",
+            "This change cannot be saved because it contains an invalid time entry.");
+#endif
+        return false;
+    }
 
     // Step 3: Confirm if normalization merged overlapping segments.
     if (payload.needsMergeConfirmation) {

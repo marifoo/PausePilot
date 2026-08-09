@@ -63,7 +63,6 @@ void HistoryEditSession::buildFromTimer(TimeTracker& timer)
             }
             crossMidnightByStartDay[d.startTime.date()].push_back(d);
             continuationsByEndDay[d.endTime.date()].push_back(d);
-            crossMidnightRows_.push_back(d);
             originIsMemory_.insert(d.segment_id.toString(), false);
         } else {
             historyByDay[d.startTime.date()].push_back(d);
@@ -224,9 +223,8 @@ void HistoryEditSession::refreshOngoing(TimeTracker& timer)
     }
 }
 
-// const: unlike the old saveChanges(), this does not clear crossMidnightRows_.
-// The session is single-use (built once, committed once, then destroyed), so the
-// rows never need resetting between calls.
+// const: the session is single-use (built once, committed once, then destroyed),
+// so no per-call state needs resetting between calls.
 HistoryEditSession::SavePayload HistoryEditSession::buildSavePayload() const
 {
     std::optional<TimeDuration> ongoingDurationForSave;
@@ -238,6 +236,115 @@ HistoryEditSession::SavePayload HistoryEditSession::buildSavePayload() const
             unifiedCompleted.push_back(d);
         if (pages_[i].isCurrent)
             ongoingDurationForSave = pendingTimelines_[i].ongoing();
+    }
+
+    // MUST-FIX2 (user decision, review packet C3): a pre-existing Activity/
+    // Pause overlap between two rows loaded unmodified from the database must
+    // not fail an otherwise-unrelated save. Drop the conflicting row
+    // deterministically -- on each conflict the later-starting row is
+    // dropped, and on equal starts the lexicographically larger SegmentId is
+    // dropped (plan section 2's same-type-merge tie-break, reused here for
+    // one uniform convention). The earliest-starting row of the candidate
+    // set always survives; a row dropped by an earlier conflict may itself
+    // be the earlier row of a later one.
+    // This applies ONLY when BOTH rows are byte-identical to what
+    // buildFromTimer() originally loaded: an overlap where either row was
+    // actually touched this session is left as a violation below instead,
+    // since preventing a user-authored overlap during editing is D9/D7 step
+    // 4's job, not this method's.
+    {
+        QHash<QString, TimeDuration> originalById;
+        for (const auto& tl : originalTimelines_)
+            for (const auto& d : tl.completed())
+                originalById.insert(d.segment_id.toString(), d);
+
+        auto isUnedited = [&originalById](const TimeDuration& d) {
+            auto it = originalById.find(d.segment_id.toString());
+            return it != originalById.end() && it->type == d.type &&
+                it->startTime == d.startTime && it->endTime == d.endTime;
+        };
+
+        // Finding 3 (C3 review): only a row genuinely persisted to the
+        // database -- never a memory-origin row, even an unedited one -- may
+        // be silently dropped here. A memory-origin row is never-persisted
+        // current-session work; dropping it would be silent data loss worse
+        // than dropping out-of-contract legacy DB data.
+        auto isDroppable = [this, &isUnedited](const TimeDuration& d) {
+            auto it = originIsMemory_.find(d.segment_id.toString());
+            const bool isMemory = it != originIsMemory_.end() && it.value();
+            return !isMemory && isUnedited(d);
+        };
+
+        // Sort the candidate set by (startTime, id) before the pairwise pass so
+        // the drop outcome is independent of unifiedCompleted's incoming order
+        // (Finding 1, C3 re-review): the earliest-starting row is then always
+        // visited first and so always survives, rather than that being an
+        // incidental property of today's memory-then-DB-order payload layout.
+        std::vector<TimeDuration> sortedCandidates(unifiedCompleted.begin(), unifiedCompleted.end());
+        std::sort(sortedCandidates.begin(), sortedCandidates.end(),
+            [](const TimeDuration& a, const TimeDuration& b) {
+                if (a.startTime != b.startTime)
+                    return a.startTime < b.startTime;
+                return a.segment_id.toString() < b.segment_id.toString();
+            });
+
+        QSet<QString> droppedIds;
+        for (size_t i = 0; i < sortedCandidates.size(); ++i) {
+            for (size_t j = i + 1; j < sortedCandidates.size(); ++j) {
+                const TimeDuration& a = sortedCandidates[i];
+                const TimeDuration& b = sortedCandidates[j];
+                if (a.type == b.type)
+                    continue;
+                const QString aId = a.segment_id.toString();
+                const QString bId = b.segment_id.toString();
+                if (droppedIds.contains(aId) || droppedIds.contains(bId))
+                    continue;
+                if (!DayValidity::intervalsOverlap(a.startTime, a.endTime, b.startTime, b.endTime))
+                    continue;
+                if (!isDroppable(a) || !isDroppable(b))
+                    continue;
+                const bool bLoses = (a.startTime < b.startTime) ||
+                    (a.startTime == b.startTime && aId < bId);
+                droppedIds.insert(bLoses ? bId : aId);
+            }
+        }
+
+        // Finding 2 (C3 review): a pre-existing overlap between an unedited
+        // completed row and the unedited live ongoing segment must also be
+        // resolvable by dropping, or the ongoing row's own type/interval
+        // guarantees no route to save except Cancel. The ongoing row is
+        // NEVER the one dropped -- ending the live session is not an option
+        // here -- only the conflicting completed row can lose, and only when
+        // it is itself droppable (genuinely persisted, unedited).
+        if (ongoingDurationForSave.has_value() && !originalTimelines_.empty()) {
+            const auto& origOngoing = originalTimelines_[0].ongoing();
+            const bool ongoingUnedited = origOngoing.has_value() &&
+                origOngoing->segment_id == ongoingDurationForSave->segment_id &&
+                origOngoing->type == ongoingDurationForSave->type;
+            if (ongoingUnedited) {
+                const TimeDuration& ong = ongoingDurationForSave.value();
+                for (const auto& d : unifiedCompleted) {
+                    const QString dId = d.segment_id.toString();
+                    if (droppedIds.contains(dId) || d.type == ong.type)
+                        continue;
+                    if (!DayValidity::intervalsOverlap(d.startTime, d.endTime, ong.startTime, ong.endTime))
+                        continue;
+                    if (!isDroppable(d))
+                        continue;
+                    droppedIds.insert(dId);
+                }
+            }
+        }
+
+        if (!droppedIds.empty()) {
+            std::deque<TimeDuration> kept;
+            for (const auto& d : unifiedCompleted)
+                if (!droppedIds.contains(d.segment_id.toString()))
+                    kept.push_back(d);
+            unifiedCompleted = std::move(kept);
+            Logger::Log(QString("[HISTORY] buildSavePayload: dropped %1 pre-existing cross-type overlap row(s)")
+                .arg(droppedIds.size()));
+        }
     }
 
     // Capture memory-origin intervals before normalization so we can re-route
@@ -293,19 +400,36 @@ HistoryEditSession::SavePayload HistoryEditSession::buildSavePayload() const
         }
     }
 
-    // Cross-midnight rows are preserved as-is in the history bucket.
-    for (const auto& d : crossMidnightRows_)
-        historyDurations.push_back(d);
-
-    // Ongoing goes into the session bucket for DB save.
-    if (ongoingDurationForSave.has_value())
+    // Ongoing goes into the session bucket for DB save. Finding 1 (C3 review):
+    // a backward wall-clock step (A8) can leave the ongoing row zero-length
+    // (start == end) so a save re-anchors the live segment instead of ending
+    // it. That zero-length row has nothing to persist as an unfinalized DB
+    // row -- maybeReanchorCheckpoint() (timetracker.cpp) uses the same
+    // `duration <= 0` guard for the same reason -- but it still rides along
+    // in memoryTimeline.ongoing() below via ongoingDurationForSave.
+    if (ongoingDurationForSave.has_value() &&
+        ongoingDurationForSave->startTime.msecsTo(ongoingDurationForSave->endTime) > 0)
         currentSessionDurations.push_back(ongoingDurationForSave.value());
+
+    // C3 (R13-001/R14-001): classify the exact rows this save would send to
+    // replaceAll(). A legacy cross-midnight row never enters pendingTimelines_
+    // (buildFromTimer() keeps it display-only in crossMidnight/continuations),
+    // so it is simply absent from historyDurations here rather than being
+    // carried forward -- this uniformly rejects any remaining cross-day/
+    // invalid/duplicate-id/overlap row exactly like every other uTimer write
+    // boundary.
+    std::deque<TimeDuration> combinedForValidation = historyDurations;
+    combinedForValidation.insert(combinedForValidation.end(),
+                                  currentSessionDurations.begin(), currentSessionDurations.end());
+    const DayValidity::Violation violation =
+        DayValidity::validatePayload(combinedForValidation);
 
     return SavePayload{
         Timeline::fromPersistedRows(historyDurations),
         Timeline(currentSessionDurations, std::nullopt),
         Timeline(currentMemoryDurations, ongoingDurationForSave),
-        needsMergeConfirmation
+        needsMergeConfirmation,
+        violation
     };
 }
 

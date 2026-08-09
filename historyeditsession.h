@@ -8,6 +8,7 @@
 #include <deque>
 #include "types.h"
 #include "timeline.h"
+#include "dayvalidity.h"
 
 class TimeTracker;
 
@@ -17,7 +18,8 @@ class TimeTracker;
  * Owns all state that was previously scattered across HistoryDialog:
  *   - The page list (pendingTimelines_ + display-only cross-midnight rows per page)
  *   - Origin tracking (which segments came from in-memory session vs DB)
- *   - Cross-midnight rows preserved unchanged through save
+ *   - Legacy cross-midnight rows are display-only and dropped from the save
+ *     payload (see buildSavePayload())
  *
  * No widget dependency. Can be constructed and exercised in tests without a QPA platform.
  *
@@ -54,12 +56,25 @@ public:
         Timeline sessionTimeline;        ///< rows to save to DB as unfinalized (ongoing only)
         Timeline memoryTimeline;         ///< rows to commit into TimeTracker's live session (current-session + ongoing)
         bool needsMergeConfirmation;     ///< true iff normalization merged overlapping rows
+        /// C3 (R13-001/R14-001): non-None means split/type-change/ongoing-conversion
+        /// produced (or left in place) an unsupported row -- invalid/non-positive/
+        /// cross-day interval, duplicate id, or an Activity/Pause overlap the user's
+        /// own edit created. The caller (HistoryDialog) must refuse to save rather
+        /// than call replaceAll(). Two categories of out-of-contract input never
+        /// reach this violation: a legacy cross-day row loaded unmodified from the
+        /// database is silently dropped from the payload (not preserved, not
+        /// rejected -- see buildSavePayload()), and a pre-existing cross-type
+        /// overlap between two genuinely persisted (never memory-origin) rows --
+        /// completed or the live ongoing segment -- loaded/held unmodified is
+        /// resolved the same way (see buildSavePayload()'s pre-existing-overlap
+        /// drop rule).
+        DayValidity::Violation violation = DayValidity::Violation::None;
     };
 
     HistoryEditSession() = default;
 
-    /// Populates pages_, pendingTimelines_, originIsMemory_, crossMidnightRows_
-    /// from the TimeTracker's current state and its DB history.
+    /// Populates pages_, pendingTimelines_, and originIsMemory_ from the
+    /// TimeTracker's current state and its DB history.
     void buildFromTimer(TimeTracker& timer);
 
     /// Refreshes the ongoing segment's end-time from the engine. If the user has
@@ -69,6 +84,37 @@ public:
 
     /// Builds the three timeline buckets ready for persistence and TimeTracker commit.
     /// Does NOT perform the save — the caller (HistoryDialog::accept()) owns that.
+    ///
+    /// Two categories of out-of-contract data loaded unmodified from the
+    /// database are silently dropped here rather than surfacing a violation
+    /// (plan C3 step 5: this loss is explicitly accepted for out-of-contract
+    /// data, however it arose -- manual database modification, or uTimer's
+    /// own recording across a wall-clock step (in either direction), e.g. an
+    /// NTP correction or a DST transition; D2 owns removing the generating
+    /// condition, not this method):
+    ///   - a legacy single-boundary cross-midnight row (buildFromTimer() already
+    ///     drops a row spanning more than one boundary; this drops the
+    ///     supported one-boundary case too, instead of carrying it forward);
+    ///   - a pre-existing Activity/Pause overlap between two completed rows,
+    ///     or between a completed row and the live ongoing segment, resolved
+    ///     by dropping one deterministically: on each conflict the later-
+    ///     starting row is dropped, and on equal starts the lexicographically
+    ///     larger SegmentId is dropped (the same tie-break plan section 2
+    ///     uses for same-type merges). The earliest-starting row of the
+    ///     candidate set always survives; a row dropped by an earlier
+    ///     conflict may itself be the earlier row of a later one. The
+    ///     ongoing row is NEVER the one dropped -- dropping it would end the
+    ///     live session -- so a conflict against it always drops the
+    ///     completed row instead.
+    /// Either drop rule applies ONLY when every row involved is byte-identical
+    /// to what buildFromTimer() originally loaded (or, for the ongoing row,
+    /// unchanged in id and type) AND is genuinely persisted -- never
+    /// memory-origin, even if unedited, since a memory-origin row is
+    /// never-persisted current-session work and dropping it would be silent
+    /// data loss (finding 3, C3 review). An overlap involving a row the user
+    /// actually edited this session, or a memory-origin row, is left as a
+    /// violation instead; preventing a user-authored overlap during editing
+    /// is D9/D7 step 4's job, not this method's.
     SavePayload buildSavePayload() const;
 
     /// True iff the user changed any page's rows since the session was built
@@ -92,7 +138,6 @@ public:
     const std::vector<Timeline>& pendingTimelines() const { return pendingTimelines_; }
     std::vector<Timeline>& pendingTimelines() { return pendingTimelines_; }
     const QHash<QString, bool>& originIsMemory() const { return originIsMemory_; }
-    const std::deque<TimeDuration>& crossMidnightRows() const { return crossMidnightRows_; }
     size_t pageCount() const { return pages_.size(); }
 
     /// True iff loadHistoryFromStore() reported TransientError/FatalError in
@@ -109,7 +154,6 @@ private:
     std::vector<Timeline> pendingTimelines_;
     std::vector<Timeline> originalTimelines_; ///< snapshot of pendingTimelines_ at build (for hasEdits)
     QHash<QString, bool> originIsMemory_; ///< segment_id.toString() → true if memory row
-    std::deque<TimeDuration> crossMidnightRows_; ///< cross-midnight rows preserved as-is through save
     bool history_load_failed_ = false;
     int history_load_skipped_ = 0;
     int history_load_repaired_ = 0;

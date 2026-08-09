@@ -3,6 +3,7 @@ TARGET = uTimer
 HEADERS = \
    $$PWD/apppaths.h \
    $$PWD/contentwidget.h \
+   $$PWD/dayvalidity.h \
    $$PWD/sqlitesessionstore.h \
    $$PWD/healthmonitor.h \
    $$PWD/sessionstore.h \

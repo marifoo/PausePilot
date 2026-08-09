@@ -142,6 +142,11 @@ private slots:
     // A14: a backward clock jump must not resurrect a future-dated orphan
     void test_recoverStartupCheckpoints_drops_future_dated_orphan();
 
+    // MUST-FIX4 (review packet C3): a cross-day orphan is well-formed by B2's
+    // malformed-row definition, so recovery finalization needs its own
+    // day-validity check to avoid crediting a cross-day checkpoint.
+    void test_recoverStartupCheckpoints_drops_unfinalized_cross_day_orphan();
+
     // B2 (R08-001..003,005, R05-004): atomic recovery disposition, exact
     // millisecond aggregation, malformed-row cleanup, and idempotency.
     void test_recoverStartupCheckpoints_deletes_malformed_rows_without_public_count();
@@ -194,6 +199,25 @@ private slots:
     // success because the old contract inferred success from message
     // emptiness.
     void test_C2_replaceAll_fails_on_commit_failure_with_empty_error_text();
+
+    // C3 (R13-001/R14-001): the day-validity/overlap payload guard rejects
+    // an invalid payload before mutation at every uTimer write boundary, and
+    // ordinary load deletes malformed finalized rows transactionally.
+    void test_C3_loadDurations_deletes_all_malformed_row_shapes();
+    // Finding 4 (C3 review, Medium): prove commit-or-rollback for the
+    // malformed-row delete by injection, matching the C2 standard.
+    void test_C3_loadDurations_rolls_back_malformed_delete_on_commit_failure_and_retries();
+    void test_C3_commitSession_rejects_cross_day_payload();
+    void test_C3_saveCheckpoint_rejects_cross_day_interval();
+    void test_C3_replaceAll_rejects_cross_type_overlap();
+    void test_C3_replaceAll_rejects_cross_day_payload();
+    // Review packet C3 MUST-FIX3: pin the previously-unpinned NonPositive,
+    // DuplicateId, and InvalidTimestamp violation branches at the store
+    // write boundary (mutation testing showed disabling any of these
+    // individually caused zero test failures).
+    void test_C3_saveCheckpoint_rejects_nonpositive_interval();
+    void test_C3_commitSession_rejects_duplicate_id();
+    void test_C3_commitSession_rejects_invalid_timestamp();
 };
 
 #endif // TEST_DATABASE_H

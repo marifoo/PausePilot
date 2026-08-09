@@ -32,6 +32,7 @@
 
 #include "sqlitesessionstore.h"
 #include "apppaths.h"
+#include "dayvalidity.h"
 #include <QMutexLocker>
 #include <QSet>
 #include <QSqlQuery>
@@ -670,11 +671,27 @@ BackupResult SqliteSessionStore::createBackup(const std::deque<TimeDuration>& du
  * Normalizes the timeline internally (merging adjacent same-type segments),
  * computes orphaned segment IDs, and delegates to updateDurationsById()
  * with the clean deque and orphan list. Callers never see removedSegmentIds.
+ *
+ * C3 (R13-001/R14-001): the raw payload is validated as a final guard before
+ * any mutation (checked before normalizing, since normalization only merges
+ * same-type rows and cannot fix or hide any of these violations).
+ * commitSession() only ever carries uTimer's own live-session data, which is
+ * always same-day by construction, so cross-day is rejected along with every
+ * other violation.
  */
 SessionStoreResult SqliteSessionStore::commitSession(const Timeline& session)
 {
     if (history_days_to_keep_ == 0) {
         return SessionStoreResult::disabled();
+    }
+    // Validate the raw payload before normalizing: normalization only merges
+    // same-type touching/overlapping rows, so it neither introduces nor hides
+    // any of these violations, and checking first avoids depending on
+    // Timeline::normalized()'s own same-day debug assertion to catch this.
+    const DayValidity::Violation violation = DayValidity::validatePayload(session.completed());
+    if (violation != DayValidity::Violation::None) {
+        Logger::Log("[DB] commitSession: rejecting invalid payload (" + DayValidity::describe(violation) + ")");
+        return SessionStoreResult::callerBug("commitSession: invalid payload (" + DayValidity::describe(violation) + ")");
     }
     const auto [normed, orphanIds] = session.normalizedWithRemovedIds();
     return updateDurationsById(normed.completed(), orphanIds);
@@ -868,6 +885,19 @@ SessionStoreResult SqliteSessionStore::replaceAll(const Timeline& history, const
     allDurations.insert(allDurations.end(), historyDurations.begin(), historyDurations.end());
     allDurations.insert(allDurations.end(), currentSessionDurations.begin(), currentSessionDurations.end());
 
+    // C3 (R13-001/R14-001): reject the entire payload before any mutation, the
+    // same uniform rule as every other write boundary. HistoryEditSession
+    // never carries a legacy cross-midnight or pre-existing cross-type-overlap
+    // row this far -- it drops both from the save payload before calling
+    // replaceAll() (see historyeditsession.cpp's buildSavePayload()) -- so
+    // this guard should never actually trigger from the History path; it
+    // remains the final backstop for any other caller.
+    const DayValidity::Violation violation = DayValidity::validatePayload(allDurations);
+    if (violation != DayValidity::Violation::None) {
+        Logger::Log("[DB] replaceAll: rejecting invalid payload (" + DayValidity::describe(violation) + ")");
+        return SessionStoreResult::callerBug("replaceAll: invalid payload (" + DayValidity::describe(violation) + ")");
+    }
+
     if (!ensureOpen()) {
         Logger::Log("[DB] Could not open DB to replace durations");
         return SessionStoreResult::fatal("DB connection could not be opened");
@@ -958,9 +988,10 @@ LoadResult SqliteSessionStore::loadDurations()
         return result;
     }
 
-    // Load all durations ordered by start_utc
+    // Load all durations ordered by start_utc. `id` is carried only so a
+    // malformed row can be deleted below (C3); it is never returned to the caller.
     QSqlQuery query(db);
-    query.prepare("SELECT segment_id, type, start_utc, end_utc FROM durations WHERE is_finalized = 1 ORDER BY start_utc");
+    query.prepare("SELECT id, segment_id, type, start_utc, end_utc FROM durations WHERE is_finalized = 1 ORDER BY start_utc");
     if (!query.exec()) {
         db.rollback();
         Logger::Log("[DB] Error executing load query: " + query.lastError().text());
@@ -968,27 +999,38 @@ LoadResult SqliteSessionStore::loadDurations()
         return result;
     }
 
+    // C3 (R13-001/R14-001, extends B2's recovery-time half to ordinary load):
+    // ids of rows skipped below for a genuinely malformed reason (invalid
+    // timestamp/type, empty id, non-positive interval). These are deleted
+    // transactionally after the read transaction below so malformed rows
+    // never escape the store to be silently purged later by an unrelated edit.
+    std::vector<long long> malformedIds;
+
     // Parse each row and reconstruct TimeDuration objects
     while (query.next()) {
+        const long long rowId = query.value(0).toLongLong();
+
         // An empty segment_id is a corrupt row (SegmentId::fromString asserts
         // non-empty in debug; the empty id would match every empty-id row on
         // upsert in release). Treat it as a skipped corrupt row.
-        const QString segmentIdStr = query.value(0).toString();
+        const QString segmentIdStr = query.value(1).toString();
         if (segmentIdStr.isEmpty()) {
             Logger::Log("[DB] Warning: Skipped row with empty segment_id");
             result.skipped++;
+            malformedIds.push_back(rowId);
             continue;
         }
         const SegmentId segmentId = SegmentId::fromString(segmentIdStr);
-        const int typeInt = query.value(1).toInt();
-        const QDateTime startDateTime = QDateTime::fromString(query.value(2).toString(), Qt::ISODateWithMs).toLocalTime();
-        const QDateTime endDateTime   = QDateTime::fromString(query.value(3).toString(), Qt::ISODateWithMs).toLocalTime();
+        const int typeInt = query.value(2).toInt();
+        const QDateTime startDateTime = QDateTime::fromString(query.value(3).toString(), Qt::ISODateWithMs).toLocalTime();
+        const QDateTime endDateTime   = QDateTime::fromString(query.value(4).toString(), Qt::ISODateWithMs).toLocalTime();
 
         // Validate type enum range
         if (typeInt != static_cast<int>(DurationType::Activity) &&
             typeInt != static_cast<int>(DurationType::Pause)) {
             Logger::Log(QString("[DB] Warning: Invalid type value %1, skipping entry").arg(typeInt));
             result.skipped++;
+            malformedIds.push_back(rowId);
             continue;
         }
 
@@ -997,8 +1039,9 @@ LoadResult SqliteSessionStore::loadDurations()
         // Validate timestamps
         if (!startDateTime.isValid() || !endDateTime.isValid()) {
             Logger::Log(QString("[DB] Warning: Skipped entry with invalid UTC timestamp(s) - start: %1, end: %2")
-                .arg(query.value(2).toString()).arg(query.value(3).toString()));
+                .arg(query.value(3).toString()).arg(query.value(4).toString()));
             result.skipped++;
+            malformedIds.push_back(rowId);
             continue;
         }
 
@@ -1007,6 +1050,7 @@ LoadResult SqliteSessionStore::loadDurations()
             Logger::Log(QString("[DB] Warning: Skipped entry with start > end - Start: %1, End: %2")
                 .arg(startDateTime.toString(Qt::ISODate)).arg(endDateTime.toString(Qt::ISODate)));
             result.skipped++;
+            malformedIds.push_back(rowId);
             continue;
         }
 
@@ -1017,6 +1061,7 @@ LoadResult SqliteSessionStore::loadDurations()
                 .arg(startDateTime.toString(Qt::ISODateWithMs))
                 .arg(endDateTime.toString(Qt::ISODateWithMs)));
             result.skipped++;
+            malformedIds.push_back(rowId);
             continue;
         }
         result.durations.emplace_back(TimeDuration::fromPersistedRow(type, startDateTime, endDateTime, segmentId));
@@ -1026,6 +1071,44 @@ LoadResult SqliteSessionStore::loadDurations()
     // so there is nothing to commit. Both commit() and rollback() release the
     // transaction lock, but rollback() signals the intent more clearly.
     db.rollback();
+
+    // C3: delete every malformed row found above in one transaction, logged
+    // with a single count. Best-effort: a failure here is logged and left for
+    // the next load to retry; it does not change the LoadResult already built
+    // from valid rows.
+    if (!malformedIds.empty()) {
+        if (db.transaction()) {
+            QSqlQuery deleteQuery(db);
+            deleteQuery.prepare("DELETE FROM durations WHERE id = :id");
+            bool deleteOk = true;
+            for (long long id : malformedIds) {
+                deleteQuery.bindValue(":id", static_cast<qlonglong>(id));
+                if (!deleteQuery.exec()) {
+                    Logger::Log("[DB] loadDurations: error deleting malformed row: " + deleteQuery.lastError().text());
+                    deleteOk = false;
+                    break;
+                }
+            }
+            if (deleteOk) {
+                // C4 review (finding 4): route through the same commit-or-
+                // rollback helper every other write boundary uses, so a
+                // genuine commit failure here is provably rolled back
+                // (connection restored to autocommit-ready) rather than
+                // left half-applied, and the C2 test injection seam
+                // (setForceCommitFailure_dbg()) covers this path too.
+                const CommitOutcome commitResult = commitOrRollback(
+                    "loadDurations: failed to delete malformed rows; will retry on next load");
+                if (commitResult.committed) {
+                    Logger::Log(QString("[DB] loadDurations: deleted %1 malformed row(s)").arg(malformedIds.size()));
+                }
+            } else {
+                db.rollback();
+                Logger::Log("[DB] loadDurations: failed to delete malformed rows; will retry on next load");
+            }
+        } else {
+            Logger::Log("[DB] loadDurations: could not start transaction to delete malformed rows");
+        }
+    }
 
     if (result.skipped > 0) {
         Logger::Log(QString("[DB] loadDurations reconciliation summary: skipped=%1").arg(result.skipped));
@@ -1107,6 +1190,17 @@ SessionStoreResult SqliteSessionStore::saveCheckpoint(DurationType type, const Q
 
     if (history_days_to_keep_ == 0) {
         return SessionStoreResult::disabled();
+    }
+
+    // C3 (R13-001/R14-001): reject an invalid interval before mutation.
+    // A checkpoint is always uTimer's own live segment, so it must be
+    // strictly same-day like every other write boundary.
+    const std::deque<TimeDuration> checkpointRow{
+        TimeDuration::fromPersistedRow(type, startTime, endTime, segmentId)};
+    const DayValidity::Violation violation = DayValidity::validatePayload(checkpointRow);
+    if (violation != DayValidity::Violation::None) {
+        Logger::Log("[DB] saveCheckpoint: rejecting invalid interval (" + DayValidity::describe(violation) + ")");
+        return SessionStoreResult::callerBug("saveCheckpoint: invalid interval (" + DayValidity::describe(violation) + ")");
     }
 
     if (!ensureOpen()) {
@@ -1940,8 +2034,15 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
         // orphan's endTime after "now" (msecsTo(now) negative, passing the
         // stale check above). Drop future-dated orphans instead of resurrecting them.
         const bool futureDated = orphan.endTime.isValid() && (now.msecsTo(orphan.endTime) > kOrphanFutureSlackMs);
+        // MUST-FIX4 (review packet C3): a cross-day orphan is well-formed by
+        // B2's malformed-row definition (not empty id/invalid type/invalid
+        // timestamp/start>=end), so it would otherwise reach finalizeOrOverlap
+        // with no day-validity check at all. Policy-drop it exactly like the
+        // other out-of-contract shapes above rather than finalizing it into
+        // history.
+        const bool crossDay = isCrossMidnight(orphan.startTime, orphan.endTime);
 
-        if (tooShort || stale || futureDated) {
+        if (tooShort || stale || futureDated || crossDay) {
             policyDropIds.push_back(orphan.id);
         } else {
             toFinalize.push_back(orphan);

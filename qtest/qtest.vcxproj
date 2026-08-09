@@ -168,6 +168,7 @@
     <ClInclude Include="fakeclock.h" />
     <ClInclude Include="fakesessionstore.h" />
     <ClInclude Include="..\apppaths.h" />
+    <ClInclude Include="..\dayvalidity.h" />
     <ClInclude Include="..\historyeditsession.h" />
     <ClInclude Include="..\sessionstore.h" />
     <ClInclude Include="..\shutdowncoordinator.h" />

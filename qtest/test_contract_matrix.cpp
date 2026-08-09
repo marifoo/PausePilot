@@ -91,7 +91,7 @@ void ContractMatrixTest::test_commitSession_disabled_returns_Disabled()
     const SessionStoreResult r = db.commitSession(Timeline(oneRow(), std::nullopt));
     QCOMPARE(r.category, SessionStoreResult::Disabled);
     QVERIFY(!r.ok());
-    // CallerBug: N/A — commitSession validates inputs at the SQL constraint level
+    // CallerBug: covered by C3's dayvalidity.h payload guard (see test_database.cpp)
     // transient/fatal: cannot be injected without closing the connection externally
 }
 
@@ -120,7 +120,7 @@ void ContractMatrixTest::test_replaceAll_success()
     QCOMPARE(r.category, SessionStoreResult::Success);
     QVERIFY(r.ok());
     QCOMPARE(db.loadDurations().size(), static_cast<size_t>(2));
-    // CallerBug: N/A — replaceAll uses no caller-supplied unique keys
+    // CallerBug: covered by C3's dayvalidity.h payload guard (see test_database.cpp)
     // transient/fatal: tested implicitly by ensureOpen/transaction failure paths
 }
 

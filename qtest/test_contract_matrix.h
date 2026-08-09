@@ -36,13 +36,20 @@ private slots:
     void test_commitSession_success();
     void test_commitSession_disabled_returns_Disabled();
     // transient/fatal: covered by ensureOpen failure (not easily injectable at unit level)
-    // CallerBug: N/A — commitSession validates via updateDurationsById which catches empty segment_id at SQL level
+    // CallerBug: commitSession now rejects an invalid payload (invalid/non-positive/
+    // cross-day interval, duplicate id, Activity/Pause overlap) via DayValidity
+    // before any mutation (C3, see dayvalidity.h). An executable matrix cell for this
+    // is added in C4.
 
     // ── replaceAll ──────────────────────────────────────────────────
     void test_replaceAll_success();
     void test_replaceAll_disabled_returns_Disabled();
     // transient/fatal: covered implicitly by ensureOpen and transaction failures
-    // CallerBug: N/A — replaceAll has no caller-supplied keys that can violate constraints
+    // CallerBug: replaceAll now rejects an invalid payload via the same uniform
+    // DayValidity guard as commitSession (C3, see dayvalidity.h) -- HistoryEditSession
+    // drops a legacy cross-midnight row and a pre-existing cross-type overlap from the
+    // save payload before this guard runs, so it should never trigger from the History
+    // path. An executable matrix cell for this is added in C4.
 
     // ── loadDurations ────────────────────────────────────────────────
     void test_loadDurations_success_returns_rows();

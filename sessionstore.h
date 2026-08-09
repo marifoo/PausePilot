@@ -164,8 +164,8 @@ struct LoadResult {
  * CallerBug is not applicable.
  *
  * policy_dropped_count counts rows deleted for a recovery POLICY reason
- * (too-short, stale, future-dated, overlap-rejected, or a durable A4 discard
- * intent) -- never a repaired-row count. Malformed rows (invalid timestamp/
+ * (too-short, stale, future-dated, cross-day, overlap-rejected, or a durable
+ * A4 discard intent) -- never a repaired-row count. Malformed rows (invalid timestamp/
  * type, empty id, non-positive interval) are also deleted as part of the
  * same atomic disposition, but are store-internal cleanup rather than a
  * policy decision: their count is logged only and is not part of this
@@ -213,12 +213,26 @@ public:
     virtual ~SessionStore() = default;
 
     /// @pre All segment_ids in the timeline must be non-empty
+    /// Returns CallerBug (C3) if the payload fails the day-validity/overlap
+    /// guard: invalid timestamp, non-positive interval, cross-day interval,
+    /// duplicate segment_id, or an Activity/Pause overlap. Rejected before
+    /// any mutation. This guard does not itself check for an empty
+    /// segment_id -- that validation lands in C4.
     virtual SessionStoreResult commitSession(const Timeline& session) = 0;
 
     /// Atomically replaces all rows (history finalized + session unfinalized).
     /// Returns Disabled when history storage is off (no-op, not an error).
     /// Returns TransientError or FatalError on DB failure.
-    /// CallerBug is not applicable.
+    /// Returns CallerBug (C3) if the payload fails the day-validity/overlap
+    /// guard: invalid timestamp, non-positive interval, cross-day interval,
+    /// duplicate segment_id, or an Activity/Pause overlap -- rejected before
+    /// any mutation, the same uniform rule as every other write boundary.
+    /// This guard does not itself check for an empty segment_id -- that
+    /// validation lands in C4.
+    /// HistoryEditSession drops a legacy cross-midnight row and a
+    /// pre-existing cross-type overlap from the save payload before calling
+    /// this, so this guard should never actually trigger from the History
+    /// path.
     virtual SessionStoreResult replaceAll(const Timeline& history, const Timeline& session) = 0;
 
     /// Returns all finalized rows sorted chronologically.
@@ -237,6 +251,8 @@ public:
     /// already belongs to a finalized row, the call returns CallerBug and leaves the
     /// row unchanged. Only unfinalized rows may be created or updated by this method.
     /// Returns Disabled when history storage is off (no-op, not an error).
+    /// Returns CallerBug (C3) if [startTime, endTime) is invalid, non-positive,
+    /// or crosses local midnight -- rejected before any mutation.
     /// @pre segmentId must be non-empty
     virtual SessionStoreResult saveCheckpoint(DurationType type, const QDateTime& startTime,
                                               const QDateTime& endTime, const SegmentId& segmentId) = 0;

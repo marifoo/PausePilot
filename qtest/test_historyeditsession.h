@@ -45,7 +45,7 @@ private slots:
     void test_merge_needed_for_overlapping_rows();
 
     // 5.1 — cross-midnight preservation
-    void test_cross_midnight_preserved_in_payload();
+    void test_cross_midnight_dropped_from_payload();
 
     // 5.1 — ongoing refresh/clear behaviour
     void test_refresh_ongoing_updates_end_time();
@@ -63,10 +63,32 @@ private slots:
 
     // A8: a backward clock jump during a running session must not stop the engine
     void test_backward_clock_jump_keeps_engine_running();
+    // Finding 1 (C3 review): same arrangement, pinning buildSavePayload()'s
+    // violation classification directly.
+    void test_C3_payload_backward_clock_jump_not_nonpositive();
 
     // F1: a failed history load must be remembered (Disabled is not a failure)
     void test_F1_historyLoadFailed_true_on_transient_error();
     void test_F1_historyLoadFailed_false_when_disabled();
+
+    // C3 (R13-001/R14-001): buildSavePayload() classifies whether the save
+    // would create an unsupported row.
+    void test_C3_payload_violation_none_for_ordinary_edit();
+    // MUST-FIX2 (user decision, review packet C3): a pre-existing cross-type
+    // overlap between two unedited rows is dropped (deterministically), not
+    // flagged, so an unrelated save still succeeds.
+    void test_C3_payload_drops_pre_existing_cross_type_overlap();
+    void test_C3_payload_drops_pre_existing_overlap_equal_start_tie_break();
+    // An overlap created by this session's own edit is still a violation --
+    // the pre-existing drop rule must not blur into edit-time prevention.
+    void test_C3_payload_flags_overlap_created_by_edit();
+    // Finding 3 (C3 review): a memory-origin row involved in a pre-existing
+    // overlap must never be silently dropped, even if otherwise unedited.
+    void test_C3_payload_flags_memory_origin_overlap_instead_of_dropping();
+    // Finding 2 (C3 review): the drop rule must also cover a conflict
+    // between an unedited completed row and the unedited live ongoing
+    // segment -- dropping the completed row, never the ongoing one.
+    void test_C3_payload_drops_completed_row_conflicting_with_unedited_ongoing();
 };
 
 #endif // TEST_HISTORYEDITSESSION_H

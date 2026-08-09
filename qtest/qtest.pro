@@ -69,6 +69,7 @@ HEADERS += \
     test_persistence_contract.h \
     test_contract_matrix.h \
     $$PWD/../apppaths.h \
+    $$PWD/../dayvalidity.h \
     $$PWD/../splitdialog.h \
     $$PWD/../historyeditsession.h \
     $$PWD/../healthmonitor.h \
