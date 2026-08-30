@@ -53,19 +53,23 @@ void HistoryEditSession::buildFromTimer(TimeTracker& timer)
         if (isDuplicateOfCurrent)
             continue;
 
-        if (isCrossMidnight(d.startTime, d.endTime)) {
+        // Classify by which local date(s) [startTime, endTime) overlaps, half-open
+        // (D1): a segment ending exactly at local midnight belongs to its start date
+        // only, not the following one.
+        const QDate startDate = d.startTime.toLocalTime().date();
+        if (DayValidity::overlapsLocalDate(d.startTime, d.endTime, startDate.addDays(2))) {
             // Segments spanning more than one calendar boundary cannot occur in
             // normal TimeTracker operation — skip them entirely.
-            if (d.endTime.toLocalTime().date() > d.startTime.toLocalTime().date().addDays(1)) {
-                qWarning("[HISTORY] buildFromTimer: skipping segment spanning >1 calendar boundary (segment_id: %s)",
-                         qPrintable(d.segment_id.toString()));
-                continue;
-            }
-            crossMidnightByStartDay[d.startTime.date()].push_back(d);
-            continuationsByEndDay[d.endTime.date()].push_back(d);
+            qWarning("[HISTORY] buildFromTimer: skipping segment spanning >1 calendar boundary (segment_id: %s)",
+                     qPrintable(d.segment_id.toString()));
+            continue;
+        }
+        if (DayValidity::overlapsLocalDate(d.startTime, d.endTime, startDate.addDays(1))) {
+            crossMidnightByStartDay[startDate].push_back(d);
+            continuationsByEndDay[startDate.addDays(1)].push_back(d);
             originIsMemory_.insert(d.segment_id.toString(), false);
         } else {
-            historyByDay[d.startTime.date()].push_back(d);
+            historyByDay[startDate].push_back(d);
         }
     }
 

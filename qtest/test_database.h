@@ -68,6 +68,8 @@ private slots:
     void test_hasEntriesForDate_utc_positive_offset();
     void test_hasEntriesForDate_utc_negative_offset();
     void test_hasEntriesForDate_utc_regression();
+    void test_hasEntriesForDate_overlap_detects_legacy_cross_midnight_row();
+    void test_hasEntriesForDate_exact_midnight_endpoint();
 
     // Retention cleanup once-per-session tests (T22)
     void test_retention_cleanup_runs_once_across_multiple_opens();

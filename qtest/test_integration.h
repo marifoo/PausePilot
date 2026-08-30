@@ -57,6 +57,7 @@ private slots:
     // Step 19 (C9 timezone): parameterized timezone tests for hasEntriesForDate.
     void test_hasEntriesForDate_timezone_data();
     void test_hasEntriesForDate_timezone();
+    void test_bootCredit_suppressed_by_legacy_cross_midnight_row_on_dst_day();
     void test_midnight_boundary_timezone_data();
     void test_midnight_boundary_timezone();
 

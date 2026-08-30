@@ -373,12 +373,9 @@ void HistoryDialog::updateTotalsLabel(uint idx)
     qint64 totalActivity = pendingTimelines[idx].activeMsec();
     qint64 totalPause    = pendingTimelines[idx].pauseMsec();
 
-    const QDateTime dayStart(pages[idx].pageDate, QTime(0, 0, 0), Qt::LocalTime);
-    const QDateTime dayEnd = dayStart.addDays(1);
+    const QDate& pageDate = pages[idx].pageDate;
     auto portionInDay = [&](const TimeDuration& d) -> qint64 {
-        const QDateTime s = std::max(d.startTime.toLocalTime(), dayStart);
-        const QDateTime e = std::min(d.endTime.toLocalTime(), dayEnd);
-        return s < e ? s.msecsTo(e) : 0;
+        return DayValidity::clippedMsecInLocalDate(d.startTime.toLocalTime(), d.endTime.toLocalTime(), pageDate);
     };
     for (const auto& d : pages[idx].crossMidnight)
         (d.type == DurationType::Activity ? totalActivity : totalPause) += portionInDay(d);

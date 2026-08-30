@@ -1017,6 +1017,58 @@ void IntegrationTest::test_hasEntriesForDate_timezone()
 }
 
 /**
+ * D1 (R16-002/R08-004): end-to-end proof that TimeTracker::start()'s
+ * boot-credit gate benefits from hasEntriesForDate()'s overlap semantics, on
+ * a Europe/Berlin DST-transition day (2025-03-30, local day is 23h). A
+ * legacy row spanning the *previous* local midnight (out-of-contract, only
+ * reachable via manual DB modification -- no uTimer write path produces it)
+ * already covers the first half hour of "today"; boot credit must not add a
+ * second helping of that time.
+ */
+void IntegrationTest::test_bootCredit_suppressed_by_legacy_cross_midnight_row_on_dst_day()
+{
+    TzGuard guard;
+    guard.set("Europe/Berlin");
+
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 30);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/boot_time_seconds", 30);
+    writer.sync();
+    Settings settings(settingsPath);
+
+    // Legacy row: 2025-03-29 23:30 local -> 2025-03-30 00:30 local, spanning
+    // the local midnight into the DST-transition day.
+    const QDateTime legacyStart(QDate(2025, 3, 29), QTime(23, 30, 0), Qt::LocalTime);
+    const QDateTime legacyEnd(QDate(2025, 3, 30), QTime(0, 30, 0), Qt::LocalTime);
+    {
+        SqliteSessionStore db(settings);
+        std::deque<TimeDuration> durations;
+        durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, legacyStart, legacyEnd));
+        QVERIFY(db.saveDurations(durations, TransactionMode::Append));
+    }
+
+    SqliteSessionStore db(settings);
+    TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([]() {
+        return QDateTime(QDate(2025, 3, 30), QTime(10, 0, 0), Qt::LocalTime);
+    });
+
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(10);
+
+    qint64 totalActivity = 0;
+    for (const auto& d : tracker.sessionState_dbg().durations)
+        if (d.type == DurationType::Activity && d.duration >= 25000)
+            totalActivity += d.duration;
+    QVERIFY2(totalActivity < 29000,
+             "Boot time must not be added when a legacy cross-midnight row already "
+             "overlaps today, even though it did not start today");
+}
+
+/**
  * Data provider: timezones for the midnight boundary reconciliation test.
  */
 void IntegrationTest::test_midnight_boundary_timezone_data()

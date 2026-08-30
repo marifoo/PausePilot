@@ -4,10 +4,12 @@
 #include <QDateTime>
 #include <QSet>
 #include <QString>
+#include <algorithm>
 #include <deque>
 #include "types.h"
 
-/// DayValidity -- minimal Qt-only day-validity primitive (C3, R13-001/R14-001).
+/// DayValidity -- minimal Qt-only day-validity primitive (C3, R13-001/R14-001;
+/// extended by D1, R16-002/R08-004/R13-002/R04-004).
 ///
 /// Computes whether a batch of TimeDuration rows is safe to write: every row
 /// must have a valid, positive interval and a non-empty, unique segment_id,
@@ -17,11 +19,19 @@
 /// classification, so an invalid payload is rejected before mutation rather
 /// than silently written.
 ///
-/// Does NOT do (see D1): validate an interval against a specific requested
-/// calendar date, apply DST-aware endpoint semantics, or decide boot-credit
-/// eligibility. D1 extends this primitive with that logic and migrates the
-/// remaining ad hoc day-membership checks (TimeDuration::create, Timeline,
-/// hasEntriesForDate, ...) onto it.
+/// D1 additionally provides exact overlap of an interval against a requested
+/// local calendar date (localDayStart/localDayEnd/overlapsLocalDate) and the
+/// clipped-portion helper UI totals need (clippedMsecInLocalDate).
+/// SqliteSessionStore's hasEntriesForDate, boot-credit eligibility in
+/// TimeTracker, HistoryDialog's per-page totals clipping, and
+/// HistoryEditSession's page grouping call these directly. localDayStart and
+/// localDayEnd themselves live in types.h (this namespace is reopened here),
+/// since types.h's isCrossMidnight (used by TimeDuration::create, the
+/// validatePayload above, Timeline legality, and TimeTracker's day-boundary
+/// watcher) needs them and this header already includes types.h -- so there
+/// is one definition, not a mirrored copy. All of it uses timezone-aware
+/// QDateTime, never a fixed 24-hour/86400000ms constant, so a 23- or 25-hour
+/// DST transition day is handled correctly.
 namespace DayValidity {
 
 /// Reason a payload was rejected by validatePayload(). None means acceptable.
@@ -29,17 +39,15 @@ enum class Violation {
     None,
     InvalidTimestamp,  ///< start or end is not a valid QDateTime.
     NonPositive,       ///< end <= start.
-    CrossDay,          ///< start.date() != end.date().
+    CrossDay,          ///< end is beyond the exclusive end of start's local day.
     DuplicateId,       ///< the same segment_id appears more than once in the payload.
     TypeOverlap,       ///< an Activity interval overlaps a Pause interval.
 };
 
-/// True iff half-open intervals [aStart, aEnd) and [bStart, bEnd) overlap.
-inline bool intervalsOverlap(const QDateTime& aStart, const QDateTime& aEnd,
-                             const QDateTime& bStart, const QDateTime& bEnd)
-{
-    return aStart < bEnd && bStart < aEnd;
-}
+// intervalsOverlap, localDayStart and localDayEnd live in types.h (this
+// namespace is reopened here) -- they need only QDateTime, so keeping them
+// there lets both this header and types.h's isCrossMidnight share one
+// definition instead of two.
 
 /// Validates a complete batch of rows before any of them may be written.
 ///
@@ -82,6 +90,25 @@ inline Violation validatePayload(const std::deque<TimeDuration>& rows)
     }
 
     return Violation::None;
+}
+
+/// True iff half-open interval [start, end) overlaps local calendar date
+/// `date` at all. An interval ending exactly at local midnight contributes
+/// nothing to the following day (half-open semantics, via intervalsOverlap).
+inline bool overlapsLocalDate(const QDateTime& start, const QDateTime& end, const QDate& date)
+{
+    return intervalsOverlap(start, end, localDayStart(date), localDayEnd(date));
+}
+
+/// Milliseconds of [start, end) that fall within local calendar date `date`,
+/// clipped to the date's bounds. 0 when there is no overlap.
+inline qint64 clippedMsecInLocalDate(const QDateTime& start, const QDateTime& end, const QDate& date)
+{
+    const QDateTime dayStart = localDayStart(date);
+    const QDateTime dayEnd = localDayEnd(date);
+    const QDateTime s = std::max(start, dayStart);
+    const QDateTime e = std::min(end, dayEnd);
+    return s < e ? s.msecsTo(e) : 0;
 }
 
 /// Human-readable reason, for log lines only (not shown to end users).

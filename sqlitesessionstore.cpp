@@ -1131,14 +1131,23 @@ LoadResult SqliteSessionStore::loadDurations()
 }
 
 /**
- * Checks whether finalized entries exist for a given date.
+ * Checks whether finalized entries overlap a given local date.
  *
  * Returns a tri-state result:
- * - Yes:     At least one finalized entry exists for the date.
- * - No:      The DB was queried successfully and zero entries were found.
+ * - Yes:     At least one finalized entry overlaps the date's [00:00, 24:00)
+ *            local half-open span (DayValidity::overlapsLocalDate).
+ * - No:      The DB was queried successfully and no entry overlaps.
  * - Unknown: The DB could not be opened (history disabled or open failure).
  *            Callers should treat Unknown conservatively — e.g. do NOT assume
  *            "no entries exist" when the answer is actually unknowable.
+ *
+ * D1 (R08-004): this matches on overlap, not merely on whether the row
+ * *started* that day. Every row a current uTimer write path can produce is
+ * same-day, so overlap and start-date agree for all conforming data; they
+ * diverge only for a legacy cross-midnight row already sitting in someone's
+ * database (out of contract, but loadable -- see C3). The sole caller,
+ * boot-credit eligibility, must never double-count time a legacy row already
+ * covers, so overlap is the conservative and correct semantics here.
  */
 EntriesForDateResult SqliteSessionStore::hasEntriesForDate(const QDate& date)
 {
@@ -1154,18 +1163,16 @@ EntriesForDateResult SqliteSessionStore::hasEntriesForDate(const QDate& date)
     }
 
     // Compute the UTC half-open range covering the caller's local day.
-    const QDateTime localStart(date, QTime(0, 0, 0), Qt::LocalTime);
-    const QDateTime localEnd = localStart.addDays(1);
-    const QDateTime utcStart = localStart.toUTC();
-    const QDateTime utcEnd   = localEnd.toUTC();
+    const QDateTime utcStart = DayValidity::localDayStart(date).toUTC();
+    const QDateTime utcEnd   = DayValidity::localDayEnd(date).toUTC();
 
-    // Check if any finalized entry started within that UTC range.
+    // Check if any finalized entry overlaps that UTC range.
     QSqlQuery query(db);
     query.prepare(
         "SELECT 1 FROM durations"
         " WHERE is_finalized = 1"
-        "   AND start_utc >= :utcStartTs"
-        "   AND start_utc <  :utcEndTs"
+        "   AND start_utc < :utcEndTs"
+        "   AND end_utc   > :utcStartTs"
         " LIMIT 1"
     );
     query.bindValue(":utcStartTs", utcStart.toString(Qt::ISODateWithMs));

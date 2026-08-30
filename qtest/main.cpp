@@ -26,6 +26,7 @@ class TimelineTest;
 class RenamesTest;
 class PersistenceContractTest;
 class ContractMatrixTest;
+class DayValidityTest;
 
 // Include test class headers
 #include "test_logger.h"
@@ -45,6 +46,7 @@ class ContractMatrixTest;
 #include "test_renames.h"
 #include "test_persistence_contract.h"
 #include "test_contract_matrix.h"
+#include "test_dayvalidity.h"
 
 // ---------------------------------------------------------------------------
 // QWARN counter: pipe-based stdout tee (POSIX/Linux only)
@@ -166,6 +168,7 @@ int main(int argc, char *argv[])
     runTest(new RenamesTest, "RenamesTest");
     runTest(new PersistenceContractTest, "PersistenceContractTest");
     runTest(new ContractMatrixTest, "ContractMatrixTest");
+    runTest(new DayValidityTest, "DayValidityTest");
 
     qDebug() << "\n================ All Tests Complete ================";
 

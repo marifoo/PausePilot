@@ -1211,10 +1211,11 @@ void TimerTest::test_E_boot_time_gate_entries_unknown_skips_boot_time()
 
 void TimerTest::test_E_boot_time_inmemory_start_date_skips_boot_time()
 {
-    // Regression guard for #3: in-memory check uses startTime.date() (not endTime.date()).
-    // DB says No entries, but an in-memory completed cross-midnight segment with
-    // startTime == today (endTime == tomorrow) must block boot time from being added.
-    // Discriminating: reverting to endTime.date() would fail (endTime is tomorrow ≠ today).
+    // Regression guard for #3: in-memory check uses
+    // DayValidity::overlapsLocalDate(d.startTime, d.endTime, today) (D1), not a
+    // private startTime/endTime.date() comparison. DB says No entries, but an
+    // in-memory completed cross-midnight segment starting today and ending
+    // tomorrow overlaps today and must block boot time from being added.
 
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -1229,9 +1230,8 @@ void TimerTest::test_E_boot_time_inmemory_start_date_skips_boot_time()
     TimeTracker tracker(settings, fakeDb);
 
     // Pre-seed a cross-midnight completed segment: startTime is today, endTime is
-    // tomorrow. This is the discriminating case — if the production check used
-    // endTime.date() instead of startTime.date(), endTime (tomorrow) != today,
-    // the check would miss, and boot time would be added (test would FAIL).
+    // tomorrow. It overlaps today (DayValidity::overlapsLocalDate), so the
+    // production check must find it and block boot time from being added.
     QDateTime now = QDateTime::currentDateTime();
     QDateTime startToday = QDateTime(now.date(), QTime(23, 0, 0));
     QDateTime endTomorrow = startToday.addSecs(3600); // crosses midnight

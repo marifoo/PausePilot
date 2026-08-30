@@ -1,6 +1,7 @@
 #include "test_database.h"
 #include "fakesessionstore.h"
 #include <QtTest>
+#include <algorithm>
 
 using TestCommon::createSettingsFile;
 using TestCommon::mk;
@@ -1364,6 +1365,160 @@ void DatabaseTest::test_hasEntriesForDate_utc_regression()
     QCOMPARE(manager.hasEntriesForDate(QDate(2025, 6, 15)), EntriesForDateResult::Yes);
     QCOMPARE(manager.hasEntriesForDate(QDate(2025, 6, 14)), EntriesForDateResult::No);
     QCOMPARE(manager.hasEntriesForDate(QDate(2025, 6, 16)), EntriesForDateResult::No);
+}
+
+void DatabaseTest::test_hasEntriesForDate_overlap_detects_legacy_cross_midnight_row()
+{
+    // D1 (R08-004): a legacy row spanning local midnight -- unsupported by any
+    // uTimer write path, but reachable via manual database modification --
+    // must still suppress boot credit for the day it spills into. A row
+    // starting 2025-06-14 23:30 local and ending 2025-06-15 00:30 local
+    // overlaps 2025-06-15 even though it did not *start* there; boot credit
+    // must not be added for 2025-06-15 in that case (double-counting the
+    // 00:00-00:30 portion already covered by the legacy row).
+    struct TzGuard {
+        QByteArray orig;
+        TzGuard() : orig(qgetenv("TZ")) {}
+        ~TzGuard() { orig.isEmpty() ? qunsetenv("TZ") : qputenv("TZ", orig); tzset(); }
+    } tzGuard;
+    qputenv("TZ", "UTC");
+    tzset();
+
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 30000));
+
+    {
+        SqliteSessionStore bootstrap(settings);
+        QVERIFY(bootstrap.saveDurations({}, TransactionMode::Append));
+    }
+
+    const QString connName = "seed_legacy_cross_midnight";
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", connName);
+        db.setDatabaseName(db_path_);
+        QVERIFY(db.open());
+        QSqlQuery q(db);
+        q.prepare(
+            "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+            "VALUES (:sid, 0, '2025-06-14T23:30:00.000Z', '2025-06-15T00:30:00.000Z', 1)"
+        );
+        q.bindValue(":sid", SegmentId::mint().toString());
+        QVERIFY(q.exec());
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(connName);
+
+    SqliteSessionStore manager(settings);
+
+    // The row overlaps both calendar dates it touches.
+    QCOMPARE(manager.hasEntriesForDate(QDate(2025, 6, 14)), EntriesForDateResult::Yes);
+    QCOMPARE(manager.hasEntriesForDate(QDate(2025, 6, 15)), EntriesForDateResult::Yes);
+    QCOMPARE(manager.hasEntriesForDate(QDate(2025, 6, 13)), EntriesForDateResult::No);
+    QCOMPARE(manager.hasEntriesForDate(QDate(2025, 6, 16)), EntriesForDateResult::No);
+}
+
+void DatabaseTest::test_hasEntriesForDate_exact_midnight_endpoint()
+{
+    // D1 (R08-004, MEDIUM-2): pins both comparison operators in
+    // hasEntriesForDate's predicate (start_utc < :utcEndTs AND end_utc >
+    // :utcStartTs) as strict. Reuses the same interval as
+    // TestCommon::dayOverlapRows()'s "exact_midnight_endpoint_same_day" /
+    // "exact_midnight_endpoint_no_spill_to_next_day" rows -- a row ending
+    // exactly at local midnight belongs to its start date only. Flipping
+    // either operator to non-strict would make this test fail while every
+    // other hasEntriesForDate test (which deliberately sits off both
+    // boundaries) keeps passing.
+    struct TzGuard {
+        QByteArray orig;
+        TzGuard() : orig(qgetenv("TZ")) {}
+        ~TzGuard() { orig.isEmpty() ? qunsetenv("TZ") : qputenv("TZ", orig); tzset(); }
+    } tzGuard;
+    qputenv("TZ", "UTC");
+    tzset();
+
+    const auto rows = TestCommon::dayOverlapRows();
+    auto findRow = [&rows](const char* name) -> const TestCommon::DayOverlapRow& {
+        auto it = std::find_if(rows.begin(), rows.end(),
+            [name](const TestCommon::DayOverlapRow& r) { return qstrcmp(r.name, name) == 0; });
+        Q_ASSERT(it != rows.end());
+        return *it;
+    };
+    const TestCommon::DayOverlapRow& sameDay = findRow("exact_midnight_endpoint_same_day");
+    const TestCommon::DayOverlapRow& noSpill = findRow("exact_midnight_endpoint_no_spill_to_next_day");
+
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 30000));
+
+    {
+        SqliteSessionStore bootstrap(settings);
+        QVERIFY(bootstrap.saveDurations({}, TransactionMode::Append));
+    }
+
+    const QDateTime start(QDate(sameDay.startY, sameDay.startMo, sameDay.startD),
+                           QTime(sameDay.startH, sameDay.startMi, sameDay.startS), Qt::UTC);
+    const QDateTime end(QDate(sameDay.endY, sameDay.endMo, sameDay.endD),
+                         QTime(sameDay.endH, sameDay.endMi, sameDay.endS), Qt::UTC);
+
+    const QString connName = "seed_exact_midnight_endpoint";
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", connName);
+        db.setDatabaseName(db_path_);
+        QVERIFY(db.open());
+        QSqlQuery q(db);
+        q.prepare(
+            "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+            "VALUES (:sid, 0, :s, :e, 1)"
+        );
+        q.bindValue(":sid", SegmentId::mint().toString());
+        q.bindValue(":s", start.toUTC().toString(Qt::ISODateWithMs));
+        q.bindValue(":e", end.toUTC().toString(Qt::ISODateWithMs));
+        QVERIFY(q.exec());
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(connName);
+
+    SqliteSessionStore manager(settings);
+
+    const QDate sameDayQuery(sameDay.queryY, sameDay.queryMo, sameDay.queryD);
+    const QDate noSpillQuery(noSpill.queryY, noSpill.queryMo, noSpill.queryD);
+    QCOMPARE(manager.hasEntriesForDate(sameDayQuery),
+              sameDay.expectedOverlap ? EntriesForDateResult::Yes : EntriesForDateResult::No);
+    QCOMPARE(manager.hasEntriesForDate(noSpillQuery),
+              noSpill.expectedOverlap ? EntriesForDateResult::Yes : EntriesForDateResult::No);
+
+    // D1 (R08-004 round 2, MEDIUM-1): the row above pins end_utc > (strict).
+    // Pin start_utc < (strict) too, in a fresh database so the earlier row
+    // (which already legitimately overlaps 2025-06-15) cannot mask the
+    // mutation: a row starting exactly at 2025-06-16's local midnight must
+    // NOT count as an entry for 2025-06-15. Flipping start_utc < to <= would
+    // make this assertion fail while every other case in this test (and the
+    // rest of the suite) keeps passing.
+    resetDatabaseFile();
+    {
+        SqliteSessionStore bootstrap(settings);
+        QVERIFY(bootstrap.saveDurations({}, TransactionMode::Append));
+    }
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", connName);
+        db.setDatabaseName(db_path_);
+        QVERIFY(db.open());
+        QSqlQuery q(db);
+        q.prepare(
+            "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+            "VALUES (:sid, 0, '2025-06-16T00:00:00.000Z', '2025-06-16T02:00:00.000Z', 1)"
+        );
+        q.bindValue(":sid", SegmentId::mint().toString());
+        QVERIFY(q.exec());
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(connName);
+
+    SqliteSessionStore boundaryManager(settings);
+    QCOMPARE(boundaryManager.hasEntriesForDate(QDate(2025, 6, 15)), EntriesForDateResult::No);
 }
 
 // ============================================================================
@@ -4365,12 +4520,12 @@ void DatabaseTest::test_C2_saveCheckpoint_insert_rolls_back_on_genuine_commit_lo
 // qtest/test_historyeditsession.cpp's test_cross_midnight_dropped_from_payload).
 //
 // SHOULD-FIX #6 (review packet C3): these cross-day fixtures are built with
-// Qt::LocalTime, not Qt::UTC. DayValidity::isCrossMidnight() compares
-// QDateTime::date() in the value's OWN timespec (D1 will make this
-// timezone-aware); tagging 23:50->00:10 as UTC would make it cross the UTC
-// date while landing on the SAME local calendar day on this machine
-// (Europe/Berlin, UTC+2 in June), which would not exercise the guard for the
-// reason the test name claims.
+// Qt::LocalTime, not Qt::UTC. isCrossMidnight() (types.h) is timezone-aware
+// -- it converts to local time via .toLocalTime() before comparing dates;
+// tagging 23:50->00:10 as UTC would make it cross the UTC date while
+// landing on the SAME local calendar day on this machine (Europe/Berlin,
+// UTC+2 in June), which would not exercise the guard for the reason the
+// test name claims.
 // ============================================================================
 
 void DatabaseTest::test_C3_commitSession_rejects_cross_day_payload()

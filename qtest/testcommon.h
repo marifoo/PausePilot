@@ -5,6 +5,7 @@
 #include <deque>
 #include <iterator>
 #include <cmath>
+#include <vector>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
@@ -32,6 +33,35 @@ QString createSettingsFile(const QString& dirPath, int historyDays);
 
 // Sums all durations of a specific type from a deque
 qint64 sumDurations(const std::deque<TimeDuration>& d, DurationType type);
+
+/// D1 (R16-002/R08-004/R13-002/R04-004): one shared data table for day-
+/// membership/overlap semantics. Consumed directly by the primitive
+/// (test_dayvalidity.cpp, every row). The store's
+/// test_hasEntriesForDate_exact_midnight_endpoint() (test_database.cpp) pulls
+/// the two exact-midnight rows out of this table by name for its seed data.
+/// The tracker (test_timer.cpp) and History (test_historydialog.cpp) layers
+/// do not consume this table yet -- they pin day-membership behaviour with
+/// their own hand-built scenarios instead.
+///
+/// All date/time fields are local wall-clock components under `tz` (the TZ
+/// environment value the test must set -- via a TzGuard -- before
+/// constructing any QDateTime from this row, since Qt::LocalTime depends on
+/// the process's current zone). `expectedOverlap` is
+/// DayValidity::overlapsLocalDate(start, end, queryDate); `expectedCrossDay`
+/// is the free function isCrossMidnight(start, end) (types.h) i.e. whether
+/// this exact interval would be rejected as DayValidity::Violation::CrossDay /
+/// DurationCreateError::CrossMidnight at a write boundary.
+struct DayOverlapRow {
+    const char* name;
+    const char* tz;
+    int startY, startMo, startD, startH, startMi, startS;
+    int endY,   endMo,   endD,   endH,   endMi,   endS;
+    int queryY, queryMo, queryD;
+    bool expectedOverlap;
+    bool expectedCrossDay;
+};
+
+std::vector<DayOverlapRow> dayOverlapRows();
 
 } // namespace TestCommon
 

@@ -127,6 +127,7 @@
     <ClCompile Include="test_renames.cpp" />
     <ClCompile Include="test_persistence_contract.cpp" />
     <ClCompile Include="test_contract_matrix.cpp" />
+    <ClCompile Include="test_dayvalidity.cpp" />
     <ClCompile Include="..\healthmonitor.cpp" />
     <ClCompile Include="..\splitdialog.cpp" />
     <ClCompile Include="..\historydialog.cpp" />
@@ -158,6 +159,7 @@
     <QtMoc Include="test_renames.h" />
     <QtMoc Include="test_persistence_contract.h" />
     <QtMoc Include="test_contract_matrix.h" />
+    <QtMoc Include="test_dayvalidity.h" />
     <QtMoc Include="..\healthmonitor.h" />
     <QtMoc Include="..\splitdialog.h" />
     <QtMoc Include="..\historydialog.h" />

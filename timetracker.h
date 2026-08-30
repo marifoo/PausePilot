@@ -309,9 +309,11 @@ private:
     void backpauseTimer(const QDateTime& now, const QDateTime& lockTime = QDateTime());
     void finalizePauseTransition(const QDateTime& now);
     // Appends a single same-day segment to session_.durations.
-    // Silently discards segments where startTime.date() != endTime.date()
-    // (last-line defence for cross-midnight). DayBoundaryWatcher's scheduled
-    // stop and watchdog are supposed to make cross-midnight inputs unreachable.
+    // Silently discards segments that cross local midnight (D1: half-open
+    // [start, end) -- ending exactly at local midnight is same-day and
+    // legal) (last-line defence for cross-midnight). DayBoundaryWatcher's
+    // scheduled stop and watchdog are supposed to make cross-midnight
+    // inputs unreachable.
     void addDuration(DurationType type,
                      const QDateTime& startTime,
                      const QDateTime& endTime,
@@ -500,8 +502,9 @@ public:
     EditCommitResult commitEditedTimeline(const Timeline& edited);
     LoadResult loadHistoryFromStore();
     std::optional<TimeDuration> getOngoingDuration() const;
-    // Cheap thread-safe predicate used by the MainWin watchdog. Returns true
-    // iff there is an ongoing segment whose start date is earlier than today.
+    // Cheap thread-safe predicate: true iff there is an ongoing segment that
+    // has crossed local midnight as of now (isCrossMidnight(start, now)).
+    // No production caller currently; exercised by tests only.
     bool isOngoingSegmentCrossMidnight() const;
     qint64 getStartupRecoveredMsec() const;
     bool shouldShowStartupRecoveryNotification() const;

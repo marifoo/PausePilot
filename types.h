@@ -47,6 +47,57 @@ private:
     QString value_;
 };
 
+/// DayValidity primitives shared with dayvalidity.h. These three need only
+/// QDateTime, so they live here (rather than in dayvalidity.h, which
+/// includes types.h for TimeDuration and so cannot be included back from
+/// here) and dayvalidity.h uses this copy instead of duplicating it.
+namespace DayValidity {
+
+/// True iff half-open intervals [aStart, aEnd) and [bStart, bEnd) overlap.
+inline bool intervalsOverlap(const QDateTime& aStart, const QDateTime& aEnd,
+                             const QDateTime& bStart, const QDateTime& bEnd)
+{
+    return aStart < bEnd && bStart < aEnd;
+}
+
+/// Start of local calendar date `date`, i.e. local midnight. Timezone-aware:
+/// computed via QDateTime rather than a fixed millisecond-per-day constant, so
+/// it is correct across a DST transition.
+///
+/// On a spring-forward day where local midnight itself does not exist (e.g.
+/// America/Santiago, Asia/Beirut), constructing QDateTime(date, QTime(0,0),
+/// Qt::LocalTime) directly returns an *invalid* QDateTime on this Qt version
+/// -- and an invalid QDateTime sorts as less than every valid one, which would
+/// silently corrupt every overlapsLocalDate() comparison against that date
+/// (an unrelated interval on the previous day would wrongly appear to
+/// overlap it). Fall back to deriving the start from the previous day's local
+/// midnight, which normalizes forward to the correct first valid instant --
+/// exactly how localDayEnd() below already gets a valid answer.
+inline QDateTime localDayStart(const QDate& date)
+{
+    QDateTime start(date, QTime(0, 0), Qt::LocalTime);
+    if (!start.isValid())
+        start = QDateTime(date.addDays(-1), QTime(0, 0), Qt::LocalTime).addDays(1);
+    return start;
+}
+
+/// Exclusive end of local calendar date `date`, i.e. the following local
+/// midnight. May be 23 or 25 hours after localDayStart(date) on a DST
+/// transition day -- computed as localDayStart() of the *next* date, never
+/// as localDayStart(date) plus a fixed 24-hour offset. Deliberately not
+/// localDayStart(date).addDays(1): when date's own local midnight fell in a
+/// spring-forward gap, localDayStart(date) already normalized forward to
+/// that day's first valid instant (e.g. 01:00), and addDays(1) on a
+/// wall-clock time preserves that same time-of-day on the next date instead
+/// of landing on its midnight -- computing the next date's start fresh
+/// avoids that drift.
+inline QDateTime localDayEnd(const QDate& date)
+{
+    return localDayStart(date.addDays(1));
+}
+
+} // namespace DayValidity
+
 inline bool isCrossMidnight(const QDateTime& a, const QDateTime& b);
 
 /// Reason a TimeDuration::create() call was rejected.
@@ -55,7 +106,7 @@ enum class DurationCreateError {
     None,             ///< No error — creation succeeded.
     InvalidTimestamp, ///< start or end is not a valid QDateTime.
     NonPositive,      ///< duration is zero or negative (end <= start).
-    CrossMidnight     ///< start.date() != end.date() (same-day invariant violated).
+    CrossMidnight     ///< end is beyond the exclusive end of start's local day (same-day invariant violated).
 };
 
 struct TimeDuration {
@@ -126,7 +177,14 @@ inline TimeDuration::CreateResult TimeDuration::create(DurationType type, QDateT
     return {TimeDuration(type, start, end, std::move(segmentId)), DurationCreateError::None};
 }
 
-inline bool isCrossMidnight(const QDateTime& a, const QDateTime& b) { return a.date() != b.date(); }
+// Half-open same-local-day rule (D1): b may equal the exclusive end of a's
+// local day (the following local midnight) without crossing into it, so an
+// interval ending exactly at midnight is same-day and legal. Same
+// computation as DayValidity::localDayEnd(a's local date), above.
+inline bool isCrossMidnight(const QDateTime& a, const QDateTime& b)
+{
+    return b > DayValidity::localDayEnd(a.toLocalTime().date());
+}
 
 /**
  * Tri-state result for hasEntriesForDate.
@@ -135,8 +193,9 @@ inline bool isCrossMidnight(const QDateTime& a, const QDateTime& b) { return a.d
  * and "we don't know" (history disabled or DB inaccessible — never add
  * boot time to avoid double-counting).
  *
- * - Yes:     Finalized entries exist for the given date.
- * - No:      The DB was queried successfully and zero entries were found.
+ * - Yes:     A finalized entry overlaps the given local date (D1: overlap,
+ *            not merely start-date match -- see hasEntriesForDate()).
+ * - No:      The DB was queried successfully and no entry overlaps.
  * - Unknown: The DB could not be queried (history disabled or open failed).
  */
 enum class EntriesForDateResult { Yes, No, Unknown };

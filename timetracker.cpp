@@ -10,8 +10,9 @@
  *   in SessionState with explicit logged transitions.
  *
  * Day-boundary policy:
- * - TimeTracker NEVER stores or persists a segment whose
- *   startTime.date() != endTime.date(). Such segments are silently
+ * - TimeTracker NEVER stores or persists a segment that crosses local
+ *   midnight (D1: half-open [start, end) -- a segment ending exactly at
+ *   local midnight is same-day and legal). Such segments are silently
  *   discarded by addDuration() and refused by saveCheckpoint_locked().
  * - The day-boundary rule is owned entirely by DayBoundaryWatcher: a
  *   scheduled stop at 23:59:59.500 and a 100 ms watchdog (via onTick())
@@ -34,6 +35,7 @@
 #include <QMutexLocker>
 #include <new>  // for std::bad_alloc
 #include "logger.h"
+#include "dayvalidity.h"
 
 // ============================================================================
 // DayBoundaryWatcher implementation
@@ -267,7 +269,7 @@ void TimeTracker::checkDurationInvariants() const
 
         // Invariant 2: No overlapping segments of the same type on the same day
         if (durations[i].type == durations[i - 1].type
-            && !isCrossMidnight(durations[i].startTime, durations[i - 1].startTime)
+            && !isCrossMidnight(durations[i - 1].startTime, durations[i].startTime)
             && durations[i].startTime < durations[i - 1].endTime) {
             qWarning("[INVARIANT] Overlapping same-type segments on %s at indices %zu and %zu: "
                      "prev=[%s..%s], curr=[%s..%s], type=%s",
@@ -532,10 +534,10 @@ void TimeTracker::startTimer(const QDateTime& now)
         unsigned int boot_time_sec = settings_.getBootTimeSec();
         bool shouldAddBootTime = false;
         if (boot_time_sec > 0) {
-            QDate today = now.date();
+            QDate today = now.toLocalTime().date();
             bool hasEntriesInMemory = false;
             for (const auto &d : session_.durations) {
-                if (d.startTime.date() == today) {
+                if (DayValidity::overlapsLocalDate(d.startTime, d.endTime, today)) {
                     hasEntriesInMemory = true;
                     break;
                 }
@@ -1420,7 +1422,7 @@ bool TimeTracker::isOngoingSegmentCrossMidnight() const
     QMutexLocker locker(&mutex_);
     if (mode_ == Mode::None) return false;
     if (!session_.segment_start_time.isValid()) return false;
-    return isCrossMidnight(session_.segment_start_time, QDateTime(now_provider_().date(), QTime(0,0,0), Qt::LocalTime));
+    return isCrossMidnight(session_.segment_start_time, now_provider_());
 }
 
 /**
