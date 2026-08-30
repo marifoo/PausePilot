@@ -484,6 +484,17 @@ void TimeTracker::startTimer(const QDateTime& now)
         // because the Pause segment is complete the moment the user un-pauses.
         persistDurationsOrRetainForRetry();
 
+        // C4 (finding 2): a Fatal commit above latches the engine but does
+        // NOT stop it (enterFatalState() only latches) -- stop here, at the
+        // first safe point after this transition's own state changes are
+        // done, using the already-captured `now`. Without this, control
+        // would fall through to `emit started(true)` below while mode_ has
+        // already been forced to None by a stop happening mid-transition,
+        // desyncing the UI (started() with nothing actually running).
+        if (stopIfLatched(now)) {
+            return;
+        }
+
         if (checkpoint_interval_msec_ > 0) {
             checkpointTimer_.start(); // Resume periodic checkpoint saving
         }
@@ -495,7 +506,28 @@ void TimeTracker::startTimer(const QDateTime& now)
     if (mode_ == Mode::None) {
         Logger::Log("[DEBUG] Starting TimeTracker from Stopped - D=" + QString::number(session_.durations.size()));
 
+        // C4 (R05-006): Start is disabled once a FatalError has latched the
+        // engine into its one unavailable state; only a restart (a fresh
+        // TimeTracker instance) clears it. No further dialog is shown here --
+        // the transition already showed exactly one.
+        if (fatal_state_latched_) {
+            Logger::Log("[TIMER] Start refused: fatal store error latched, restart required");
+            // C4 (finding 9): make the refusal observable -- without this,
+            // Start silently does nothing and the UI has no way to know why.
+            emit userWarning("Cannot start: a database error requires restarting uTimer.");
+            return;
+        }
+
         if (!retryUnsavedDurations()) return;
+
+        // C4 (round-3 F1): retryUnsavedDurations() can latch fatal_state_
+        // latched_ via retryPendingDiscards() -> discardCheckpoint() without
+        // stopping anything (mode_ is still None, so stopIfLatched() is a
+        // pure no-op stop). Without this check, a fatal that latches here
+        // falls through to `mode_ = Mode::Activity` below and starts
+        // tracking while latched -- the one enterFatalState() site with no
+        // owning-transition post-check.
+        if (fatal_state_latched_) return;
 
         unsigned int boot_time_sec = settings_.getBootTimeSec();
         bool shouldAddBootTime = false;
@@ -549,8 +581,13 @@ void TimeTracker::pauseTimer(const QDateTime& now)
     addDuration(DurationType::Activity, session_.segment_start_time, now, session_.segment_id);
 
     finalizePauseTransition(now);
-    Logger::Log("[TIMER] TimeTracker paused <");
-    emit paused();
+    // C4 (finding 2): finalizePauseTransition() may have stopped the tracker
+    // itself (a Fatal commit during the transition) -- only report Pause if
+    // it actually landed in Pause.
+    if (mode_ == Mode::Pause) {
+        Logger::Log("[TIMER] TimeTracker paused <");
+        emit paused();
+    }
 }
 
 void TimeTracker::finalizePauseTransition(const QDateTime& now)
@@ -560,6 +597,13 @@ void TimeTracker::finalizePauseTransition(const QDateTime& now)
     persistDurationsOrRetainForRetry();
     session_.beginNewSegment(now);
     checkpointTimer_.stop();
+    // C4 (finding 2): a Fatal commit above latches the engine but does NOT
+    // stop it (enterFatalState() only latches) -- stop here, now that the
+    // pause transition has reached a fully consistent state (mode_/segment_
+    // set together), rather than mid-transition where a nested stop would
+    // leave segment_id/segment_start_time set while mode_ == None -- the
+    // state SessionState documents as impossible.
+    stopIfLatched(now);
 }
 
 /**
@@ -624,7 +668,11 @@ void TimeTracker::backpauseTimer(const QDateTime& now, const QDateTime& lockTime
     addDuration(DurationType::Pause, pause_start, now);
 
     finalizePauseTransition(now);
-    Logger::Log("[TIMER] TimeTracker retroactively paused <");
+    // C4 (finding 2): finalizePauseTransition() may have stopped the tracker
+    // itself (a Fatal commit during the transition).
+    if (mode_ == Mode::Pause) {
+        Logger::Log("[TIMER] TimeTracker retroactively paused <");
+    }
 }
 
 
@@ -696,6 +744,15 @@ void TimeTracker::stopTimer(const QDateTime& now, StopReason reason)
     }
 
     emit stopped(reason);
+}
+
+bool TimeTracker::stopIfLatched(const QDateTime& now)
+{
+    if (fatal_state_latched_) {
+        stopTimer(now, StopReason::FatalStoreError);
+        return true;
+    }
+    return false;
 }
 
 void TimeTracker::useTimerViaButton(Button button)
@@ -900,6 +957,14 @@ void TimeTracker::setDurationType(size_t idx, DurationType type)
  * segment has no positive duration / invalid timestamps, or a dialog is open /
  * the session is locked. Disabled history is also treated as success. Returns
  * false only on a real checkpoint write failure (caller bug or DB error).
+ *
+ * C4 fix round 2 (MEDIUM-4 audit): a Fatal result here calls enterFatalState()
+ * directly (below) but, like every latch site, does not stop the tracker
+ * itself. This function's ONLY caller is commitEditedTimeline(), which
+ * already checks the latch and stops (via stopIfLatched()) right after this
+ * call returns -- so no separate post-check stop is needed here. (It is NOT
+ * reached from the periodic checkpoint timer -- that path is
+ * saveCheckpoint_locked(), which has its own post-check stop.)
  */
 bool TimeTracker::maybeReanchorCheckpoint(const TimeDuration& seg)
 {
@@ -922,7 +987,8 @@ bool TimeTracker::maybeReanchorCheckpoint(const TimeDuration& seg)
         return false;
     } else if (cpResult.category == SessionStoreResult::FatalError) {
         Logger::Log("[CHECKPOINT] maybeReanchorCheckpoint: Fatal DB error saving checkpoint: " + cpResult.message);
-        emit userWarning("Database error while saving checkpoint: " + cpResult.message);
+        // C4 (R05-006): route through the one shared latch/dialog handler.
+        enterFatalState(cpResult.message);
         return false;
     } else {
         Logger::Log("[CHECKPOINT] maybeReanchorCheckpoint: saveCheckpoint failed: " + cpResult.message);
@@ -983,6 +1049,12 @@ TimeTracker::EditCommitResult TimeTracker::commitEditedTimeline(const Timeline& 
         }
 
         checkpointOk = maybeReanchorCheckpoint(seg);
+        // C4 (finding 2): a Fatal checkpoint write above latches the engine
+        // but does NOT stop it (enterFatalState() only latches) -- stop here,
+        // now that this commit's own state changes are done, using a freshly
+        // captured `now` (this operation has no earlier timestamp of its own
+        // to reuse).
+        stopIfLatched(now_provider_());
     } else if (ongoing.has_value()) {
         // mode_ == None: the engine is stopped. Adopting the segment identity
         // here would set segment_id/segment_start_time while mode_ == None —
@@ -1071,6 +1143,12 @@ bool TimeTracker::canMarkCleanShutdown() const
     return mode_ == Mode::None && !pending_commit_.hasPending() && !pending_discards_.hasPending();
 }
 
+bool TimeTracker::isFatalLatched() const
+{
+    QMutexLocker locker(&mutex_);
+    return fatal_state_latched_;
+}
+
 TimeTracker::ShutdownResult TimeTracker::shutdown()
 {
     QMutexLocker locker(&mutex_);
@@ -1146,11 +1224,36 @@ void TimeTracker::logDbResultOrWarn(const SessionStoreResult& result, const QStr
         Logger::Log("[DB] CRITICAL: " + context + " caller bug: " + result.message);
     } else if (result.category == SessionStoreResult::FatalError) {
         Logger::Log("[DB] CRITICAL: " + context + " fatal error: " + result.message);
-        emit userWarning("Database error: " + result.message);
+        // C4 (R05-006): FatalError is handled ONCE, regardless of which
+        // operation returned it -- see enterFatalState().
+        enterFatalState(result.message);
     } else if (result.category == SessionStoreResult::TransientError) {
         Logger::Log("[DB] " + context + " transient error: " + result.message);
     }
     // Success: nothing to log/emit
+}
+
+void TimeTracker::enterFatalState(const QString& message)
+{
+    if (fatal_state_latched_) {
+        // Later failures never repeat the dialog (C4/R05-006).
+        Logger::Log("[DB] Fatal store error (already latched, no further dialog): " + message);
+        return;
+    }
+    fatal_state_latched_ = true;
+    Logger::Log("[DB] CRITICAL: entering fatal unavailable state (Start disabled until restart): " + message);
+    // C4 fix round 2 (HIGH-1): fatalError, not userWarning -- this is the ONE
+    // modal error C4/R05-006 requires; userWarning only reaches a tray
+    // balloon/status-bar message, which is easily missed.
+    emit fatalError("Database error: " + message);
+    // C4 (finding 2): deliberately does NOT stop the tracker here. This can
+    // run deep inside an in-progress transition (startTimer,
+    // finalizePauseTransition, commitEditedTimeline, ...) that keeps
+    // executing after logDbResultOrWarn()/this call returns; stopping mid-
+    // transition desyncs mode_/session_ from whatever the transition does
+    // next (e.g. emits started() after mode_ was already forced to None).
+    // Each transition owner checks fatal_state_latched_ after its own
+    // persistence call and stops itself once its own state changes are done.
 }
 
 SessionStoreResult TimeTracker::appendDurationsChunkToDB(const std::deque<TimeDuration>& durations)
@@ -1162,27 +1265,43 @@ SessionStoreResult TimeTracker::appendDurationsChunkToDB(const std::deque<TimeDu
     return result;
 }
 
-bool TimeTracker::updateDurationsInDB()
+SessionStoreResult TimeTracker::updateDurationsInDB()
 {
     if (session_.durations.empty()) {
-        return true;
+        return SessionStoreResult::success();
     }
     const SessionStoreResult result = db_.commitSession(Timeline(session_.durations, std::nullopt));
     logDbResultOrWarn(result, "commitSession");
     // Disabled history is a no-op, not a save failure: treat it as success so
     // we don't retain bogus unsaved data or skip the clean-shutdown marker.
-    const bool ok = result.okOrDisabled();
 #ifndef QT_NO_DEBUG
-    if (ok) {
+    if (result.okOrDisabled()) {
         checkCrossLayerInvariants();
     }
 #endif
-    return ok;
+    return result;
 }
 
 bool TimeTracker::persistDurationsOrRetainForRetry()
 {
-    const bool ok = updateDurationsInDB();
+    const SessionStoreResult result = updateDurationsInDB();
+    // C4 fix round 2 (HIGH-2): CallerBug is NOT special-cased here. It falls
+    // through to the normal okOrDisabled() path below like any other
+    // failure -- the payload is retained for retry and surfaced through the
+    // ordinary Retry/Exit-Anyway drain dialog (logDbResultOrWarn() above
+    // already logged it CRITICAL). Round-1 dropped the payload and reported
+    // success here, which propagated into stopTimer() as a false "committed"
+    // and let it write the clean-shutdown marker for data that was never
+    // actually persisted.
+    //
+    // C4 fix round 3 (F6): unlike a transient failure, CallerBug is
+    // deterministic -- retrying the identical retained payload can never
+    // succeed. In practice this means a CallerBug commit leaves Start
+    // refused (retryUnsavedDurations() keeps failing the same way) and the
+    // clean-shutdown marker unwritten for the rest of the process; only
+    // Exit Anyway on the shutdown dialog can terminate. That is the accepted
+    // trade against round-1's silent data loss, not a bug.
+    const bool ok = result.okOrDisabled();
     pending_commit_.submit(ok, session_.durations);
     if (!ok) {
         Logger::Log("[DB] Session durations not persisted - retained for retry");
@@ -1200,9 +1319,19 @@ bool TimeTracker::persistDurationsOrRetainForRetry()
  * re-deleting an already-deleted row are both safe no-ops), so calling this
  * repeatedly cannot double-discard or resurrect anything.
  *
- * Success or Disabled resolves the intent. TransientError retains it for the
- * next opportunity. FatalError also retains it here -- C4 owns latching the
- * one tracker-unavailable state; this is only the seam for it.
+ * Success or Disabled resolves the intent. Every other category --
+ * TransientError, FatalError, and CallerBug alike (C4 fix round 2 /
+ * MEDIUM-HIGH-3) -- retains it for the next opportunity. FatalError also
+ * latches the one tracker-unavailable state (C4); CallerBug is logged
+ * CRITICAL by logDbResultOrWarn() above but is not treated as terminal --
+ * dropping it would silently unblock clean marking for a checkpoint row
+ * that was never actually removed from storage.
+ *
+ * C4 fix round 3 (F5): the FatalError branch above is defensive interface
+ * handling for the SessionStore contract, not a live production path --
+ * SqliteSessionStore::discardCheckpoint() no longer returns FatalError post-C4
+ * (see sessionstore.h's discardCheckpoint doc); it is exercised here only via
+ * FakeSessionStore in tests.
  */
 void TimeTracker::retryPendingDiscards()
 {
@@ -1221,10 +1350,20 @@ SessionStoreResult TimeTracker::replaceAll(const Timeline& history, const Timeli
 {
     QMutexLocker locker(&mutex_);
     const SessionStoreResult result = db_.replaceAll(history, session);
+    // C4 (finding 1): route through the one shared latch/dialog handler --
+    // previously a Fatal from replaceAll reached the caller (HistoryDialog)
+    // directly and never latched fatal_state_latched_ at all.
+    logDbResultOrWarn(result, "replaceAll");
     if (result.okOrDisabled()) {
         // DB is now authoritative; a stale pending commit must not survive past here.
         pending_commit_.replaceSucceeded();
     }
+    // C4 (finding 2): a Fatal result above latches the engine but does NOT
+    // stop it (enterFatalState() only latches) -- stop here, using a freshly
+    // captured `now` (this operation has no earlier timestamp of its own).
+    // stopTimer() itself is a no-op when already in Mode::None, so the
+    // explicit mode_ check the pre-LOW-8 code had here was redundant.
+    stopIfLatched(now_provider_());
     return result;
 }
 
@@ -1374,6 +1513,11 @@ void TimeTracker::saveCheckpoint_locked(const QDateTime& now)
             .arg(session_.segment_id.toString()));
     } else {
         logDbResultOrWarn(result, "saveCheckpoint");
+        // C4 (finding 2): a Fatal checkpoint write latches the engine but
+        // does NOT stop it (enterFatalState() only latches) -- stop here.
+        // This is already the last thing this function does, so it is a
+        // safe point: nothing further reads mode_/session_ afterward.
+        stopIfLatched(now);
     }
 }
 

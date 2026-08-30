@@ -112,6 +112,11 @@ public:
 
     /// If true, saveChanges() skips QMessageBox::critical() on DB failure (still returns false).
     bool debugSkipCritical_ = false;
+    /// C4 fix round 2 (MEDIUM-5/LOW-9): incremented each time saveChanges()'s
+    /// replaceAll() failure path reaches its own critical-dialog branch,
+    /// regardless of debugSkipCritical_ -- lets a test observe whether this
+    /// dialog would have been shown without exec()-ing a real QMessageBox.
+    int debugCriticalShownCount_ = 0;
 #endif
 
     /**

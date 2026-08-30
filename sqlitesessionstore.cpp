@@ -681,17 +681,19 @@ BackupResult SqliteSessionStore::createBackup(const std::deque<TimeDuration>& du
  */
 SessionStoreResult SqliteSessionStore::commitSession(const Timeline& session)
 {
-    if (history_days_to_keep_ == 0) {
-        return SessionStoreResult::disabled();
-    }
-    // Validate the raw payload before normalizing: normalization only merges
-    // same-type touching/overlapping rows, so it neither introduces nor hides
-    // any of these violations, and checking first avoids depending on
-    // Timeline::normalized()'s own same-day debug assertion to catch this.
+    // C4 (R05-003): CallerBug is checked before the Disabled guard -- see the
+    // precedence rule in sessionstore.h. Validate the raw payload before
+    // normalizing: normalization only merges same-type touching/overlapping
+    // rows, so it neither introduces nor hides any of these violations, and
+    // checking first avoids depending on Timeline::normalized()'s own
+    // same-day debug assertion to catch this.
     const DayValidity::Violation violation = DayValidity::validatePayload(session.completed());
     if (violation != DayValidity::Violation::None) {
         Logger::Log("[DB] commitSession: rejecting invalid payload (" + DayValidity::describe(violation) + ")");
         return SessionStoreResult::callerBug("commitSession: invalid payload (" + DayValidity::describe(violation) + ")");
+    }
+    if (history_days_to_keep_ == 0) {
+        return SessionStoreResult::disabled();
     }
     const auto [normed, orphanIds] = session.normalizedWithRemovedIds();
     return updateDurationsById(normed.completed(), orphanIds);
@@ -874,10 +876,6 @@ SessionStoreResult SqliteSessionStore::replaceAll(const Timeline& history, const
 {
     QMutexLocker locker(&db_mutex_);
 
-    if (history_days_to_keep_ == 0) {
-        return SessionStoreResult::disabled();
-    }
-
     const std::deque<TimeDuration>& historyDurations = history.completed();
     const std::deque<TimeDuration>& currentSessionDurations = session.completed();
 
@@ -892,19 +890,32 @@ SessionStoreResult SqliteSessionStore::replaceAll(const Timeline& history, const
     // replaceAll() (see historyeditsession.cpp's buildSavePayload()) -- so
     // this guard should never actually trigger from the History path; it
     // remains the final backstop for any other caller.
+    // C4 (R05-003): checked before the Disabled guard below -- see the
+    // precedence rule in sessionstore.h.
     const DayValidity::Violation violation = DayValidity::validatePayload(allDurations);
     if (violation != DayValidity::Violation::None) {
         Logger::Log("[DB] replaceAll: rejecting invalid payload (" + DayValidity::describe(violation) + ")");
         return SessionStoreResult::callerBug("replaceAll: invalid payload (" + DayValidity::describe(violation) + ")");
     }
 
+    if (history_days_to_keep_ == 0) {
+        return SessionStoreResult::disabled();
+    }
+
     if (!ensureOpen()) {
+        // C4 (R07-003): ensureOpen() failure is TransientError consistently
+        // everywhere it is checked -- see updateDurationsById for the rationale.
         Logger::Log("[DB] Could not open DB to replace durations");
-        return SessionStoreResult::fatal("DB connection could not be opened");
+        return SessionStoreResult::transient("DB connection could not be opened");
     }
 
     const BackupResult backup = createBackup(allDurations, TransactionMode::Replace);
     if (backup == BackupResult::ReopenFailed) {
+        // Not part of the C4/R07-003 ensureOpen() consistency table: this is
+        // db.open() failing to reopen a connection createBackup() itself just
+        // closed for the copy window, not the initial ensureOpen() health
+        // check above -- a mid-operation loss right after a working
+        // connection, which stays FatalError.
         Logger::Log("[DB] CRITICAL: DB connection lost after backup - aborting replace");
         return SessionStoreResult::fatal("DB connection lost after backup");
     }
@@ -976,8 +987,10 @@ LoadResult SqliteSessionStore::loadDurations()
     }
 
     if (!ensureOpen()) {
+        // C4 (R07-003): ensureOpen() failure is TransientError consistently
+        // everywhere it is checked -- see updateDurationsById for the rationale.
         Logger::Log("[DB] Could not open DB to load Durations");
-        result.status = SessionStoreResult::FatalError;
+        result.status = SessionStoreResult::TransientError;
         return result;
     }
 
@@ -1188,13 +1201,11 @@ SessionStoreResult SqliteSessionStore::saveCheckpoint(DurationType type, const Q
         return SessionStoreResult::callerBug("saveCheckpoint called with empty segment_id");
     }
 
-    if (history_days_to_keep_ == 0) {
-        return SessionStoreResult::disabled();
-    }
-
-    // C3 (R13-001/R14-001): reject an invalid interval before mutation.
-    // A checkpoint is always uTimer's own live segment, so it must be
-    // strictly same-day like every other write boundary.
+    // C4 fix round 2 (MEDIUM-6): checked before the Disabled guard below --
+    // see the precedence rule in sessionstore.h (CallerBug wins over
+    // Disabled), matching commitSession/replaceAll. A checkpoint is always
+    // uTimer's own live segment, so it must be strictly same-day like every
+    // other write boundary (C3/R13-001/R14-001).
     const std::deque<TimeDuration> checkpointRow{
         TimeDuration::fromPersistedRow(type, startTime, endTime, segmentId)};
     const DayValidity::Violation violation = DayValidity::validatePayload(checkpointRow);
@@ -1203,9 +1214,15 @@ SessionStoreResult SqliteSessionStore::saveCheckpoint(DurationType type, const Q
         return SessionStoreResult::callerBug("saveCheckpoint: invalid interval (" + DayValidity::describe(violation) + ")");
     }
 
+    if (history_days_to_keep_ == 0) {
+        return SessionStoreResult::disabled();
+    }
+
     if (!ensureOpen()) {
+        // C4 (R07-003): ensureOpen() failure is TransientError consistently
+        // everywhere it is checked -- see updateDurationsById for the rationale.
         Logger::Log("[DB] Could not open DB to save checkpoint");
-        return SessionStoreResult::fatal("DB connection could not be opened");
+        return SessionStoreResult::transient("DB connection could not be opened");
     }
 
     const QString startUtcStr = toUtcIso(startTime);
@@ -1312,8 +1329,10 @@ SessionStoreResult SqliteSessionStore::discardCheckpoint(const SegmentId& segmen
     }
 
     if (!ensureOpen()) {
+        // C4 (R07-003): ensureOpen() failure is TransientError consistently
+        // everywhere it is checked -- see updateDurationsById for the rationale.
         Logger::Log("[DB] Could not open DB to discard checkpoint");
-        return SessionStoreResult::fatal("DB connection could not be opened");
+        return SessionStoreResult::transient("DB connection could not be opened");
     }
 
     // Defensive: guarantee the table exists even if this is somehow called
@@ -1384,6 +1403,12 @@ SessionStoreResult SqliteSessionStore::updateDurationsById(const std::deque<Time
     }
 
     if (!ensureOpen()) {
+        // C4 (R07-003): ensureOpen() failure is TransientError everywhere it
+        // is checked (see saveCheckpoint/discardCheckpoint/replaceAll/
+        // loadDurations) -- ensureOpen() itself is designed to transparently
+        // reopen a lost connection, and this exact scenario (e.g. a
+        // temporarily read-only file) is retried successfully by TimeTracker
+        // without a restart once the underlying cause is fixed.
         Logger::Log("[DB] Could not open DB to update durations");
         return SessionStoreResult::transient("DB connection could not be opened");
     }
@@ -1502,6 +1527,8 @@ SessionStoreResult SqliteSessionStore::flushToDisc()
     }
 
     if (!ensureOpen()) {
+        // C4 (R07-003): see updateDurationsById -- ensureOpen() failure is
+        // classified TransientError consistently everywhere it is checked.
         Logger::Log("[DB] flushToDisc: could not open DB");
         return SessionStoreResult::transient("DB connection could not be opened");
     }
@@ -1833,6 +1860,8 @@ SessionStoreResult SqliteSessionStore::setLastCleanShutdownMarker(const QDateTim
     }
 
     if (!ensureOpen()) {
+        // C4 (R07-003): see updateDurationsById -- ensureOpen() failure is
+        // classified TransientError consistently everywhere it is checked.
         return SessionStoreResult::transient("DB connection could not be opened");
     }
 
@@ -2060,8 +2089,10 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
     }
 
     if (!ensureOpen()) {
+        // C4 (R07-003): ensureOpen() failure is TransientError consistently
+        // everywhere it is checked -- see updateDurationsById for the rationale.
         Logger::Log("[DB] recoverStartupCheckpoints: could not open DB for recovery transaction");
-        return StartupRecoveryResult::failure(SessionStoreResult::FatalError, "DB connection could not be opened");
+        return StartupRecoveryResult::failure(SessionStoreResult::TransientError, "DB connection could not be opened");
     }
 
     if (!db.transaction()) {

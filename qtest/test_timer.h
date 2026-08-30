@@ -292,6 +292,76 @@ private slots:
     // Same setup, but the store keeps failing: drain stays Incomplete and the
     // intent remains -- no clean marker may be written.
     void test_A4_drain_incomplete_while_discard_unresolved();
+
+    // ========================================================================
+    // C4 (R05-006): FatalError latches TimeTracker into one unavailable state.
+    // A Fatal result from ANY store operation stops the current session
+    // through the normal pending lifecycle, disables Start until restart,
+    // and shows exactly one modal error; later failures (Fatal or not) never
+    // repeat the dialog. A Transient periodic checkpoint failure, by
+    // contrast, is a logged, UI-silent missed snapshot: tracking continues
+    // and the next ordinary checkpoint interval retries through the same
+    // call path.
+    // ========================================================================
+
+    // A Fatal periodic checkpoint failure stops tracking immediately and
+    // shows exactly one modal error.
+    void test_C4_fatal_checkpoint_failure_latches_and_stops_tracking();
+    // Start is refused (no-op) once the fatal state is latched, even after
+    // the store recovers -- only a fresh TimeTracker (i.e. a restart) can
+    // clear it.
+    void test_C4_fatal_latch_disables_start_even_after_store_recovers();
+    // Two independent Fatal failures across different operations must show
+    // exactly one modal error in total.
+    void test_C4_fatal_error_shows_dialog_exactly_once();
+    // A transient periodic checkpoint failure is silent (no dialog) and
+    // tracking continues; the very next checkpoint interval retries through
+    // the same call path and can succeed once the store recovers.
+    void test_C4_transient_checkpoint_failure_is_silent_and_tracking_continues();
+
+    // C4 finding 1: a Fatal from replaceAll() must latch the tracker exactly
+    // like a Fatal from any other operation (previously it reached the
+    // caller directly and never latched).
+    void test_C4_fatal_replaceAll_latches_and_refuses_subsequent_start();
+    // C4 finding 2: a Fatal commit on the Pause->Activity resume must stop
+    // the tracker at a safe point AFTER the transition completes, not via a
+    // nested stopTimer() mid-transition -- so no started() signal follows
+    // the stopped() signal (the stuck-UI bug).
+    void test_C4_fatal_pauseresume_commit_stops_without_started_after_stopped();
+    // C4 finding 2: same defect on the Activity->Pause transition
+    // (finalizePauseTransition, used by pauseTimer/backpauseTimer) -- the
+    // tracker must end up cleanly stopped, never in the impossible state of
+    // segment_id/segment_start_time set while mode_ == None.
+    void test_C4_fatal_pause_transition_ends_stopped_not_impossible_state();
+    // C4 finding 2: a Fatal commit encountered while discarding a
+    // cross-midnight ongoing segment must still report
+    // StopReason::MidnightWatchdog, not FatalStoreError -- the fatal latch
+    // must not consume the transition out from under the watchdog's own stop.
+    void test_C4_fatal_during_midnight_discard_still_reports_midnightwatchdog();
+    // C4 fix round 2 (HIGH-2): a CallerBug on stop-commit is NOT dropped --
+    // it retains the payload for retry like any other failure (normal
+    // okOrDisabled() path), does not reset the session, and must not write
+    // the clean-shutdown marker.
+    void test_C4_callerBug_commit_payload_is_retained_not_dropped();
+    // C4 fix round 3 (F6): a persistent (non-recovering) CallerBug on commit
+    // must keep Start refused across repeated attempts -- the retried
+    // payload is identical, so it fails the same deterministic way each time.
+    void test_C4_callerBug_commit_keeps_start_refused_while_persistent();
+    // C4 fix round 2 (MEDIUM-HIGH-3): a CallerBug on a pending checkpoint
+    // discard retry is retained (not resolved) exactly like any other
+    // failure -- it must keep blocking clean-shutdown marking.
+    void test_C4_callerBug_discard_retry_is_retained_not_resolved();
+
+    // C4 fix round 2 (HIGH-1): enterFatalState() emits fatalError (a single
+    // modal dialog) instead of userWarning (a tray balloon/status message)
+    // for the fatal transition itself.
+    void test_C4_fatalError_emitted_once_userWarning_not_emitted_for_fatal();
+
+    // C4 fix round 3 (F1): a Fatal discard-retry latch with no pending
+    // commit payload must still refuse Start -- retryUnsavedDurations()
+    // returning true (no pending commit) must not let startTimer()'s None
+    // branch fall through to Mode::Activity while latched.
+    void test_C4_start_refused_when_discard_retry_latches_with_no_pending_commit();
 };
 
 #endif // TEST_TIMER_H

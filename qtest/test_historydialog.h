@@ -85,6 +85,18 @@ private slots:
     // whose behavior changed in this packet -- the single-boundary case is
     // (preserved -> dropped). Pins that against real SQLite physical state.
     void test_C3_single_boundary_cross_midnight_dropped_by_unrelated_save();
+
+    // C4 fix round 2 (MEDIUM-5): if the fatal latch was ALREADY set before
+    // this saveChanges() call, enterFatalState() shows no dialog of its own
+    // (it only logs on a repeat), so HistoryDialog's own critical dialog
+    // must NOT be suppressed for this call.
+    void test_C4_historydialog_shows_own_critical_when_already_latched();
+
+    // C4 fix round 3 (F3): the mirror case -- latch NOT set before this
+    // saveChanges() call, this call's own replaceAll() raises the latch and
+    // fires TimeTracker's own fatalError modal, so HistoryDialog must show
+    // NO dialog of its own for the same failure.
+    void test_C4_historydialog_suppresses_own_critical_when_this_call_latches();
 };
 
 #endif // TEST_HISTORYDIALOG_H

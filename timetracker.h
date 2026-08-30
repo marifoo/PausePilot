@@ -85,6 +85,7 @@ public:
         MidnightWatchdog,   ///< Watchdog detected a cross-midnight ongoing segment.
         Shutdown,           ///< Application shutdown (destructor or ShutdownCoordinator).
         EditApplied,        ///< History edit committed with no ongoing segment: tracking stopped.
+        FatalStoreError,    ///< C4: a store operation returned FatalError; tracking latched unavailable.
     };
 
     /// Cause of a pause/resume transition. Carried by modeChanged() so MainWin
@@ -247,6 +248,25 @@ private:
     bool is_locked_;     // Track if desktop is currently locked (to prevent checkpoints while locked)
     bool dialog_open_;   // True while HistoryDialog is open (suspends mutation)
     bool shutdown_called_ = false;  // Set once shutdown() has torn down the engine.
+    /// C4 (R05-006): latched once ANY store operation returns FatalError.
+    /// Stays true for the lifetime of this TimeTracker (cleared only by
+    /// restart, i.e. constructing a new instance) -- there is no in-memory-
+    /// only tracking mode and no unlatch path. See enterFatalState().
+    ///
+    /// C4 fix round 3 (F4): post-C4, SqliteSessionStore::replaceAll()'s
+    /// post-backup reopen failure (sqlitesessionstore.cpp, ensureOpen()
+    /// after the backup) is the ONLY production path that can produce a
+    /// FatalError today -- commitSession, saveCheckpoint, discardCheckpoint,
+    /// loadDurations, flushToDisc, setLastCleanShutdownMarker, and
+    /// recoverStartupCheckpoints have all been consolidated onto
+    /// TransientError/CallerBug (see sessionstore.h). The other
+    /// stopIfLatched()/latch-check call sites in this class (saveCheckpoint_
+    /// locked, maybeReanchorCheckpoint, startTimer's Pause and None
+    /// branches, finalizePauseTransition) are therefore defence-in-depth
+    /// against a future SessionStore implementation, not currently
+    /// reachable from SqliteSessionStore, and are exercised in tests only
+    /// via FakeSessionStore injecting FatalError from those operations.
+    bool fatal_state_latched_ = false;
     /// A midnight boundary event captured while dialog_open_, to be replayed
     /// exactly once by endExclusiveEdit(). Distinguishes the two deferral
     /// policies: a scheduled cutoff credits the segment through the captured
@@ -279,6 +299,12 @@ private:
 
     void startTimer(const QDateTime& now);
     void stopTimer(const QDateTime& now, StopReason reason);
+    /// C4 fix round 2 (LOW-8): the ~6-times-repeated post-latch stop,
+    /// factored out. enterFatalState() only latches; each transition owner
+    /// must check the latch after its own state changes are done and stop
+    /// itself here. Returns true iff it stopped (fatal_state_latched_ was
+    /// set) so callers that need to short-circuit (e.g. return early) can.
+    bool stopIfLatched(const QDateTime& now);
     void pauseTimer(const QDateTime& now);
     void backpauseTimer(const QDateTime& now, const QDateTime& lockTime = QDateTime());
     void finalizePauseTransition(const QDateTime& now);
@@ -302,6 +328,19 @@ private:
     /// named context.  Does NOT affect control flow — callers decide what to do
     /// after calling this.
     void logDbResultOrWarn(const SessionStoreResult& result, const QString& context);
+    /// C4 (R05-006): the ONE place FatalError is handled, regardless of which
+    /// store operation (checkpoint, commit, replace, discard) returned it.
+    /// First call: latches fatal_state_latched_, logs, and emits exactly one
+    /// fatalError (a modal dialog, C4 fix round 2 / HIGH-1) -- not
+    /// userWarning. Later calls (already latched) only log. Does NOT stop the
+    /// tracker itself -- this can run deep inside an in-progress transition
+    /// (e.g. startTimer, finalizePauseTransition), and stopping here would
+    /// desync mode_/session_ state from whatever the transition does next.
+    /// Each transition owner is responsible for checking fatal_state_latched_
+    /// after its own persistence call and stopping (via stopTimer()) itself,
+    /// at a point where the transition has already reached a consistent
+    /// state. mutex_ must already be held by the caller.
+    void enterFatalState(const QString& message);
     // Retries the pending commit payload at the start of a new session
     // (None -> Activity only). Performs exactly one retry attempt.
     // Returns true if startTimer should continue, false if it should abort.
@@ -314,14 +353,21 @@ private:
     std::optional<TimeDuration> getOngoingDuration_locked() const;
     /// Appends session_.durations to the DB. Returns true on success.
     bool appendDurationsToDB();
-    /// Rewrites all completed segments to the DB. Returns true on success.
-    bool updateDurationsInDB();
+    /// Rewrites all completed segments to the DB. Returns the store's result
+    /// (needed by persistDurationsOrRetainForRetry() to apply the standard
+    /// okOrDisabled() success/retain policy).
+    SessionStoreResult updateDurationsInDB();
     /**
      * Persists session_.durations and keeps the pending-commit lifecycle
-     * consistent: on success any stale pending payload is cleared; on
-     * failure the durations become the pending payload so the next session
-     * start retries them exactly once.
-     * Returns updateDurationsInDB()'s result.
+     * consistent: on success (or Disabled) any stale pending payload is
+     * cleared; on any other failure -- including CallerBug (C4 fix round 2)
+     * -- the durations become the pending payload so the next persistence
+     * opportunity (Start, stop, drain) retries them. A CallerBug is logged
+     * CRITICAL by logDbResultOrWarn() but is NOT dropped: it is retained and
+     * surfaced through the normal Retry/Exit-Anyway drain dialog like any
+     * other failure category, so an entire session's tracked time is never
+     * silently discarded.
+     * Returns true unless the payload is retained for retry.
      */
     bool persistDurationsOrRetainForRetry();
     void replaceCurrentDurations(const std::deque<TimeDuration>& newDurations,
@@ -466,6 +512,13 @@ public:
     /// Resumes checkpoints and replays deferred events. Call after closing HistoryDialog.
     void endExclusiveEdit();
     bool canMarkCleanShutdown() const;
+    /// True once a FatalError result has latched TimeTracker into the
+    /// unavailable state (C4/R05-006). Start refuses to run while this is
+    /// true; nothing but a fresh TimeTracker instance clears it. Public (C4
+    /// fix round 2 / MEDIUM-5) so a caller like HistoryDialog can capture
+    /// the latch state before its own store call, to tell "this call raised
+    /// the modal" apart from "it was already latched".
+    bool isFatalLatched() const;
 
     struct ShutdownResult {
         bool stopped;     ///< true iff timer is now in Mode::None
@@ -517,6 +570,12 @@ public slots:
 
 signals:
     void userWarning(const QString& text);
+    /// C4 fix round 2 (HIGH-1): the ONE modal error C4/R05-006 requires.
+    /// Emitted by enterFatalState() on the first latch only, in place of
+    /// (not in addition to) userWarning -- a tray balloon/status-bar message
+    /// is trivially missed and is not a modal dialog. Connected in MainWin
+    /// to QMessageBox::critical().
+    void fatalError(const QString& text);
     void stopped(TimeTracker::StopReason reason);
     /// Emitted after a successful None→Activity or Pause→Activity transition,
     /// including lock-driven resume. fromPause is true when the previous mode
@@ -616,7 +675,7 @@ public:
 
     /// Exposes the internal DB-write helpers for the regression surface test.
     bool appendDurationsToDB_dbg() { return appendDurationsToDB(); }
-    bool updateDurationsInDB_dbg() { return updateDurationsInDB(); }
+    bool updateDurationsInDB_dbg() { return updateDurationsInDB().okOrDisabled(); }
     void replaceCurrentDurations_dbg(const std::deque<TimeDuration>& d,
                                      const std::optional<TimeDuration>& o = std::nullopt) {
         replaceCurrentDurations(d, o);

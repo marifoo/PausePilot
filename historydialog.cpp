@@ -212,18 +212,33 @@ bool HistoryDialog::saveChanges()
             .arg(historyTimeline.completed().size())
             .arg(sessionTimeline.completed().size()));
 
+        // C4 fix round 2 (MEDIUM-5): capture the latch state BEFORE the
+        // store call. If it was already latched, enterFatalState() returns
+        // early and shows nothing for THIS call -- so a FatalError here
+        // still needs this dialog. Only suppress it when this very call is
+        // the one that raised the modal.
+        const bool wasLatchedBefore = timetracker_.isFatalLatched();
         const SessionStoreResult dbResult = timetracker_.replaceAll(historyTimeline, sessionTimeline);
         if (!dbResult.ok() && dbResult.category != SessionStoreResult::Disabled) {
             Logger::Log("[HISTORY] CRITICAL: Failed to save durations to DB: " + dbResult.message);
+            // C4 (finding 1): a FatalError that THIS call raised already
+            // latched TimeTracker and showed its own single modal error via
+            // fatalError -- do not show a second dialog for the same
+            // failure. Every other failure category still shows this dialog
+            // as before, and so does a FatalError that arrives while the
+            // latch was already set (this call raised no dialog of its own).
+            if (!(dbResult.category == SessionStoreResult::FatalError && !wasLatchedBefore)) {
 #ifndef QT_NO_DEBUG
-            if (!debugSkipCritical_) {
+                ++debugCriticalShownCount_;
+                if (!debugSkipCritical_) {
+                    QMessageBox::critical(this, "Database Error",
+                        "Failed to save changes to the database. Your changes to historical entries may be lost.");
+                }
+#else
                 QMessageBox::critical(this, "Database Error",
                     "Failed to save changes to the database. Your changes to historical entries may be lost.");
-            }
-#else
-            QMessageBox::critical(this, "Database Error",
-                "Failed to save changes to the database. Your changes to historical entries may be lost.");
 #endif
+            }
             return false;
         }
         Logger::Log("[HISTORY] Successfully saved historical durations to DB");

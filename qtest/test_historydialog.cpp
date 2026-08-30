@@ -1675,3 +1675,66 @@ void HistoryDialogTest::test_C3_single_boundary_cross_midnight_dropped_by_unrela
     QCOMPARE(check.value(0).toInt(), 0);
     db2.closeConnection_dbg();
 }
+
+void HistoryDialogTest::test_C4_historydialog_shows_own_critical_when_already_latched()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    // Arrange: latch the tracker BEFORE opening the dialog (a Fatal from an
+    // unrelated earlier operation, e.g. a checkpoint write).
+    fakeDb.replaceDurationsResult = SessionStoreResult::fatal("earlier fatal failure");
+    tracker.replaceAll(Timeline({}, std::nullopt), Timeline({}, std::nullopt));
+    QVERIFY(tracker.isFatalLatched());
+
+    const QDateTime now = QDateTime::currentDateTime();
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
+
+    HistoryDialog dialog(tracker, settings);
+    dialog.editSession_dbg().pendingTimelines()[0] =
+        dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause);
+
+    // This call's own replaceAll() also returns Fatal (the latch was
+    // already set, so enterFatalState() logs only -- no dialog of its own).
+    fakeDb.replaceDurationsResult = SessionStoreResult::fatal("this call's fatal failure");
+    dialog.debugSkipCritical_ = true; // observe via debugCriticalShownCount_, not a real popup
+    dialog.done(QDialog::Accepted);
+
+    QVERIFY(!dialog.saveChanges());
+    QCOMPARE(dialog.debugCriticalShownCount_, 1);
+}
+
+void HistoryDialogTest::test_C4_historydialog_suppresses_own_critical_when_this_call_latches()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    // Arrange: NOT latched before this dialog's own save.
+    QVERIFY(!tracker.isFatalLatched());
+
+    const QDateTime now = QDateTime::currentDateTime();
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
+
+    HistoryDialog dialog(tracker, settings);
+    dialog.editSession_dbg().pendingTimelines()[0] =
+        dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause);
+
+    // This call's replaceAll() is the one that raises the latch, so
+    // TimeTracker's own fatalError modal already fired -- HistoryDialog
+    // must show none of its own for the same failure.
+    fakeDb.replaceDurationsResult = SessionStoreResult::fatal("this call's fatal failure");
+    dialog.debugSkipCritical_ = true; // observe via debugCriticalShownCount_, not a real popup
+    dialog.done(QDialog::Accepted);
+
+    QVERIFY(!dialog.saveChanges());
+    QCOMPARE(dialog.debugCriticalShownCount_, 0);
+    QVERIFY(tracker.isFatalLatched());
+}

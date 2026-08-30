@@ -40,10 +40,44 @@
  *                   finalized history).  Retrying with the same arguments
  *                   will not help.  Log as critical.
  *
+ * After C4, only replaceAll's post-backup reopen can still return FatalError;
+ * every other write boundary's ensureOpen()/open-failure path was
+ * consolidated onto TransientError (see the ensureOpen()-consistency table
+ * in test_contract_matrix.cpp).
+ *
+ * Precedence (C4/R05-003): where both a CallerBug and a Disabled outcome
+ * would apply to the same call (e.g. a duplicate/empty id submitted while
+ * history is disabled), CallerBug wins. A caller bug is a programming error
+ * that must surface regardless of whether history persistence happens to be
+ * switched off -- checking Disabled first would mask it. commitSession,
+ * replaceAll, saveCheckpoint, and discardCheckpoint all check their
+ * identity/validity guard before the Disabled guard.
+ *
  * Methods that carry additional payload (loadDurations, hasEntriesForDate)
  * embed a status field that uses the same categories.  The per-method
  * contract matrices in test_contract_matrix.cpp document which categories
  * apply to each method.
+ *
+ * ── Input facts for commit/replace/checkpoint (C4) ─────────────────────
+ *
+ * commitSession/replaceAll take Timeline-wrapped rows: segment_id emptiness
+ * is structurally impossible (TimeDuration always mints one), so the only
+ * caller-identity fact these two validate at runtime is uniqueness -- no two
+ * rows in the (combined, for replaceAll) payload may share a segment_id.
+ * saveCheckpoint/discardCheckpoint take a bare SegmentId parameter instead,
+ * so both explicitly reject an empty one as CallerBug.
+ *
+ * Every write boundary additionally validates timestamp validity, a
+ * positive `[start, end)` interval, and same-local-day shape (see
+ * dayvalidity.h); commitSession/replaceAll also reject an Activity/Pause
+ * overlap across the payload. Callers may submit rows in any order: the
+ * store rejects an Activity/Pause overlap and merges same-type overlaps via
+ * normalization, rather than requiring the caller to pre-sort or
+ * pre-deduplicate. FakeSessionStore enforces the same identity
+ * facts (empty/duplicate segment_id) as the concrete store, but -- being a
+ * spy, not a policy engine -- does not duplicate the day-validity/overlap
+ * checks; those are exercised only against the real SqliteSessionStore (see
+ * test_persistence_contract.cpp).
  */
 
 #ifndef SESSIONSTORE_H
@@ -116,10 +150,11 @@ struct DrainResult {
  *   Success       — query ran; durations holds all finalized rows (may be empty).
  *   Disabled      — history storage is disabled; durations is always empty.
  *                   Treat as "no history," not an error.
- *   TransientError / FatalError — DB could not be opened or the query failed;
- *                   durations is empty.  Surface an error to the user.
+ *   TransientError — DB could not be opened or the query failed; durations
+ *                   is empty.  Surface an error to the user.
  *
- * CallerBug is not applicable to loadDurations.
+ * CallerBug and FatalError are not applicable to loadDurations post-C4: its
+ * ensureOpen() failure path was consolidated onto TransientError.
  */
 struct LoadResult {
     std::deque<TimeDuration> durations;
@@ -152,16 +187,16 @@ struct LoadResult {
  *                               by this call.
  *   status == Disabled       — history storage is off; a deliberate no-op.
  *                               All counts are zero and notify_user is false.
- *   status == TransientError
- *   status == FatalError     — a critical store failure (marker read, orphan
- *                               load, or the recovery transaction itself)
- *                               prevented reconciliation.  NO row was
- *                               mutated and the marker (if any) was
- *                               preserved.  message describes the failure.
- *                               Caller must treat all counts as 0 and must
- *                               NOT show a recovery notification.
+ *   status == TransientError — a store failure (marker read, orphan load, the
+ *                               dedicated ensureOpen() guard, or the recovery
+ *                               transaction itself) prevented reconciliation.
+ *                               NO row was mutated and the marker (if any)
+ *                               was preserved.  message describes the
+ *                               failure.  Caller must treat all counts as 0
+ *                               and must NOT show a recovery notification.
  *
- * CallerBug is not applicable.
+ * CallerBug and FatalError are not applicable post-C4: every ensureOpen()/
+ * open-failure path this method can take was consolidated onto TransientError.
  *
  * policy_dropped_count counts rows deleted for a recovery POLICY reason
  * (too-short, stale, future-dated, cross-day, overlap-rejected, or a durable
@@ -207,28 +242,47 @@ struct StartupRecoveryResult {
  */
 enum class SchemaStatus { Ready, Created, Outdated, Inaccessible };
 
+/// One entry per SessionStore virtual operation (C4/R02-003). Exists only so
+/// test_contract_matrix.cpp can static_assert its enumerator count against
+/// Count -- this only catches a CHANGE in the number of operations (an
+/// addition or removal), not an added virtual whose count happens to match;
+/// it is a reminder tripwire, not a structural guarantee.
+enum class Operation {
+    CommitSession, ReplaceAll, LoadDurations, HasEntriesForDate, SaveCheckpoint,
+    DiscardCheckpoint, CheckSchemaOnStartup, FlushToDisc, SetLastCleanShutdownMarker,
+    RecoverStartupCheckpoints, Count
+};
+
 class SessionStore
 {
 public:
     virtual ~SessionStore() = default;
 
     /// @pre All segment_ids in the timeline must be non-empty
-    /// Returns CallerBug (C3) if the payload fails the day-validity/overlap
+    /// Returns CallerBug (C3/C4) if the payload fails the day-validity/overlap
     /// guard: invalid timestamp, non-positive interval, cross-day interval,
     /// duplicate segment_id, or an Activity/Pause overlap. Rejected before
-    /// any mutation. This guard does not itself check for an empty
-    /// segment_id -- that validation lands in C4.
+    /// any mutation. This guard does not separately check for an empty
+    /// segment_id: TimeDuration's private constructor mints a fresh id
+    /// whenever it is given an empty one (see types.h), so no TimeDuration a
+    /// Timeline can carry ever has an empty id -- the precondition above is
+    /// structural, not a runtime check. Duplicate ids ARE a runtime check
+    /// (C4/R05-003): both the concrete store and FakeSessionStore reject them
+    /// as CallerBug before any mutation, so an invalid identity can never be
+    /// silently written by either implementation.
     virtual SessionStoreResult commitSession(const Timeline& session) = 0;
 
     /// Atomically replaces all rows (history finalized + session unfinalized).
     /// Returns Disabled when history storage is off (no-op, not an error).
     /// Returns TransientError or FatalError on DB failure.
-    /// Returns CallerBug (C3) if the payload fails the day-validity/overlap
+    /// Returns CallerBug (C3/C4) if the payload fails the day-validity/overlap
     /// guard: invalid timestamp, non-positive interval, cross-day interval,
     /// duplicate segment_id, or an Activity/Pause overlap -- rejected before
     /// any mutation, the same uniform rule as every other write boundary.
-    /// This guard does not itself check for an empty segment_id -- that
-    /// validation lands in C4.
+    /// Uniqueness is checked across BOTH timelines combined (a history row and
+    /// a session row sharing one id is also a CallerBug), not each bucket
+    /// separately. As with commitSession, empty ids are structurally
+    /// impossible (see above) so only the duplicate case is a runtime check.
     /// HistoryEditSession drops a legacy cross-midnight row and a
     /// pre-existing cross-type overlap from the save payload before calling
     /// this, so this guard should never actually trigger from the History
@@ -236,8 +290,9 @@ public:
     virtual SessionStoreResult replaceAll(const Timeline& history, const Timeline& session) = 0;
 
     /// Returns all finalized rows sorted chronologically.
-    /// result.status is Disabled when history is off, or TransientError/FatalError
-    /// on DB failure.  On any non-Success status, result.durations is empty.
+    /// result.status is Disabled when history is off, or TransientError on DB
+    /// failure (FatalError is not applicable post-C4). On any non-Success
+    /// status, result.durations is empty.
     virtual LoadResult loadDurations() = 0;
 
     /// Returns Yes iff at least one finalised row's start falls on `localDate`
@@ -253,7 +308,10 @@ public:
     /// Returns Disabled when history storage is off (no-op, not an error).
     /// Returns CallerBug (C3) if [startTime, endTime) is invalid, non-positive,
     /// or crosses local midnight -- rejected before any mutation.
-    /// @pre segmentId must be non-empty
+    /// @pre segmentId must be non-empty -- unlike commitSession/replaceAll,
+    /// segmentId here is a bare SegmentId, not wrapped in a TimeDuration, so
+    /// emptiness is not structurally impossible; both implementations check
+    /// it explicitly and return CallerBug (not Disabled or a store failure).
     virtual SessionStoreResult saveCheckpoint(DurationType type, const QDateTime& startTime,
                                               const QDateTime& endTime, const SegmentId& segmentId) = 0;
 
@@ -266,12 +324,12 @@ public:
     /// (R05-001): implementations own recording it (e.g. a store-owned tombstone)
     /// before attempting the physical row delete, and startup recovery must honor
     /// any unresolved intent it finds -- deleting only a matching unfinalized row,
-    /// never a finalized one. Returning TransientError/FatalError therefore does
+    /// never a finalized one. Returning TransientError therefore does
     /// not mean the intent was lost; the caller retains the segment id and may
     /// call this again -- both the tombstone write and the row delete are
     /// idempotent, so repeated calls are safe.
     /// Returns Disabled when history storage is off (no-op, not an error).
-    /// Returns TransientError/FatalError on DB failure.
+    /// Returns TransientError on DB failure (FatalError is not applicable post-C4).
     /// @pre segmentId must be non-empty
     virtual SessionStoreResult discardCheckpoint(const SegmentId& segmentId) = 0;
 

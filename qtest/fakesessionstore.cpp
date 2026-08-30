@@ -13,6 +13,24 @@
 #include "fakesessionstore.h"
 #include <algorithm>
 
+namespace {
+// C4 (R05-003): the fake deliberately does not duplicate the concrete
+// store's day-validity/overlap SQL policy, but a duplicate segment_id is an
+// IDENTITY contract fact, not a policy decision -- both implementations must
+// agree that it is CallerBug, not a silently-accepted spy call.
+bool hasDuplicateSegmentId(const std::deque<TimeDuration>& rows)
+{
+    QSet<QString> seen;
+    for (const auto& d : rows) {
+        const QString id = d.segment_id.toString();
+        if (seen.contains(id))
+            return true;
+        seen.insert(id);
+    }
+    return false;
+}
+}
+
 FakeSessionStore::FakeSessionStore()
     : startupRecoveryResult{}
 {
@@ -21,6 +39,9 @@ FakeSessionStore::FakeSessionStore()
 SessionStoreResult FakeSessionStore::commitSession(const Timeline& session)
 {
     callLog.append("commitSession");
+    if (hasDuplicateSegmentId(session.completed())) {
+        return SessionStoreResult::callerBug("commitSession: duplicate segment_id in payload");
+    }
     if (commitSessionResult.ok()) {
         // Spy: record the segments as submitted, without normalization or upsert policy.
         // Tests that need normalization semantics should use SqliteSessionStore directly.
@@ -35,7 +56,17 @@ SessionStoreResult FakeSessionStore::commitSession(const Timeline& session)
 SessionStoreResult FakeSessionStore::replaceAll(const Timeline& history, const Timeline& session)
 {
     callLog.append("replaceAll");
-    if (replaceDurationsResult.ok() || replaceDurationsResult.category == SessionStoreResult::Disabled) {
+    // Uniqueness is checked across the COMBINED payload (C4/R05-003): a
+    // history row and a session row sharing an id is also a CallerBug, not
+    // just a duplicate within one bucket.
+    std::deque<TimeDuration> combined = history.completed();
+    combined.insert(combined.end(), session.completed().begin(), session.completed().end());
+    if (hasDuplicateSegmentId(combined)) {
+        return SessionStoreResult::callerBug("replaceAll: duplicate segment_id in payload");
+    }
+    // Disabled is a contractual no-op, exactly like every other failure
+    // category -- only Success may mutate fake state (R05-005/R02-003).
+    if (replaceDurationsResult.ok()) {
         storedDurations.clear();
         committedSegmentIds.clear();
         for (const auto& d : history.completed()) {
@@ -81,10 +112,16 @@ SessionStoreResult FakeSessionStore::saveCheckpoint(DurationType type, const QDa
             }
         }
         // A segment_id that was finalized via commitSession must not also appear as a
-        // checkpoint (that would mean TimeTracker submitted the same id to two separate paths).
-        Q_ASSERT_X(!committedSegmentIds.contains(segmentId.toString()),
-                   "FakeSessionStore::saveCheckpoint",
-                   "UNIQUE(segment_id) violation: segment_id already committed via commitSession");
+        // checkpoint (that would mean TimeTracker submitted the same id to two separate
+        // paths). C4 fix round 3 (F7): match SqliteSessionStore::saveCheckpoint, which
+        // classifies this as CallerBug (see test_saveCheckpoint_callerBug_finalized_
+        // segmentId in test_contract_matrix.cpp) rather than aborting the process --
+        // hasDuplicateSegmentId() exists precisely so both implementations agree on
+        // this identity fact.
+        if (committedSegmentIds.contains(segmentId.toString())) {
+            return SessionStoreResult::callerBug(
+                "segment_id already committed via commitSession");
+        }
         (void)alreadySaved; // Multiple checkpoint saves for the same id are fine (upsert).
         savedCheckpoints.push_back({type, startTime, endTime, segmentId});
     }
