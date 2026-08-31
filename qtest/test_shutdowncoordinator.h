@@ -21,8 +21,9 @@ private slots:
     // Test J: pump actually drains queued events
     void test_J_pump_drains_queued_events();
 
-    // Test K: reset() re-arms the guard so a second shutdown flushes again (A4)
-    void test_K_reset_allows_second_shutdown();
+    // Test K: cancelShutdown() re-arms the guard so a second shutdown
+    // flushes again (A4), and clears the tracker's terminal flag (D5)
+    void test_K_cancelShutdown_allows_second_shutdown();
 
     // Test L: a re-entrant run() dispatched inside the pump flushes only once (A14)
     void test_L_nested_run_during_pump_flushes_once();
@@ -56,6 +57,18 @@ private slots:
     // marking exactly like a pending commit, including under a forced OS
     // shutdown (best-effort termination: no warning, but still no marker).
     void test_A4_forced_shutdown_with_unresolved_discard_writes_no_marker();
+
+    // ========================================================================
+    // D5 (R15-002): cancelShutdown() is one lifecycle transition owned by
+    // ShutdownCoordinator that reverses shutdown()'s terminal state.
+    // ========================================================================
+
+    // History (wasShutDown()) accepts saves immediately after cancellation,
+    // with no new Start in between.
+    void test_D5_cancelShutdown_makes_history_available_without_new_start();
+    // Cancelling a shutdown that ran while the tracker was already stopped
+    // (no live segment) still clears the terminal flag.
+    void test_D5_cancelShutdown_while_already_stopped();
 };
 
 #endif // TEST_SHUTDOWNCOORDINATOR_H

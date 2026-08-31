@@ -405,6 +405,23 @@ private slots:
     // credit [segment_start, boundary] -- that would invent unattended work
     // time and race the watchdog tick.
     void test_D2_scheduled_stop_late_across_date_defers_to_watchdog_discard();
+
+    // ========================================================================
+    // D5 (R15-002): cancelShutdown() is the one lifecycle operation that
+    // reverses shutdown()'s terminal state after a cancelled OS shutdown. It
+    // must clear shutdown_called_ without reconstructing/resuming the ended
+    // session or touching pending persistence (governed by A2/A3).
+    // ========================================================================
+
+    // Cancellation after shutdown() stopped a live segment: terminal state
+    // clears, but the tracker stays in its ordinary stopped Mode::None --
+    // the closed segment is not resumed.
+    void test_D5_cancelShutdown_after_active_shutdown_stays_stopped_not_resumed();
+    // Cancellation after shutdown() ran on an already-stopped tracker.
+    void test_D5_cancelShutdown_while_already_stopped();
+    // A pending commit payload retained from a failed Stop survives
+    // cancellation unchanged -- A2/A3 still own its retry, at the next Start.
+    void test_D5_cancelShutdown_retains_pending_commit_for_next_start();
 };
 
 #endif // TEST_TIMER_H

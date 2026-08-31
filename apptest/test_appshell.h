@@ -64,6 +64,12 @@ private slots:
     void test_full_channel_does_not_block();
     void test_setup_failure_leaks_no_descriptors();
     void test_qt_receipt_invokes_shutdown_exactly_once();
+
+    // D5 (R15-002): the pure Windows shutdown-message decision seam --
+    // testable on Linux even though the native WM_QUERYENDSESSION/
+    // WM_ENDSESSION delivery itself is Windows-only.
+    void test_D5_translateWindowsShutdownMessage_data();
+    void test_D5_translateWindowsShutdownMessage();
 };
 
 #endif // TEST_APPSHELL_H

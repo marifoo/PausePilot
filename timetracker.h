@@ -258,6 +258,13 @@ private:
     bool is_locked_;     // Track if desktop is currently locked (to prevent checkpoints while locked)
     bool dialog_open_;   // True while HistoryDialog is open (suspends mutation)
     bool shutdown_called_ = false;  // Set once shutdown() has torn down the engine.
+    /// D5 review fix (finding 1, R15-002): monotonic counter incremented on
+    /// every shutdown() call (never by cancelShutdown()). HistoryDialog
+    /// snapshots this at construction and refuses to save if it changed --
+    /// a per-dialog guard against a shutdown that closed/committed the live
+    /// segment while the dialog stayed open across it, which a cancellation
+    /// afterward must not unprotect (unlike the global shutdown_called_ flag).
+    qint64 shutdown_epoch_ = 0;
     /// C4 (R05-006): latched once ANY store operation returns FatalError.
     /// Stays true for the lifetime of this TimeTracker (cleared only by
     /// restart, i.e. constructing a new instance) -- there is no in-memory-
@@ -451,10 +458,24 @@ public:
     bool isActive() const  { QMutexLocker lk(&mutex_); return mode_ == Mode::Activity; }
     bool isPaused() const  { QMutexLocker lk(&mutex_); return mode_ == Mode::Pause; }
     bool isStopped() const { QMutexLocker lk(&mutex_); return mode_ == Mode::None; }
-    /// True once shutdown() has run. Distinct from isStopped(): a normally
-    /// stopped engine is still editable, but a shut-down engine must not accept
-    /// a HistoryDialog save (it would re-write finalized rows as unfinalized).
+    /// True once shutdown() has run and not yet cancelled (cleared by
+    /// cancelShutdown()). Distinct from isStopped(): a normally stopped
+    /// engine is still editable regardless of this flag. Test-only accessor
+    /// today -- History's own per-dialog save gate is shutdownEpoch(), not
+    /// this flag (D5 review fix, R15-002).
     bool wasShutDown() const { QMutexLocker lk(&mutex_); return shutdown_called_; }
+    /// D5 (R15-002): reverses shutdown()'s terminal flag after a cancelled OS
+    /// shutdown. Clears shutdown_called_ only -- mode_/session_/pending
+    /// commit-or-discard state are untouched, so the ended session is neither
+    /// reconstructed nor resumed and pending persistence stays governed by
+    /// A2/A3 (retried at the next Start, not here).
+    void cancelShutdown();
+    /// D5 review fix (finding 1, R15-002): monotonic, never reset by
+    /// cancelShutdown() -- lets a caller (HistoryDialog) detect "a shutdown
+    /// happened since I opened" independent of whether it was later
+    /// cancelled, so a dialog that spanned the shutdown stays refused even
+    /// after cancelShutdown() clears wasShutDown() for everyone else.
+    qint64 shutdownEpoch() const { QMutexLocker lk(&mutex_); return shutdown_epoch_; }
 
     /**
      * Result returned by commitEditedTimeline().

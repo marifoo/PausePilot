@@ -1049,3 +1049,45 @@ void AppShellTest::test_qt_receipt_invokes_shutdown_exactly_once()
     QSKIP("Linux-only signal bridge");
 #endif
 }
+
+// ============================================================================
+// D5 (R15-002): MainWin::translateWindowsShutdownMessage() is a pure
+// function -- unit-testable on Linux even though the Windows nativeEvent()
+// path around it is #ifdef-ed out. WM_QUERYENDSESSION (0x0011) always
+// decides Query; WM_ENDSESSION (0x0016) decides EndSessionEnding for a
+// nonzero wParam and EndSessionCancelled for a zero wParam; any other
+// message is Ignore.
+// ============================================================================
+
+void AppShellTest::test_D5_translateWindowsShutdownMessage_data()
+{
+    QTest::addColumn<quint32>("message");
+    QTest::addColumn<quint64>("wParam");
+    QTest::addColumn<int>("expected"); // WindowsShutdownDecision as int
+
+    QTest::newRow("WM_QUERYENDSESSION, wParam=0")
+        << quint32(0x0011) << quint64(0) << static_cast<int>(WindowsShutdownDecision::Query);
+    QTest::newRow("WM_QUERYENDSESSION, wParam nonzero (ignored)")
+        << quint32(0x0011) << quint64(1) << static_cast<int>(WindowsShutdownDecision::Query);
+    QTest::newRow("WM_ENDSESSION, wParam=TRUE (1)")
+        << quint32(0x0016) << quint64(1) << static_cast<int>(WindowsShutdownDecision::EndSessionEnding);
+    QTest::newRow("WM_ENDSESSION, wParam=ENDSESSION_LOGOFF-style nonzero")
+        << quint32(0x0016) << quint64(0x80000000ull) << static_cast<int>(WindowsShutdownDecision::EndSessionEnding);
+    QTest::newRow("WM_ENDSESSION, wParam=FALSE (0) -- cancelled")
+        << quint32(0x0016) << quint64(0) << static_cast<int>(WindowsShutdownDecision::EndSessionCancelled);
+    QTest::newRow("unrelated message (WM_CLOSE)")
+        << quint32(0x0010) << quint64(0) << static_cast<int>(WindowsShutdownDecision::Ignore);
+}
+
+void AppShellTest::test_D5_translateWindowsShutdownMessage()
+{
+    QFETCH(quint32, message);
+    QFETCH(quint64, wParam);
+    QFETCH(int, expected);
+
+    // Act
+    const WindowsShutdownDecision result = MainWin::translateWindowsShutdownMessage_dbg(message, wParam);
+
+    // Assert
+    QCOMPARE(static_cast<int>(result), expected);
+}

@@ -7,6 +7,7 @@
 
 #include "../historydialog.h"
 #include "../historyeditsession.h"
+#include "../shutdowncoordinator.h"
 #include "fakesessionstore.h"
 
 using TestCommon::createSettingsFile;
@@ -1737,4 +1738,95 @@ void HistoryDialogTest::test_C4_historydialog_suppresses_own_critical_when_this_
     QVERIFY(!dialog.saveChanges());
     QCOMPARE(dialog.debugCriticalShownCount_, 0);
     QVERIFY(tracker.isFatalLatched());
+}
+
+// ============================================================================
+// D5 review fix (finding 1/2, R15-002): HistoryDialog's shutdown-refusal
+// gate is per-dialog (TimeTracker::shutdownEpoch()), not global
+// (wasShutDown()) -- cancelShutdown() must not unprotect a dialog that
+// spanned the shutdown, but must allow one opened only afterward.
+// ============================================================================
+
+void HistoryDialogTest::test_D5_dialog_opened_after_cancelShutdown_saves_successfully()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+
+    // A prior session is shut down (e.g. WM_QUERYENDSESSION), then the
+    // shutdown/logoff is cancelled (WM_ENDSESSION(FALSE)) -- all before this
+    // dialog is ever opened.
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(20);
+    coordinator.run(ShutdownMode::Direct);
+    coordinator.cancelShutdown();
+    QVERIFY(!tracker.wasShutDown());
+
+    // A completed segment to edit -- withSegmentType(0, ...) below needs a
+    // completed() entry at index 0. No new Start here: D5 requires History
+    // to work immediately after cancellation, not after a fresh session.
+    const QDateTime now = QDateTime::currentDateTime();
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-150)));
+
+    // Act: the dialog is opened only now, strictly after the shutdown/
+    // cancellation above -- D5's own requirement (History works immediately,
+    // no new Start needed) is exercised by the Start above already having
+    // succeeded; this proves the dialog itself is not still refused.
+    HistoryDialog dialog(tracker, settings);
+    dialog.editSession_dbg().pendingTimelines()[0] =
+        dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause);
+
+    fakeDb.callLog.clear();
+    dialog.done(QDialog::Accepted);
+
+    // Assert
+    QVERIFY(dialog.saveChanges());
+    QVERIFY(fakeDb.callLog.contains("replaceAll"));
+}
+
+void HistoryDialogTest::test_D5_dialog_spanning_cancelled_shutdown_refuses_save()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(20);
+    // A completed segment to edit -- withSegmentType(0, ...) below needs a
+    // completed() entry at index 0, not just the live ongoing segment.
+    const QDateTime now = QDateTime::currentDateTime();
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-150)));
+
+    // The dialog opens while the session is still live -- its snapshot
+    // predates the shutdown that is about to run.
+    HistoryDialog dialog(tracker, settings);
+    dialog.editSession_dbg().pendingTimelines()[0] =
+        dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause);
+
+    // WM_QUERYENDSESSION: the OS runs the Direct shutdown while the dialog
+    // is still open (a nested modal event loop does not block nativeEvent
+    // delivery). It stops and finalizes the live segment the dialog never saw.
+    coordinator.run(ShutdownMode::Direct);
+    QVERIFY(tracker.wasShutDown());
+    // WM_ENDSESSION(FALSE): the shutdown/logoff is cancelled.
+    coordinator.cancelShutdown();
+    QVERIFY(!tracker.wasShutDown());
+
+    fakeDb.callLog.clear();
+    dialog.debugSkipCritical_ = true;
+    dialog.done(QDialog::Accepted);
+
+    // Assert: even though wasShutDown() is now false, this dialog's own
+    // snapshot spans the shutdown, so it must still be refused -- otherwise
+    // the segment the shutdown just committed would be silently dropped.
+    QVERIFY(!dialog.saveChanges());
+    QCOMPARE(fakeDb.callLog.count("replaceAll"), 0);
 }

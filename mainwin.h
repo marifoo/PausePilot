@@ -11,6 +11,16 @@
 #include "sessionstore.h"
 #include "shutdowncoordinator.h"
 
+/// D5 (R15-002): the pure decision produced from a Windows shutdown-related
+/// native message, independent of MSG/WPARAM types so it is unit-testable on
+/// any platform (mirrors LockStateWatcher::translateWtsSessionState, D3).
+enum class WindowsShutdownDecision {
+	Ignore,              ///< not a shutdown-related message.
+	Query,                ///< WM_QUERYENDSESSION: run Direct shutdown, allow (TRUE).
+	EndSessionEnding,     ///< WM_ENDSESSION, wParam != 0: session is actually ending.
+	EndSessionCancelled,  ///< WM_ENDSESSION, wParam == 0: shutdown/logoff was cancelled.
+};
+
 class MainWin : public QMainWindow
 {
 	Q_OBJECT
@@ -37,6 +47,10 @@ private:
 	void setupIcon();
 	void setupCentralWidget(Settings &settings, TimeTracker &timetracker);
 	void shutdown(ShutdownMode mode);
+	/// Pure decision from a Windows shutdown-related native message. Takes
+	/// plain integers (not MSG/WPARAM) so it compiles and is unit-testable
+	/// on any platform; nativeEvent() only dispatches on its result.
+	static WindowsShutdownDecision translateWindowsShutdownMessage(quint32 message, quint64 wParam);
 
 protected:
 	bool nativeEvent(const QByteArray &eventType, void *message, long *result) override;
@@ -54,6 +68,11 @@ public:
 	/// Windows-only nativeEvent handler, so tests on other platforms have no
 	/// way to exercise its no-warning/no-marker contract.
 	void shutdownForTest_dbg(ShutdownMode mode) { shutdown(mode); }
+	/// Exposes the pure Windows shutdown-message decision seam for direct
+	/// unit testing on any platform (D5, R15-002).
+	static WindowsShutdownDecision translateWindowsShutdownMessage_dbg(quint32 message, quint64 wParam) {
+		return translateWindowsShutdownMessage(message, wParam);
+	}
 #endif // QT_NO_DEBUG
 
 public slots:

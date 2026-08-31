@@ -4802,3 +4802,97 @@ void TimerTest::test_D2_scheduled_stop_late_across_date_defers_to_watchdog_disca
              TimeTracker::StopReason::MidnightWatchdog);
     QVERIFY(tracker.isStopped());
 }
+
+// ============================================================================
+// D5 (R15-002): cancelShutdown() atomically clears the tracker's terminal
+// flag after a cancelled OS shutdown, without reconstructing/resuming the
+// ended session and without disturbing pending persistence.
+// ============================================================================
+
+void TimerTest::test_D5_cancelShutdown_after_active_shutdown_stays_stopped_not_resumed()
+{
+    // Arrange: an active session that shutdown() closes (e.g. WM_QUERYENDSESSION).
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore db;
+    TimeTracker tracker(settings, db);
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    tracker.shutdown();
+    QVERIFY(tracker.wasShutDown());
+    QVERIFY(tracker.isStopped());
+    const qint64 activeTimeAfterShutdown = tracker.getActiveTime();
+
+    // Act: the OS shutdown is cancelled.
+    tracker.cancelShutdown();
+
+    // Assert: terminal state clears, but the engine remains an ordinary
+    // stopped session -- no live/ongoing segment is reconstructed or resumed.
+    QVERIFY(!tracker.wasShutDown());
+    QVERIFY(tracker.isStopped());
+    QVERIFY(!tracker.getOngoingDuration().has_value());
+    QCOMPARE(tracker.getActiveTime(), activeTimeAfterShutdown);
+}
+
+void TimerTest::test_D5_cancelShutdown_while_already_stopped()
+{
+    // Arrange: shutdown() runs on a tracker that was never started.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore db;
+    TimeTracker tracker(settings, db);
+
+    tracker.shutdown();
+    QVERIFY(tracker.wasShutDown());
+    QVERIFY(tracker.isStopped());
+
+    // Act
+    tracker.cancelShutdown();
+
+    // Assert
+    QVERIFY(!tracker.wasShutDown());
+    QVERIFY(tracker.isStopped());
+}
+
+void TimerTest::test_D5_cancelShutdown_retains_pending_commit_for_next_start()
+{
+    // Arrange: a Stop-time commit failure leaves a pending payload, then
+    // shutdown() (e.g. via ShutdownCoordinator::run()) marks the tracker
+    // terminal without resolving it.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.hasPendingCommit_dbg());
+    tracker.shutdown();
+    QVERIFY(tracker.wasShutDown());
+    const int commitAttemptsBeforeCancel = fakeDb.callLog.count("commitSession");
+
+    // Act
+    tracker.cancelShutdown();
+
+    // Assert: cancellation neither loses nor retries the payload itself --
+    // A2/A3 still own resolving it, at the next Start.
+    QVERIFY(!tracker.wasShutDown());
+    QVERIFY(tracker.hasPendingCommit_dbg());
+    QCOMPARE(fakeDb.callLog.count("commitSession"), commitAttemptsBeforeCancel);
+
+    // Cleanup: resolve the payload so destruction finds no unresolved commit.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(tracker.drainForShutdown().clean());
+}

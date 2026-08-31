@@ -18,10 +18,11 @@ void ShutdownCoordinator::pumpEvents(int budgetMs)
     loop.exec();
 }
 
-void ShutdownCoordinator::reset()
+void ShutdownCoordinator::cancelShutdown()
 {
-    Logger::Log("[TIMER] Shutdown guard reset (OS shutdown cancelled)");
+    Logger::Log("[TIMER] Shutdown cancelled -- re-arming guard and tracker terminal state");
     shutdown_completed_ = false;
+    timetracker_.cancelShutdown();
 }
 
 DrainResult ShutdownCoordinator::finishDrain(DrainResult result)

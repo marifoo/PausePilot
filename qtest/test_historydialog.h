@@ -97,6 +97,21 @@ private slots:
     // fires TimeTracker's own fatalError modal, so HistoryDialog must show
     // NO dialog of its own for the same failure.
     void test_C4_historydialog_suppresses_own_critical_when_this_call_latches();
+
+    // ========================================================================
+    // D5 review fix (finding 1/2, R15-002): HistoryDialog's shutdown-refusal
+    // gate must be per-dialog (TimeTracker::shutdownEpoch()), not global
+    // (wasShutDown()) -- a cancelShutdown() must not unprotect a dialog that
+    // spanned the shutdown, but must allow one opened only afterward.
+    // ========================================================================
+
+    // A dialog opened AFTER a shutdown was cancelled saves normally -- the
+    // D5 requirement itself (History works immediately, no new Start needed).
+    void test_D5_dialog_opened_after_cancelShutdown_saves_successfully();
+    // A dialog open DURING a shutdown that is then cancelled must still
+    // refuse to save -- the shutdown's own commit must not be silently
+    // dropped by a stale dialog snapshot that never saw it.
+    void test_D5_dialog_spanning_cancelled_shutdown_refuses_save();
 };
 
 #endif // TEST_HISTORYDIALOG_H

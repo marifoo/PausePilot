@@ -44,6 +44,13 @@ class HistoryDialog : public QDialog
 private:
     TimeTracker& timetracker_;
     const Settings& settings_;
+    /// D5 review fix (finding 1, R15-002): TimeTracker::shutdownEpoch()
+    /// captured at construction. saveChanges() refuses to save if this
+    /// changed -- a shutdown ran (and closed/committed the live segment)
+    /// while this dialog stayed open across it. Unlike TimeTracker::
+    /// wasShutDown(), a later cancelShutdown() does not clear this: only a
+    /// dialog opened AFTER the shutdown (and any cancellation) may save.
+    const qint64 shutdownEpochAtOpen_;
 
     /// RAII guard: beginExclusiveEdit on construction, endExclusiveEdit on destruction.
     TimerExclusiveEditGuard exclusiveEditGuard_;

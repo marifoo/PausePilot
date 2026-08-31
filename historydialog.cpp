@@ -42,6 +42,7 @@ HistoryDialog::HistoryDialog(TimeTracker& timetracker, const Settings& settings,
     : QDialog(parent)
     , timetracker_(timetracker)
     , settings_(settings)
+    , shutdownEpochAtOpen_(timetracker.shutdownEpoch())
     , exclusiveEditGuard_(timetracker)   // begins exclusive edit here
     , pageIndex_(0)
 {
@@ -122,11 +123,17 @@ bool HistoryDialog::saveChanges()
         return false;
     }
 
-    // If the engine was shut down while this dialog stayed open (e.g. a
-    // cancelled OS shutdown ran the save path), a save here would re-write the
-    // now-finalized rows as unfinalized into a stopped engine. Refuse it.
-    if (timetracker_.wasShutDown()) {
-        Logger::Log("[HISTORY] Engine was shut down; discarding changes");
+    // D5 review fix (finding 1, R15-002): if the engine was shut down while
+    // this dialog stayed open (e.g. a cancelled OS shutdown ran the save
+    // path, closing/committing the live segment), a save here would silently
+    // drop that segment (absent from this dialog's pre-shutdown snapshot) and
+    // re-insert the current-session bucket as unfinalized into a stopped
+    // engine. Per-dialog, not global: cancelShutdown() clears
+    // TimeTracker::wasShutDown() for everyone, but shutdownEpoch() is
+    // monotonic, so a dialog that spans the shutdown stays refused even
+    // after cancellation, while one opened afterward saves normally.
+    if (timetracker_.shutdownEpoch() != shutdownEpochAtOpen_) {
+        Logger::Log("[HISTORY] Engine was shut down while this dialog was open; discarding changes");
         return false;
     }
 

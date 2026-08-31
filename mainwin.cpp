@@ -269,43 +269,59 @@ void MainWin::closeEvent(QCloseEvent *event)
 	event->accept();
 }
 
+/**
+ * D5 (R15-002): pure translation of a Windows shutdown-related message into
+ * a decision, independent of MSG/WPARAM so it compiles and is unit-testable
+ * on any platform. Mirrors LockStateWatcher::translateWtsSessionState (D3).
+ */
+WindowsShutdownDecision MainWin::translateWindowsShutdownMessage(quint32 message, quint64 wParam)
+{
+	constexpr quint32 kWmQueryEndSession = 0x0011;
+	constexpr quint32 kWmEndSession = 0x0016;
+
+	if (message == kWmQueryEndSession)
+		return WindowsShutdownDecision::Query;
+	if (message == kWmEndSession)
+		return wParam != 0 ? WindowsShutdownDecision::EndSessionEnding
+		                    : WindowsShutdownDecision::EndSessionCancelled;
+	return WindowsShutdownDecision::Ignore;
+}
+
 bool MainWin::nativeEvent([[maybe_unused]]const QByteArray& eventType, void* message, long* result)
 {
 #ifdef Q_OS_WIN
 	MSG* msg = static_cast<MSG*>(message);
-	if (msg->message == WM_QUERYENDSESSION)
-	{
-		Logger::Log("[TIMER] WM_QUERYENDSESSION received - starting early save");
+	const WindowsShutdownDecision decision =
+		translateWindowsShutdownMessage(static_cast<quint32>(msg->message), static_cast<quint64>(msg->wParam));
 
+	switch (decision) {
+	case WindowsShutdownDecision::Query:
+		Logger::Log("[TIMER] WM_QUERYENDSESSION received - starting early save");
 		// Windows is asking if we can shutdown
 		// Best practice: start saving NOW to have more time before WM_ENDSESSION
 		// Use Direct mode since the OS event loop is restricted during shutdown.
 		shutdown(ShutdownMode::Direct);
-
 		*result = TRUE;
 		return true;
-	}
-	else if (msg->message == WM_ENDSESSION)
-	{
-		// wParam indicates if session is actually ending (TRUE) or shutdown was cancelled (FALSE)
-		bool session_ending = (msg->wParam != 0);
-
-		Logger::Log(QString("[TIMER] WM_ENDSESSION received (session_ending=%1)").arg(session_ending));
-
-		if (session_ending) {
-			// Windows is actually shutting down - ensure timer is stopped
-			// shutdown() guard will skip if already done in WM_QUERYENDSESSION
-			shutdown(ShutdownMode::Direct);
-		} else {
-			// Shutdown was cancelled. WM_QUERYENDSESSION already ran the save
-			// path and consumed the shutdown guard; reset it so the next real
-			// shutdown runs the full save path again (the data saved earlier
-			// stays valid).
-			shutdown_coordinator_.reset();
-		}
-
+	case WindowsShutdownDecision::EndSessionEnding:
+		Logger::Log("[TIMER] WM_ENDSESSION received (session_ending=true)");
+		// Windows is actually shutting down - ensure timer is stopped
+		// shutdown() guard will skip if already done in WM_QUERYENDSESSION
+		shutdown(ShutdownMode::Direct);
 		*result = 0;
 		return true;
+	case WindowsShutdownDecision::EndSessionCancelled:
+		Logger::Log("[TIMER] WM_ENDSESSION received (session_ending=false)");
+		// Shutdown was cancelled. WM_QUERYENDSESSION already ran the save
+		// path; cancelShutdown() re-arms the coordinator's guard and clears
+		// TimeTracker's terminal flag so the next real shutdown runs the
+		// full save path again and History can save without a new Start
+		// (the data saved earlier stays valid).
+		shutdown_coordinator_.cancelShutdown();
+		*result = 0;
+		return true;
+	case WindowsShutdownDecision::Ignore:
+		break;
 	}
 #endif
 	return QMainWindow::nativeEvent(eventType, message, result);

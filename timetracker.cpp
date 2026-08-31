@@ -1283,10 +1283,17 @@ bool TimeTracker::isFatalLatched() const
     return fatal_state_latched_;
 }
 
+void TimeTracker::cancelShutdown()
+{
+    QMutexLocker locker(&mutex_);
+    shutdown_called_ = false;
+}
+
 TimeTracker::ShutdownResult TimeTracker::shutdown()
 {
     QMutexLocker locker(&mutex_);
     shutdown_called_ = true;
+    ++shutdown_epoch_;
     bool stopCalled = false;
     if (mode_ != Mode::None) {
         stopTimer(now_provider_(), StopReason::Shutdown);

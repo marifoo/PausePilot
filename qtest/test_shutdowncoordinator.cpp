@@ -122,11 +122,14 @@ void ShutdownCoordinatorTest::test_I_force_direct_skips_retry_loop()
 }
 
 // ============================================================================
-// Test K — reset() re-arms the guard so a second real shutdown flushes again
-// (A4: a cancelled OS shutdown must not permanently consume the guard)
+// Test K — cancelShutdown() re-arms the guard so a second real shutdown
+// flushes again (A4: a cancelled OS shutdown must not permanently consume
+// the guard); D5/R15-002: it also clears the tracker's terminal flag so the
+// application is an ordinary usable stopped session, with no new Start
+// required first.
 // ============================================================================
 
-void ShutdownCoordinatorTest::test_K_reset_allows_second_shutdown()
+void ShutdownCoordinatorTest::test_K_cancelShutdown_allows_second_shutdown()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -140,9 +143,11 @@ void ShutdownCoordinatorTest::test_K_reset_allows_second_shutdown()
 
     coordinator.run(ShutdownMode::DrainEvents);
     QVERIFY(fakeDb.callLog.contains("flushToDisc"));
+    QVERIFY(tracker.wasShutDown());
 
     // Simulate WM_ENDSESSION(FALSE): the OS shutdown was cancelled.
-    coordinator.reset();
+    coordinator.cancelShutdown();
+    QVERIFY(!tracker.wasShutDown());
 
     // User keeps working: a fresh session starts.
     tracker.useTimerViaButton(Button::Start);
@@ -151,8 +156,7 @@ void ShutdownCoordinatorTest::test_K_reset_allows_second_shutdown()
     fakeDb.callLog.clear();
     coordinator.run(ShutdownMode::DrainEvents);
 
-    QVERIFY2(fakeDb.callLog.contains("flushToDisc"),
-             "reset() must re-enable the full save path for the next shutdown");
+    QCOMPARE(fakeDb.callLog.count("flushToDisc"), 1);
 }
 
 // ============================================================================
@@ -422,4 +426,58 @@ void ShutdownCoordinatorTest::test_A4_forced_shutdown_with_unresolved_discard_wr
     // Cleanup so destruction does not find an unresolved intent.
     fakeDb.discardCheckpointResult = SessionStoreResult::success();
     QVERIFY(coordinator.retryDrain().clean());
+}
+
+// ============================================================================
+// D5 (R15-002): cancelShutdown() is one lifecycle transition owned by
+// ShutdownCoordinator that atomically re-arms its own guard and clears
+// TimeTracker's terminal flag -- History must accept a save right after
+// cancellation, with no new Start in between.
+// ============================================================================
+
+void ShutdownCoordinatorTest::test_D5_cancelShutdown_makes_history_available_without_new_start()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+
+    // Arrange: an active session shut down as if by WM_QUERYENDSESSION.
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(20);
+    coordinator.run(ShutdownMode::Direct);
+    QVERIFY(tracker.wasShutDown());
+
+    // Act: WM_ENDSESSION(FALSE) -- the shutdown was cancelled.
+    coordinator.cancelShutdown();
+
+    // Assert: the tracker's own terminal flag is already clear -- no Start
+    // needed. (History's actual per-dialog save gate is shutdownEpoch(),
+    // covered by qtest/test_historydialog.cpp's D5 cases; this test is a
+    // ShutdownCoordinator/TimeTracker contract check, not a History proxy.)
+    QVERIFY(!tracker.wasShutDown());
+    QVERIFY(tracker.isStopped());
+}
+
+void ShutdownCoordinatorTest::test_D5_cancelShutdown_while_already_stopped()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+
+    // Arrange: shutdown runs on a tracker that was never started.
+    coordinator.run(ShutdownMode::Direct);
+    QVERIFY(tracker.wasShutDown());
+
+    // Act
+    coordinator.cancelShutdown();
+
+    // Assert
+    QVERIFY(!tracker.wasShutDown());
+    QVERIFY(tracker.isStopped());
 }
