@@ -26,6 +26,20 @@ private slots:
     void test_A5_noisy_transition_emits_exactly_one_lock();
     void test_A5_lock_unlock_strictly_alternate();
     void test_A5_longlock_fires_at_most_once_per_lock_session();
+
+    // D3/R12-002: pure WTSINFOEX Level-1 SessionFlags -> tri-state translation.
+    void test_D3_translateWtsSessionState_data();
+    void test_D3_translateWtsSessionState();
+
+    // D3/R12-001: Linux backend chain failover/backoff, driven by a fake chain.
+    void test_D3_linux_preferred_backend_failure_falls_back();
+    void test_D3_linux_recovers_once_preferred_backend_works_again();
+    void test_D3_linux_active_backend_failure_falls_back_to_working_backend();
+    void test_D3_linux_all_backends_fail_retains_unknown();
+    void test_D3_linux_backoff_skips_dbus_until_window_elapses();
+    void test_D3_linux_backoff_grows_and_is_bounded();
+    void test_D3_linux_backoff_does_not_block_heartbeat_with_repeated_calls();
+    void test_D3_linux_flapping_fallback_does_not_defeat_backoff();
 };
 
 #endif // TEST_LOCKSTATEWATCHER_H
