@@ -302,7 +302,7 @@ void HistoryCommitTest::test_merge_save_survives_late_crash_recovery()
     // Build the save payload (normalization merges the two rows) and persist it,
     // exactly as HistoryDialog::saveChanges() does.
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
     const auto payload = session.buildSavePayload();
     QVERIFY(payload.needsMergeConfirmation);
     QVERIFY(tracker.replaceAll(payload.historyTimeline, payload.sessionTimeline).ok());

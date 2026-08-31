@@ -45,7 +45,7 @@ HistoryDialog::HistoryDialog(TimeTracker& timetracker, const Settings& settings,
     , exclusiveEditGuard_(timetracker)   // begins exclusive edit here
     , pageIndex_(0)
 {
-    session_.buildFromTimer(timetracker_);
+    session_.buildFromTimer(timetracker_, QDate::currentDate());
     setupUI();
     updateTable(pageIndex_);
 

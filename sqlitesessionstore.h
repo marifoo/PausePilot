@@ -8,6 +8,7 @@
 #include <deque>
 #include <optional>
 #include <vector>
+#include <functional>
 #include "types.h"
 #include "settings.h"
 #include "sessionstore.h"
@@ -114,6 +115,12 @@ private:
     };
 
     QSqlDatabase db;
+    /// D2/MEDIUM-7: the store's own now-provider seam, matching
+    /// TimeTracker's now_provider_ pattern -- used wherever a persisted
+    /// decision reads the clock directly (retention cutoff, flush
+    /// timestamp), so tests can inject a controllable clock instead of the
+    /// real one. Defaults to the real UTC clock.
+    std::function<QDateTime()> now_provider_ = QDateTime::currentDateTimeUtc;
     uint history_days_to_keep_;
     bool db_was_fresh_;  // true if the DB file did not exist when the connection was first opened
     bool schema_creation_failed_ = false;
@@ -290,6 +297,10 @@ public:
         return result;
     }
     QString dbConnectionName_dbg() const { return db.connectionName(); }
+
+    /// D2/MEDIUM-7: overrides now_provider_ for deterministic tests of
+    /// retention cutoff / flush timestamp without waiting on real time.
+    void setNowProvider_dbg(std::function<QDateTime()> provider) { now_provider_ = std::move(provider); }
 
     /// Forces reconcileUnfinalizedCheckpoints to return ok=false, for testing
     /// that recoverStartupCheckpoints does not mutate the marker on failure.

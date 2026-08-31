@@ -125,11 +125,21 @@ private:
 #ifndef QT_NO_DEBUG
         /// Remaining ms until the scheduled stop fires (-1 if not armed). Test probe.
         qint64 remainingMs_dbg() const { return midnight_timer_.remainingTime(); }
+
+        /// Directly invokes the private timer-fired handler without waiting
+        /// for the real QTimer, so tests can drive scheduled-stop boundary
+        /// revalidation deterministically via FakeClock (D2/R11-004).
+        void fireMidnightTimer_dbg() { onMidnightTimerFired(); }
 #endif // QT_NO_DEBUG
 
     private:
         TimeTracker& owner_;
         QTimer midnight_timer_;
+        /// The intended civil-time boundary (23:59:59.500 on the arm day),
+        /// captured once by armScheduledStop(). onMidnightTimerFired()
+        /// revalidates wall time against this rather than trusting the
+        /// QTimer's real-elapsed duration alone (D2/R11-004).
+        QDateTime intended_boundary_;
 
         void onMidnightTimerFired();
     };
@@ -299,6 +309,17 @@ private:
 
     void startTimer(const QDateTime& now);
     void stopTimer(const QDateTime& now, StopReason reason);
+    /// True when `now` precedes `referenceStart` -- a backward wall-clock
+    /// step (NTP/manual/DST) after `referenceStart` was captured. The one
+    /// owner of this rule, used by stopTimer/pauseTimer/backpauseTimer,
+    /// getOngoingDuration_locked(), and saveCheckpoint_locked()
+    /// (D2/R11-003/MEDIUM-6/LOW-E); each caller supplies its own reference
+    /// point (a live segment's start, or an intermediate split point such as
+    /// backpauseTimer's activity_end), decides its own response, and -- where
+    /// the caller's own guard is a `<=`/`>=` rather than a strict `</>` --
+    /// checks the boundary-equal (zero-elapsed) case alongside it. This
+    /// function only detects strict reversal.
+    static bool isClockReversed(const QDateTime& now, const QDateTime& referenceStart);
     /// C4 fix round 2 (LOW-8): the ~6-times-repeated post-latch stop,
     /// factored out. enterFatalState() only latches; each transition owner
     /// must check the latch after its own state changes are done and stop
@@ -379,11 +400,11 @@ private:
     void commit(const Timeline& edited);
     // Applies a deferred midnight event captured while dialog_open_. No-op if
     // an earlier-replayed event already stopped the engine (mode_ == None).
-    void replayDeferredMidnightEvent(const PendingMidnightEvent& event);
+    void replayDeferredMidnightEvent(const PendingMidnightEvent& event, const QDateTime& now);
     // Applies a deferred LongOngoingLock/Unlock correction captured while
     // dialog_open_. Called by endExclusiveEdit() in chronological order
     // relative to a co-pending PendingMidnightEvent, if any.
-    void replayDeferredLockCorrection(const PendingLockCorrection& corr);
+    void replayDeferredLockCorrection(const PendingLockCorrection& corr, const QDateTime& now);
 
 #ifndef QT_NO_DEBUG
     /// Debug-build state snapshot used by StateGuard to detect unlogged mutations.

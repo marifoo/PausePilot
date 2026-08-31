@@ -59,7 +59,7 @@ void HistoryEditSessionTest::test_build_today_page_only_from_memory()
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     QCOMPARE(session.pages().size(), static_cast<size_t>(1));
     QCOMPARE(session.pages()[0].isCurrent, true);
@@ -91,7 +91,7 @@ void HistoryEditSessionTest::test_build_today_page_memory_plus_db()
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     // Only 1 page: today.
     QCOMPARE(session.pages().size(), static_cast<size_t>(1));
@@ -116,7 +116,7 @@ void HistoryEditSessionTest::test_build_historical_page_separate_from_today()
     TimeTracker tracker(settings, fakeDb);
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     // 2 pages: today (empty, isCurrent=true) + yesterday (1 entry, isCurrent=false).
     QCOMPARE(session.pages().size(), static_cast<size_t>(2));
@@ -146,7 +146,7 @@ void HistoryEditSessionTest::test_build_deduplicates_db_row_matching_memory_segm
         TimeDuration::fromPersistedRow(DurationType::Activity, start.addMSecs(-2), end, sharedId));
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     // Only the memory row survives (DB duplicate is excluded).
     QCOMPARE(session.pendingTimelines()[0].completed().size(), static_cast<size_t>(1));
@@ -170,7 +170,7 @@ void HistoryEditSessionTest::test_origin_memory_rows_marked_true()
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     const QString segId = session.pendingTimelines()[0].completed()[0].segment_id.toString();
     QVERIFY(session.originIsMemory().value(segId, false));
@@ -191,7 +191,7 @@ void HistoryEditSessionTest::test_origin_db_rows_marked_false()
     TimeTracker tracker(settings, fakeDb);
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     const QString segId = session.pendingTimelines()[1].completed()[0].segment_id.toString();
     QCOMPARE(session.originIsMemory().value(segId, true), false);
@@ -214,7 +214,7 @@ void HistoryEditSessionTest::test_split_registers_child_with_same_origin()
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     const QString origId = session.pendingTimelines()[0].completed()[0].segment_id.toString();
     QCOMPARE(session.originIsMemory().value(origId, false), true);
@@ -248,7 +248,7 @@ void HistoryEditSessionTest::test_split_history_row_child_is_false_origin()
     TimeTracker tracker(settings, fakeDb);
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     QCOMPARE(session.pages().size(), static_cast<size_t>(2));
 
@@ -284,7 +284,7 @@ void HistoryEditSessionTest::test_type_toggle_updates_pending_timeline()
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     QCOMPARE(session.pendingTimelines()[0].completed()[0].type, DurationType::Activity);
 
@@ -316,7 +316,7 @@ void HistoryEditSessionTest::test_no_merge_needed_for_non_overlapping()
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     const auto payload = session.buildSavePayload();
     QVERIFY(!payload.needsMergeConfirmation);
@@ -342,7 +342,7 @@ void HistoryEditSessionTest::test_merge_needed_for_overlapping_rows()
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     const auto payload = session.buildSavePayload();
     QVERIFY(payload.needsMergeConfirmation);
@@ -385,7 +385,7 @@ void HistoryEditSessionTest::test_cross_midnight_dropped_from_payload()
     TimeTracker tracker(settings, fakeDb);
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     const auto payload = session.buildSavePayload();
 
@@ -421,7 +421,7 @@ void HistoryEditSessionTest::test_refresh_ongoing_updates_end_time()
     QTest::qWait(50);
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     QVERIFY(session.pendingTimelines()[0].ongoing().has_value());
     const QDateTime snapshotEnd = session.pendingTimelines()[0].ongoing()->endTime;
@@ -453,7 +453,7 @@ void HistoryEditSessionTest::test_refresh_ongoing_advances_end_time_and_preserve
     QTest::qWait(30);
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     QVERIFY(session.pendingTimelines()[0].ongoing().has_value());
     QCOMPARE(session.pendingTimelines()[0].ongoing()->type, DurationType::Activity);
@@ -499,7 +499,7 @@ void HistoryEditSessionTest::test_refresh_ongoing_clears_when_engine_has_no_ongo
     QTest::qWait(20);
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     QVERIFY(session.pendingTimelines()[0].ongoing().has_value());
 
@@ -529,7 +529,7 @@ void HistoryEditSessionTest::test_toggle_activity_to_pause_payload_end_utc_advan
     QTest::qWait(30);
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     QVERIFY(session.pendingTimelines()[0].ongoing().has_value());
     QCOMPARE(session.pendingTimelines()[0].ongoing()->type, DurationType::Activity);
@@ -587,7 +587,7 @@ void HistoryEditSessionTest::test_toggle_pause_to_activity_payload_end_utc_advan
     QTest::qWait(20);
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     QVERIFY(session.pendingTimelines()[0].ongoing().has_value());
     QCOMPARE(session.pendingTimelines()[0].ongoing()->type, DurationType::Pause);
@@ -654,7 +654,7 @@ void HistoryEditSessionTest::test_payload_history_vs_session_buckets()
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     const auto payload = session.buildSavePayload();
 
@@ -690,7 +690,7 @@ void HistoryEditSessionTest::test_payload_memory_timeline_for_commit()
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     const auto payload = session.buildSavePayload();
 
@@ -726,7 +726,7 @@ void HistoryEditSessionTest::test_payload_memory_absorbs_merged_memory_row()
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     const auto payload = session.buildSavePayload();
 
@@ -761,7 +761,7 @@ void HistoryEditSessionTest::test_backward_clock_jump_keeps_engine_running()
     clock.advance(30000); // 12:00:30 — ongoing has a positive length at dialog-open
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
     QVERIFY(session.pendingTimelines()[0].ongoing().has_value());
 
     // The wall clock jumps backward 2 minutes (NTP/DST): now < segment_start.
@@ -810,7 +810,7 @@ void HistoryEditSessionTest::test_C3_payload_backward_clock_jump_not_nonpositive
     clock.advance(30000); // 12:00:30
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     clock.advance(-120000); // 11:58:30 — backward step past segment start.
 
@@ -842,7 +842,7 @@ void HistoryEditSessionTest::test_F1_historyLoadFailed_true_on_transient_error()
     TimeTracker tracker(settings, fakeDb);
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     QVERIFY(session.historyLoadFailed());
 }
@@ -858,7 +858,7 @@ void HistoryEditSessionTest::test_F1_historyLoadFailed_false_when_disabled()
     TimeTracker tracker(settings, fakeDb);
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     QVERIFY(!session.historyLoadFailed());
 }
@@ -883,7 +883,7 @@ void HistoryEditSessionTest::test_C3_payload_violation_none_for_ordinary_edit()
         TimeDuration::fromPersistedRow(DurationType::Activity, todayUTC(9, 0), todayUTC(9, 30)));
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     // Act
     const auto payload = session.buildSavePayload();
@@ -920,7 +920,7 @@ void HistoryEditSessionTest::test_C3_payload_drops_pre_existing_cross_type_overl
     TimeTracker tracker(settings, fakeDb);
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     // Act
     const auto payload = session.buildSavePayload();
@@ -963,7 +963,7 @@ void HistoryEditSessionTest::test_C3_payload_flags_memory_origin_overlap_instead
         TimeDuration::fromPersistedRow(DurationType::Pause, todayUTC(10, 15), todayUTC(10, 45), pauseId));
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     // Act
     const auto payload = session.buildSavePayload();
@@ -996,7 +996,7 @@ void HistoryEditSessionTest::test_C3_payload_drops_pre_existing_overlap_equal_st
     TimeTracker tracker(settings, fakeDb);
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     // Act
     const auto payload = session.buildSavePayload();
@@ -1034,7 +1034,7 @@ void HistoryEditSessionTest::test_C3_payload_flags_overlap_created_by_edit()
     TimeTracker tracker(settings, fakeDb);
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
 
     // Act: edit the Pause row's start so it now overlaps the untouched
     // Activity row (same id, so it is still the "same" row, just moved).
@@ -1073,7 +1073,7 @@ void HistoryEditSessionTest::test_C3_payload_drops_completed_row_conflicting_wit
     clock.advance(60000); // 10:01 — ongoing Activity overlaps the Pause row above.
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker);
+    session.buildFromTimer(tracker, QDate::currentDate());
     const SegmentId ongoingId = session.pendingTimelines()[0].ongoing()->segment_id;
 
     // Act: zero edits.
@@ -1092,4 +1092,71 @@ void HistoryEditSessionTest::test_C3_payload_drops_completed_row_conflicting_wit
 
     // Cleanup.
     tracker.useTimerViaButton(Button::Stop);
+}
+
+// D2/MEDIUM-C: buildFromTimer() must use the explicit `today` parameter,
+// not the real system date, to decide page grouping/editability. Pin a
+// date deliberately far from the real system date and assert it is
+// classified as the CURRENT (memory-backed, editable) page -- a regression
+// back to QDate::currentDate() would fail this on any day that isn't
+// 2019-03-15.
+void HistoryEditSessionTest::test_D2_buildFromTimer_uses_explicit_today_not_real_date()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDate pinnedDate(2019, 3, 15);
+    const QDateTime start(pinnedDate, QTime(10, 0), Qt::UTC);
+    const QDateTime end(pinnedDate, QTime(10, 30), Qt::UTC);
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
+
+    HistoryEditSession session;
+
+    // Act: build using the pinned date as "today".
+    session.buildFromTimer(tracker, pinnedDate);
+
+    // Assert: the pinned date's page is the CURRENT page -- only true if
+    // buildFromTimer() actually used `today` rather than the real date.
+    QVERIFY(!session.pages().empty());
+    QCOMPARE(session.pages()[0].pageDate, pinnedDate);
+    QCOMPARE(session.pages()[0].isCurrent, true);
+}
+
+// D2 test list ("History rejection"): a user edit that produces a reversed
+// interval (end before start) must be flagged by buildSavePayload(), never
+// silently written via replaceAll() -- the History boundary's own guard
+// (DayValidity::validatePayload(), via HistoryEditSession) is what D2's
+// "reject at Timeline, History, and SessionStore boundaries" step already
+// relies on for this case; SessionStore's own final guard is covered
+// separately by C3 (test_C3_saveCheckpoint_rejects_nonpositive_interval
+// etc. in test_database.cpp).
+void HistoryEditSessionTest::test_D2_payload_flags_reversed_interval_created_by_edit()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const SegmentId activityId = SegmentId::mint();
+    fakeDb.loadDurationsResult.durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, todayUTC(10, 0), todayUTC(10, 30), activityId));
+
+    TimeTracker tracker(settings, fakeDb);
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    // Act: edit the row to a reversed interval (end before start).
+    std::deque<TimeDuration> edited{
+        TimeDuration::fromPersistedRow(DurationType::Activity, todayUTC(10, 30), todayUTC(10, 0), activityId)
+    };
+    session.setPageTimeline(0, Timeline(edited, std::nullopt));
+
+    const auto payload = session.buildSavePayload();
+
+    // Assert: rejected, not silently written.
+    QCOMPARE(payload.violation, DayValidity::Violation::NonPositive);
 }

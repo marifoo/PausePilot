@@ -92,6 +92,9 @@ private slots:
     void test_flushToDisc_writes_heartbeat_row();
     void test_flushToDisc_idempotent();
     void test_flushToDisc_restores_synchronous_normal();
+    // D2/LOW-H: the flush timestamp must be UTC-normalized regardless of
+    // the injected now-provider's own timeSpec/offset.
+    void test_D2_flushToDisc_normalizes_injected_offset_time_to_utc();
 
     // Step 2 (S1): saveDurations(Append) upserts on segment_id collision
     void test_database_saveDurations_append_upserts_existing_segment_id();
@@ -220,6 +223,12 @@ private slots:
     void test_C3_saveCheckpoint_rejects_nonpositive_interval();
     void test_C3_commitSession_rejects_duplicate_id();
     void test_C3_commitSession_rejects_invalid_timestamp();
+
+    // D2/MEDIUM-7: retention cutoff is computed from an injectable
+    // now-provider seam, not a bare real-time read -- proves the exact
+    // boundary deterministically (row just inside kept, just outside pruned)
+    // without depending on the real day the suite happens to run.
+    void test_D2_retentionCutoff_uses_injected_clock_exact_boundary();
 };
 
 #endif // TEST_DATABASE_H

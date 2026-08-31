@@ -612,8 +612,9 @@ void IntegrationTest::test_integration_backpause_db_update()
 /**
  * Test Y — Engine-driven scheduled stop.
  *
- * Arm DayBoundaryWatcher with a fake "now" that is past 23:59:59.500 so the
- * single-shot timer fires after 1 ms.  Assert:
+ * Advance FakeClock to the intended 23:59:59.500 boundary, arm at that same
+ * instant, and drive the timer-fired callback directly (no real wait).
+ * Assert:
  *   - stopped(MidnightScheduled) is emitted exactly once.
  *   - Engine reaches Mode::None.
  *   - Same-day completed segments were committed to the fake DB.
@@ -626,9 +627,9 @@ void IntegrationTest::test_Y_engine_scheduled_stop_emits_MidnightScheduled()
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
 
-    // Pin the engine clock to mid-day so Start's auto-armed 23:59:59.500 timer is
-    // hours away and cannot fire during the qWait() below — removes the tiny
-    // near-real-midnight flake while we exercise the explicitly-armed stop.
+    // Pin the engine clock to mid-day so Start's auto-armed 23:59:59.500
+    // timer is hours away and does not interfere before we explicitly
+    // re-arm and fire below.
     FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
@@ -647,12 +648,15 @@ void IntegrationTest::test_Y_engine_scheduled_stop_emits_MidnightScheduled()
     QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
     QVERIFY(stoppedSpy.isValid());
 
-    // Arm the watcher with a time past 23:59:59.500 — timer fires in 1 ms.
-    const QDateTime pastStop(QDate::currentDate(), QTime(23, 59, 59, 600));
-    tracker.dayBoundaryWatcher_dbg().armScheduledStop(pastStop);
-
-    // Wait long enough for the single-shot timer to fire.
-    QTest::qWait(100);
+    // Advance the fake clock to the intended boundary, arm at that same
+    // instant, and drive the timer-fired callback directly (D2/R11-004):
+    // no real wait, and the engine's own clock agrees with the armed
+    // boundary so onMidnightTimerFired()'s wall-time revalidation sees an
+    // on-time fire rather than treating it as early.
+    const QDateTime boundary(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
+    clock.setNow(boundary);
+    tracker.dayBoundaryWatcher_dbg().armScheduledStop(boundary);
+    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
 
     // Assert: exactly one stopped signal, with MidnightScheduled reason.
     QCOMPARE(stoppedSpy.count(), 1);
@@ -1161,7 +1165,7 @@ void IntegrationTest::test_A_toggle_ongoing_to_pause_crash_recovery_uses_refresh
 
         // Simulate dialog open: build the edit session (captures current snapshot).
         HistoryEditSession session;
-        session.buildFromTimer(tracker);
+        session.buildFromTimer(tracker, QDate::currentDate());
 
         QVERIFY(session.pendingTimelines()[0].ongoing().has_value());
         dialogOpenEnd = session.pendingTimelines()[0].ongoing()->endTime;
@@ -1379,4 +1383,134 @@ void IntegrationTest::test_A4_watchdog_discard_failure_survives_reopen_never_cre
     SqliteSessionStore db3(settings);
     auto loaded = db3.loadDurations();
     QVERIFY(loaded.empty());
+}
+
+// D2/HIGH-A (round-2 review): a backward wall-clock step must drop only the
+// closing interval, never the already-checkpointed prefix of the same live
+// segment -- that prefix is valid, positive, same-day, truthfully recorded
+// data. A real close/reopen proves it: the checkpoint row survives Stop
+// completely untouched (no discard, no finalize-in-place), and ordinary
+// startup recovery (the SAME path that already finalizes any orphan not
+// overlapping finalized history) picks it up on the next launch -- lossless
+// and truthful, not gated by the clean marker.
+void IntegrationTest::test_D2_real_sqlite_backward_clock_stop_preserves_checkpoint_for_recovery()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    SegmentId segId;
+    const QDateTime t0(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::LocalTime);
+    const QDateTime checkpointEnd = t0.addSecs(300); // 10:05 -- the "2h55m" stand-in
+
+    {
+        Settings settings(settingsPath);
+        SqliteSessionStore db(settings);
+        TimeTracker tracker(settings, db);
+
+        FakeClock clock(t0);
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+        tracker.useTimerViaButton(Button::Start);
+        QVERIFY(tracker.isActive());
+        segId = tracker.sessionState_dbg().segment_id;
+
+        // A real checkpoint row is written for the recorded prefix.
+        clock.setNow(checkpointEnd);
+        tracker.triggerCheckpoint_dbg();
+        {
+            QSqlQuery q(db.rawDb_dbg());
+            q.prepare("SELECT COUNT(*) FROM durations WHERE segment_id = :seg AND is_finalized = 0");
+            q.bindValue(":seg", segId.toString());
+            QVERIFY(q.exec());
+            QVERIFY(q.next());
+            QCOMPARE(q.value(0).toInt(), 1);
+        }
+
+        // Act: a routine backward wall-clock step, then Stop.
+        clock.setNow(t0.addSecs(-600));
+        tracker.useTimerViaButton(Button::Stop);
+        QVERIFY(tracker.isStopped());
+
+        // Assert: the checkpoint row STILL EXISTS, unfinalized, byte-for-
+        // byte unchanged -- no discard was authorized for it.
+        QSqlQuery q(db.rawDb_dbg());
+        q.prepare("SELECT COUNT(*), MIN(end_utc) FROM durations "
+                  "WHERE segment_id = :seg AND is_finalized = 0");
+        q.bindValue(":seg", segId.toString());
+        QVERIFY(q.exec());
+        QVERIFY(q.next());
+        QCOMPARE(q.value(0).toInt(), 1);
+        QCOMPARE(QDateTime::fromString(q.value(1).toString(), Qt::ISODateWithMs), checkpointEnd.toUTC());
+        QVERIFY(!tracker.hasPendingDiscards_dbg());
+    }
+
+    // Session 2: real reopen, shortly after (within the 24h staleness
+    // window) so ordinary policy does not drop it. Startup recovery must
+    // finalize the surviving checkpoint as real recovered time.
+    Settings settings(settingsPath);
+    SqliteSessionStore db2(settings);
+    TimeTracker reopened(settings, db2);
+    FakeClock reopenClock(checkpointEnd.addSecs(60));
+    reopened.setNowProvider_dbg([&reopenClock]() { return reopenClock.now(); });
+    reopened.initializeFromStore();
+
+    QCOMPARE(reopened.getStartupRecoveredMsec(), t0.msecsTo(checkpointEnd));
+
+    SqliteSessionStore db3(settings);
+    auto loaded = db3.loadDurations();
+    QCOMPARE(static_cast<int>(loaded.size()), 1);
+    QCOMPARE(loaded[0].segment_id, segId);
+    QCOMPARE(loaded[0].startTime.toUTC(), t0.toUTC());
+    QCOMPARE(loaded[0].endTime.toUTC(), checkpointEnd.toUTC());
+}
+
+// D2 test list ("marker timestamp") / LOW-G: proves the clean-shutdown
+// marker's actual stored VALUE against a real SQLite store -- an ordinary
+// Stop stores exactly the captured stop time, and a backward-clock Stop
+// does not regress the marker below the live segment's own start (which
+// would be a false statement about what is covered, even though harmless
+// in effect).
+void IntegrationTest::test_D2_marker_timestamp_normal_stop_and_reversed_stop_does_not_regress()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore db(settings);
+    TimeTracker tracker(settings, db);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+
+    auto readMarker = [&]() -> QDateTime {
+        QSqlQuery q(db.rawDb_dbg());
+        if (!q.exec("SELECT value FROM app_settings WHERE key='last_clean_shutdown'") || !q.next())
+            return QDateTime();
+        return QDateTime::fromString(q.value(0).toString(), Qt::ISODateWithMs);
+    };
+
+    // Act: an ordinary Stop.
+    const QDateTime firstStop = t0.addSecs(1800); // 09:30
+    clock.setNow(firstStop);
+    tracker.useTimerViaButton(Button::Stop);
+
+    // Assert: the marker's stored value is exactly the captured stop time.
+    QCOMPARE(readMarker(), firstStop.toUTC());
+
+    // Act: start again, then a backward-clock Stop.
+    const QDateTime segStart2 = t0.addSecs(1900);
+    clock.setNow(segStart2);
+    tracker.useTimerViaButton(Button::Start);
+    clock.setNow(segStart2.addSecs(-600)); // backward step
+    tracker.useTimerViaButton(Button::Stop);
+
+    // Assert: the marker does not regress below this segment's own start --
+    // it must NOT store the reversed `now`, and must never move backward
+    // relative to the previous marker value.
+    const QDateTime marker2 = readMarker();
+    QVERIFY(marker2.isValid());
+    QCOMPARE(marker2, segStart2.toUTC());
+    QVERIFY(marker2 >= firstStop.toUTC());
 }

@@ -74,6 +74,18 @@ private slots:
     // a real close/reopen -- the rejected segment can never be resurrected
     // as credited history.
     void test_A4_watchdog_discard_failure_survives_reopen_never_credited();
+
+    // D2 (R11-003/MEDIUM-8): a real SQLite store proves a backward-clock
+    // Stop writes no row reflecting the reversed interval. HIGH-A (round-2
+    // review): the already-checkpointed prefix must survive intact, not be
+    // deleted -- proved by a real close/reopen where startup recovery
+    // finalizes exactly that prefix.
+    void test_D2_real_sqlite_backward_clock_stop_preserves_checkpoint_for_recovery();
+
+    // D2 test list ("marker timestamp") / LOW-G: the clean-shutdown
+    // marker's stored VALUE on an ordinary Stop, and proof it does not
+    // regress below the live segment's own start on a backward-clock Stop.
+    void test_D2_marker_timestamp_normal_stop_and_reversed_stop_does_not_regress();
 };
 
 #endif // TEST_INTEGRATION_H

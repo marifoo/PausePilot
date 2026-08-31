@@ -439,7 +439,7 @@ void SqliteSessionStore::performRetentionCleanup()
         Logger::Log("[DB] Error starting retention cleanup transaction: " + db.lastError().text());
         return;
     }
-    const QDateTime threshold = QDateTime::currentDateTimeUtc().addDays(-static_cast<int>(history_days_to_keep_));
+    const QDateTime threshold = now_provider_().addDays(-static_cast<int>(history_days_to_keep_));
     QSqlQuery query(db);
     query.prepare("DELETE FROM durations WHERE end_utc < :threshold");
     query.bindValue(":threshold", toUtcIso(threshold));
@@ -1552,7 +1552,7 @@ SessionStoreResult SqliteSessionStore::flushToDisc()
         return SessionStoreResult::transient("Failed to start flush transaction: " + db.lastError().text());
     }
 
-    const QString ts = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+    const QString ts = now_provider_().toUTC().toString(Qt::ISODateWithMs);
     QSqlQuery query(db);
     query.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('last_flush_utc', :ts)");
     query.bindValue(":ts", ts);

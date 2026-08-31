@@ -74,8 +74,11 @@ public:
     HistoryEditSession() = default;
 
     /// Populates pages_, pendingTimelines_, and originIsMemory_ from the
-    /// TimeTracker's current state and its DB history.
-    void buildFromTimer(TimeTracker& timer);
+    /// TimeTracker's current state and its DB history. `today` decides page
+    /// grouping/editability (which page is "today" vs. read-only history) --
+    /// an explicit parameter (D2/MEDIUM-C) rather than a TimeTracker clock
+    /// accessor, so this stays testable without adding engine API surface.
+    void buildFromTimer(TimeTracker& timer, const QDate& today);
 
     /// Refreshes the ongoing segment's end-time from the engine. If the user has
     /// edited the type, the type edit is preserved while the end-time advances.

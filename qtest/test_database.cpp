@@ -1975,6 +1975,36 @@ void DatabaseTest::test_flushToDisc_restores_synchronous_normal()
     QCOMPARE(q.value(0).toInt(), 1);
 }
 
+// D2/LOW-H: flushToDisc()'s 'last_flush_utc' timestamp must be UTC-
+// normalized regardless of the injected now-provider's own offset --
+// performRetentionCleanup() already does this via toUtcIso(); flushToDisc()
+// must too, not store whatever timeSpec the provider itself returns.
+void DatabaseTest::test_D2_flushToDisc_normalizes_injected_offset_time_to_utc()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+    QVERIFY(manager.saveDurations({}, TransactionMode::Append));
+
+    // A fixed +05:00 offset, independent of the test host's real timezone,
+    // so a regression to storing the raw (non-UTC) reading is guaranteed to
+    // differ from the correct UTC value by exactly 5 hours.
+    const QDateTime offsetNow(QDate(2025, 6, 15), QTime(12, 0, 0), Qt::OffsetFromUTC, 5 * 3600);
+    manager.setNowProvider_dbg([offsetNow]() { return offsetNow; });
+
+    QVERIFY(manager.flushToDisc().ok());
+
+    QSqlQuery q(manager.rawDb_dbg());
+    QVERIFY(q.exec("SELECT value FROM app_settings WHERE key = 'last_flush_utc'"));
+    QVERIFY(q.next());
+    const QDateTime parsed = QDateTime::fromString(q.value(0).toString(), Qt::ISODateWithMs);
+    QVERIFY(parsed.isValid());
+    QCOMPARE(parsed.timeSpec(), Qt::UTC);
+    QCOMPARE(parsed, offsetNow.toUTC());
+}
+
 // ============================================================================
 // saveDurations(Append) upserts on segment_id collision
 // ============================================================================
@@ -4723,4 +4753,49 @@ void DatabaseTest::test_C3_commitSession_rejects_invalid_timestamp()
     QCOMPARE(result.category, SessionStoreResult::CallerBug);
     QVERIFY2(result.message.contains("invalid timestamp"), qPrintable(result.message));
     QCOMPARE(static_cast<int>(manager.loadDurations().size()), 0);
+}
+
+// D2/MEDIUM-7: retention cutoff is computed from an injectable now-provider
+// seam (SqliteSessionStore::now_provider_), not a bare QDateTime::
+// currentDateTimeUtc() read -- proves the exact boundary deterministically,
+// independent of the real day the suite happens to run.
+void DatabaseTest::test_D2_retentionCutoff_uses_injected_clock_exact_boundary()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7)); // keep 7 days
+
+    SqliteSessionStore store(settings);
+    QVERIFY(store.ensureOpen_dbg());
+    const QDateTime fixedNow(QDate(2025, 6, 15), QTime(12, 0, 0), Qt::UTC);
+    store.setNowProvider_dbg([fixedNow]() { return fixedNow; });
+
+    // performRetentionCleanup() prunes on end_utc < threshold, so the
+    // boundary is drawn on each row's END time.
+    const QDateTime threshold = fixedNow.addDays(-7);
+    const QDateTime keptEnd = threshold.addSecs(1);     // newer than cutoff -> kept
+    const QDateTime prunedEnd = threshold.addSecs(-1);  // older than cutoff -> pruned
+
+    auto seed = [&](const QDateTime& end) {
+        QSqlQuery q(store.rawDb_dbg());
+        q.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                  "VALUES (:seg, 0, :s, :e, 1)");
+        q.bindValue(":seg", SegmentId::mint().toString());
+        q.bindValue(":s", end.addSecs(-60).toString(Qt::ISODateWithMs));
+        q.bindValue(":e", end.toString(Qt::ISODateWithMs));
+        QVERIFY(q.exec());
+    };
+    seed(keptEnd);
+    seed(prunedEnd);
+
+    // Act: checkSchemaOnStartup() runs retention cleanup against the
+    // injected clock, not real time.
+    const SchemaStatus status = store.checkSchemaOnStartup();
+    QVERIFY(status == SchemaStatus::Ready || status == SchemaStatus::Created);
+
+    // Assert: exactly the outside-cutoff row was pruned.
+    auto loaded = store.loadDurations();
+    QCOMPARE(static_cast<int>(loaded.size()), 1);
+    QCOMPARE(loaded[0].endTime.toUTC(), keptEnd);
 }

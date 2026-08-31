@@ -89,6 +89,17 @@ private slots:
     // between an unedited completed row and the unedited live ongoing
     // segment -- dropping the completed row, never the ongoing one.
     void test_C3_payload_drops_completed_row_conflicting_with_unedited_ongoing();
+
+    // D2/MEDIUM-C: buildFromTimer()'s `today` parameter, not the real
+    // system date, decides page grouping/editability -- a pinned date far
+    // from the real one must still be classified as the current page.
+    void test_D2_buildFromTimer_uses_explicit_today_not_real_date();
+
+    // D2 test list ("History rejection"): an edit that produces a reversed
+    // interval must be flagged by buildSavePayload(), never silently
+    // written -- the History boundary rejecting an invalid interval before
+    // HistoryDialog could call replaceAll().
+    void test_D2_payload_flags_reversed_interval_created_by_edit();
 };
 
 #endif // TEST_HISTORYEDITSESSION_H

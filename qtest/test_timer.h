@@ -362,6 +362,49 @@ private slots:
     // returning true (no pending commit) must not let startTimer()'s None
     // branch fall through to Mode::Activity while latched.
     void test_C4_start_refused_when_discard_retry_latches_with_no_pending_commit();
+
+    // D2 (R11-003): a backward wall-clock step (NTP/manual/DST) makes `now`
+    // precede the live segment's captured start. Stop drops only the
+    // closing interval (zero DB mutation) and writes the clean marker
+    // normally -- there is nothing left unresolved (round-2 review
+    // MEDIUM-B; see the D2 packet's deviation note).
+    void test_D2_stop_backward_clock_step_zero_mutation_marker_still_written();
+    // D2/HIGH-A (round-2 review): a backward-clock Stop must never register
+    // a checkpoint-discard intent -- that would authorize deleting a valid
+    // already-checkpointed prefix along with the invalid closing delta.
+    void test_D2_stop_backward_clock_step_never_discards_checkpoint();
+    // D2 (R11-003): a backward step onto the PRIOR calendar date must not be
+    // misclassified as a cross-midnight watchdog condition.
+    void test_D2_stop_rejects_backward_clock_step_across_date_not_misclassified();
+    // D2/HIGH-1 (R11-003): the same backward step at Pause must refuse the
+    // whole transition -- no state mutation at all -- rather than cap `now`
+    // and still re-anchor the new Pause segment at the Activity segment's
+    // own start (which would re-identify real Activity time as Pause).
+    void test_D2_pause_refuses_backward_clock_step_no_state_mutated();
+    // D2/MEDIUM-6: backpauseTimer (the automatic lock-driven pause path) is
+    // exposed to the same anchor-regression risk and must refuse the same way.
+    void test_D2_backpause_refuses_backward_clock_step_no_state_mutated();
+    // D2/MEDIUM-8: a DST fall-back is just another backward step.
+    void test_D2_pause_refuses_dst_fallback_backward_step();
+    // D2/MEDIUM-8: a DST spring-forward is a forward step and must not be
+    // mistaken for a reversal.
+    void test_D2_pause_proceeds_normally_through_dst_springforward();
+    // D2 (R11-004): a scheduled-stop callback that fires before wall time
+    // actually reaches the captured boundary (backward clock/DST fall-back
+    // after arming) must re-arm for the remaining time instead of stopping
+    // early.
+    void test_D2_scheduled_stop_fires_early_after_backward_step_rearms();
+    // D2 (R11-004): continuing from a re-arm, once wall time reaches the
+    // boundary the callback stops at exactly that boundary.
+    void test_D2_scheduled_stop_reaches_boundary_after_rearm_then_stops();
+    // D2 (R11-004): a same-civil-date late fire still applies the captured
+    // boundary as the cutoff, not the later `now`.
+    void test_D2_scheduled_stop_late_same_day_applies_captured_boundary();
+    // D2/MEDIUM-5 (R11-004): a late fire that has rolled onto a FURTHER
+    // civil date must defer to the watchdog's conservative discard, not
+    // credit [segment_start, boundary] -- that would invent unattended work
+    // time and race the watchdog tick.
+    void test_D2_scheduled_stop_late_across_date_defers_to_watchdog_discard();
 };
 
 #endif // TEST_TIMER_H

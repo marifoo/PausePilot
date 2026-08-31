@@ -77,9 +77,27 @@ void TimeTracker::DayBoundaryWatcher::armScheduledStop(const QDateTime& now)
     qint64 msecs_until_stop;
     if (current_time < midnight_stop_time) {
         msecs_until_stop = current_time.msecsTo(midnight_stop_time);
+        // R11-004: remember the intended civil-time boundary so the callback
+        // can revalidate wall time against it when it actually fires,
+        // instead of trusting the QTimer's real-elapsed duration alone.
+        // D2/LOW-4 (round-3 review): copy `now` and only replace its time-
+        // of-day, rather than reconstructing a QDateTime from date+time+
+        // timeSpec() -- the 3-arg constructor defaults the UTC offset to 0,
+        // silently dropping it for a Qt::OffsetFromUTC/Qt::TimeZone
+        // now-provider (unreachable today, but now-providers are
+        // injectable in more places after this packet).
+        intended_boundary_ = now;
+        intended_boundary_.setTime(midnight_stop_time);
     } else {
-        // Already past 23:59:59.500 — fire in 1 ms to trigger the watchdog path.
+        // Already past 23:59:59.500 — fire in 1 ms to trigger the watchdog
+        // path. The intended boundary for revalidation is `now` itself, not
+        // a past 23:59:59.500: this arm already starts past the nominal
+        // boundary (e.g. Start pressed at 23:59:59.6, or endExclusiveEdit()
+        // re-arming after a long dialog), and treating `now` as "before the
+        // boundary" would make onMidnightTimerFired() misclassify this
+        // entirely ordinary end-of-day stop as a clock reversal.
         msecs_until_stop = 1;
+        intended_boundary_ = now;
     }
 
     Logger::Log(QString("[MIDNIGHT] Scheduled engine auto-stop in %1 seconds")
@@ -94,6 +112,7 @@ void TimeTracker::DayBoundaryWatcher::armScheduledStop(const QDateTime& now)
 void TimeTracker::DayBoundaryWatcher::cancel()
 {
     midnight_timer_.stop();
+    intended_boundary_ = QDateTime();
     Logger::Log("[MIDNIGHT] Scheduled stop timer cancelled");
 }
 
@@ -105,12 +124,48 @@ void TimeTracker::DayBoundaryWatcher::onMidnightTimerFired()
         Logger::Log("[MIDNIGHT] Scheduled stop fired but engine already stopped - ignoring");
         return;
     }
-    // Capture the cutoff once, at the instant the scheduled stop actually
-    // fires (nominally 23:59:59.500). If History editing is suspending
-    // mutation, this exact instant becomes the deferred event's boundary, so
-    // replay later credits precisely through it rather than through whatever
-    // wall time happens to be current when the dialog eventually closes.
-    const QDateTime cutoff = owner_.now_provider_();
+    // R11-004: revalidate wall time against the intended boundary captured
+    // by armScheduledStop() rather than trusting the QTimer's real-elapsed
+    // duration alone. A backward clock/DST step after arming can let the
+    // timer's real duration expire before civil time actually reaches the
+    // boundary -- re-arm for the remaining real time instead of stopping
+    // early.
+    const QDateTime now = owner_.now_provider_();
+    if (intended_boundary_.isValid() && now < intended_boundary_) {
+        // Clamp to one day: an extreme backward step must not overflow (or
+        // go negative on) the int QTimer::start() takes, which would emit a
+        // QWARN and silently drop the scheduled stop (LOW-9).
+        const qint64 remaining = qBound<qint64>(1, now.msecsTo(intended_boundary_), 24LL * 3600LL * 1000LL);
+        Logger::Log(QString("[MIDNIGHT] Scheduled stop fired early (now=%1 < boundary=%2) — re-arming for %3 ms")
+            .arg(now.toString(Qt::ISODateWithMs), intended_boundary_.toString(Qt::ISODateWithMs))
+            .arg(remaining));
+        midnight_timer_.start(static_cast<int>(remaining));
+        return;
+    }
+    // Plan §2's watchdog policy is conservative: a segment left running
+    // across a missed midnight (typically suspend, where the QTimer's
+    // real-elapsed budget only expires on resume) is discarded whole, never
+    // credited. Crediting [segment_start, boundary] here on a late fire that
+    // has already rolled into a further date would "invent" that unattended
+    // interval and race the ~1 s watchdog tick, which discards the very
+    // same segment -- the outcome would depend on which owner wins. Defer
+    // entirely to the watchdog once the fire has crossed into a later date
+    // than the boundary itself (R11-004/MEDIUM-5): do nothing here: the
+    // next tick() discards the segment (or, if the dialog is open, captures
+    // the typed watchdog deferral) exactly as an un-deferred late fire
+    // already would.
+    if (intended_boundary_.isValid() && now.date() > intended_boundary_.date()) {
+        Logger::Log(QString("[MIDNIGHT] Scheduled stop fired very late (now=%1, boundary=%2) — "
+                             "deferring to the watchdog's conservative discard")
+            .arg(now.toString(Qt::ISODateWithMs), intended_boundary_.toString(Qt::ISODateWithMs)));
+        return;
+    }
+    // Capture the cutoff once, at the intended boundary (nominally
+    // 23:59:59.500). If History editing is suspending mutation, this exact
+    // instant becomes the deferred event's boundary, so replay later
+    // credits precisely through it rather than through whatever wall time
+    // happens to be current when the dialog eventually closes.
+    const QDateTime cutoff = intended_boundary_.isValid() ? intended_boundary_ : now;
     if (owner_.dialog_open_) {
         if (!owner_.pending_midnight_event_.has_value()) {
             owner_.pending_midnight_event_ = PendingMidnightEvent{StopReason::MidnightScheduled, cutoff};
@@ -578,6 +633,22 @@ void TimeTracker::pauseTimer(const QDateTime& now)
         Logger::Log("[DEBUG] Pause ignored; not in Activity");
         return;
     }
+    // D2/R11-003 (HIGH-1): a backward wall-clock step (NTP/manual/DST) can
+    // make `now` precede the live segment's start. Anchoring the new Pause
+    // segment there -- whether at the stepped-back `now` or, worse, capped
+    // to the Activity segment's own start -- re-identifies real Activity
+    // time as Pause once that Pause segment later ends normally. Refuse the
+    // whole transition instead: touch no state, so the unchanged anchor
+    // lets the next Pause/Stop attempt compute a correct interval once wall
+    // time is sane again.
+    if (isClockReversed(now, session_.segment_start_time)) {
+        Logger::Log(QString("[CLOCK] Pause rejected: now (%1) precedes segment start (%2) — backward clock step")
+            .arg(now.toString(Qt::ISODateWithMs), session_.segment_start_time.toString(Qt::ISODateWithMs)));
+        // D2/LOW-F: recoverable and the UI won't desync, but a silent no-op
+        // button press is still worth telling the user about (C4 precedent).
+        emit userWarning("Pause not applied: the system clock just moved backward. Try again.");
+        return;
+    }
     Logger::Log("[DEBUG] Pausing TimeTracker from Activity - D=" + QString::number(session_.durations.size()));
     timer_.restart();
     addDuration(DurationType::Activity, session_.segment_start_time, now, session_.segment_id);
@@ -646,8 +717,6 @@ void TimeTracker::backpauseTimer(const QDateTime& now, const QDateTime& lockTime
         backpause_msec = MAX_BACKPAUSE_MS;
     }
 
-    timer_.restart();
-
     // Calculate Activity end time (backpause boundary). Anchor the pause at the
     // real wall-clock lock instant when it is known: the LongOngoingLock event
     // may arrive long after the lock (e.g. after a suspend), so now−backpause
@@ -659,6 +728,25 @@ void TimeTracker::backpauseTimer(const QDateTime& now, const QDateTime& lockTime
     if (activity_end < session_.segment_start_time) {
         activity_end = session_.segment_start_time;
     }
+
+    // D2/R11-003 (MEDIUM-6): the same backward-step guard as pauseTimer,
+    // against activity_end (the Pause segment's own start) rather than
+    // segment_start_time -- a step arriving during/after a lock can make
+    // `now` precede activity_end. Refuse the whole transition rather than
+    // re-anchor the new Pause segment at a stepped-back `now`.
+    if (isClockReversed(now, activity_end)) {
+        Logger::Log(QString("[CLOCK] Backpause rejected: now (%1) precedes activity_end (%2) — backward clock step")
+            .arg(now.toString(Qt::ISODateWithMs), activity_end.toString(Qt::ISODateWithMs)));
+        // D2/LOW-F: same rationale as pauseTimer's refusal -- tell the user
+        // rather than silently doing nothing. D2/LOW-3 (round-3 review):
+        // distinct wording -- this is the AUTOMATIC lock-driven path, so
+        // user-action phrasing ("Try again") would misdescribe an event the
+        // user never triggered.
+        emit userWarning("Automatic pause skipped: the system clock moved backward.");
+        return;
+    }
+
+    timer_.restart();
 
     // Activity segment: segment_start_time to activity_end
     if (activity_end > session_.segment_start_time) {
@@ -695,14 +783,44 @@ void TimeTracker::stopTimer(const QDateTime& now, StopReason reason)
         return;
     }
 
-    // A cross-midnight ongoing segment is about to be discarded by
-    // addDuration(); capture its id so its unfinalized checkpoint row can be
-    // deleted below (otherwise startup recovery would resurrect the
-    // deliberately discarded time).
-    SegmentId discardedCrossMidnightId;
+    // A cross-midnight ongoing segment cannot be safely closed -- its
+    // closing interval is discarded by addDuration() below (TimeDuration::
+    // create's CrossMidnight rejection). Capture its id BEFORE any store
+    // call so its unfinalized checkpoint row is durably discarded too
+    // (A4/R05-001): otherwise startup recovery could resurrect
+    // deliberately-discarded time.
+    //
+    // A backward wall-clock step (R11-003/HIGH-A) is different: only the
+    // CLOSING delta [segment_start, now) is invalid (NonPositive, dropped by
+    // addDuration() below same as always) -- any already-checkpointed prefix
+    // of that same segment_id is a valid, positive, same-day, truthfully
+    // recorded interval and must NOT be discarded with it. Deleting it via
+    // the same A4 tombstone mechanism used for cross-midnight would destroy
+    // real recorded work the engine never rejected. Recovery already
+    // finalizes an orphan checkpoint that doesn't overlap finalized history
+    // (B1/B2), so leaving it alone here is both lossless and truthful --
+    // no clean-marker gate is needed either: the marker only feeds
+    // notify_user, never orphan finalization eligibility.
+    const bool clockReversed = isClockReversed(now, session_.segment_start_time);
+    // Captured before clearSegment() below invalidates it: on a reversal,
+    // the clean-marker write further down must not use the reversed `now`
+    // (which could be far earlier than this segment's own start, understating
+    // -- moving backward relative to -- what THIS stop covers, a false
+    // statement, D2/LOW-G) -- it falls back to this instead. This bounds
+    // only this one stop's own contribution; it is not a general monotonic
+    // guard against every previously stored marker (see the write site
+    // below for the precise claim).
+    const QDateTime segmentStartBeforeClear = session_.segment_start_time;
+    SegmentId discardedSegmentId;
     if (session_.segment_start_time.isValid()
         && isCrossMidnight(session_.segment_start_time, now)) {
-        discardedCrossMidnightId = session_.segment_id;
+        discardedSegmentId = session_.segment_id;
+    }
+    if (clockReversed) {
+        Logger::Log(QString("[CLOCK] Stop: backward wall-clock step detected (now=%1 < segment_start=%2) — "
+                             "dropping the closing interval only; any already-checkpointed prefix is left "
+                             "for startup recovery to finalize")
+            .arg(now.toString(Qt::ISODateWithMs), session_.segment_start_time.toString(Qt::ISODateWithMs)));
     }
 
     if (mode_ == Mode::Pause) {
@@ -722,8 +840,8 @@ void TimeTracker::stopTimer(const QDateTime& now, StopReason reason)
     // Register the discard intent BEFORE any store call (including the
     // ordinary commit below), so the identity is captured even if this
     // stop's own persistence attempt runs first (A4/R05-001).
-    if (!discardedCrossMidnightId.isEmpty()) {
-        pending_discards_.begin(discardedCrossMidnightId);
+    if (!discardedSegmentId.isEmpty()) {
+        pending_discards_.begin(discardedSegmentId);
     }
 
     // Persist current session durations only (not entire history). History dialog does replace explicitly.
@@ -736,12 +854,23 @@ void TimeTracker::stopTimer(const QDateTime& now, StopReason reason)
 
     // The clean-shutdown marker must not be written while a commit or a
     // discard intent remains unresolved (A4/R05-001): writing it here while
-    // a checkpoint-discard is still only pending could let startup recovery
-    // treat that not-yet-durable rejection as ordinary crash data.
+    // a checkpoint-discard (a cross-midnight one; see above) is still only
+    // pending could let startup recovery treat that not-yet-durable
+    // rejection as ordinary crash data. A backward-clock reversal above
+    // registers no discard intent (HIGH-A) and needs none here either: the
+    // retained checkpoint prefix is ordinary crash-recovery data, resolved
+    // by the next ordinary startup, not by anything this process can retry
+    // (D2/MEDIUM-B; see the D2 packet's deviation note) -- so Start is not
+    // blocked and the marker is written normally, using
+    // segmentStartBeforeClear instead of the reversed `now` so THIS stop's
+    // own marker write cannot understate its own coverage (D2/LOW-G). This
+    // does not make the marker monotonic across the process's whole
+    // lifetime -- a large enough step-back immediately before an entirely
+    // later session could still move it backward relative to an earlier
+    // stored marker (pre-existing, not introduced here; a monotonic
+    // guard is a later packet's call, not this one's).
     if (committed && !pending_discards_.hasPending()) {
-        // Use the same `now` for the shutdown marker to maintain a single
-        // consistent timestamp across the entire stop operation.
-        db_.setLastCleanShutdownMarker(now);
+        db_.setLastCleanShutdownMarker(clockReversed ? segmentStartBeforeClear : now);
         Logger::Log("[DB] Session durations updated");
     }
 
@@ -1109,7 +1238,10 @@ std::optional<TimeDuration> TimeTracker::getOngoingDuration_locked() const
     if (!session_.segment_start_time.isValid()) return std::nullopt;
     const QDateTime now = now_provider_();
     const DurationType type = (mode_ == Mode::Activity) ? DurationType::Activity : DurationType::Pause;
-    if (session_.segment_start_time >= now) {
+    // D2/LOW-E: isClockReversed() covers the strict backward-step case;
+    // `now == segment_start_time` (zero elapsed, not a reversal) gets the
+    // same zero-length-capped treatment here, so the two are combined.
+    if (isClockReversed(now, session_.segment_start_time) || now == session_.segment_start_time) {
         // A8: the wall clock jumped backward (NTP/DST step-back), so the running
         // segment appears to start in the "future". The engine is NOT stopped —
         // expose a zero-length ongoing capped at the start rather than nullopt,
@@ -1374,6 +1506,11 @@ EntriesForDateResult TimeTracker::hasEntriesForDate(const QDate& date)
     return db_.hasEntriesForDate(date);
 }
 
+bool TimeTracker::isClockReversed(const QDateTime& now, const QDateTime& referenceStart)
+{
+    return referenceStart.isValid() && now < referenceStart;
+}
+
 /**
  * Appends a single same-day segment to session_.durations.
  *
@@ -1494,9 +1631,14 @@ void TimeTracker::saveCheckpoint_locked(const QDateTime& now)
     if (mode_ != Mode::Activity)        return;
     if (discardCrossMidnightOngoingAndStop(now)) return;
 
-    // Use wall-clock elapsed rather than timer_.elapsed() to stay correct across suspend.
+    // Use wall-clock elapsed rather than timer_.elapsed() to stay correct
+    // across suspend. D2/LOW-E: routed through isClockReversed() for the
+    // backward-step case explicitly; `wallClockMs == 0` (no time has passed
+    // yet, not a reversal) is checked alongside it. Either way there is
+    // nothing to save, no state is mutated, and the next tick (or a
+    // Stop/Pause once wall time is sane) resolves it.
     const qint64 wallClockMs = session_.segment_start_time.msecsTo(now);
-    if (wallClockMs <= 0) {
+    if (isClockReversed(now, session_.segment_start_time) || wallClockMs == 0) {
         return;
     }
 
@@ -1537,6 +1679,12 @@ void TimeTracker::endExclusiveEdit()
     dialog_open_ = false;
     Logger::Log("[CHECKPOINT] Checkpoints resumed (dialog closed)");
 
+    // D2 (MEDIUM-7): one civil `now` for this whole operation, passed down
+    // to both replay helpers below, rather than each reading now_provider_()
+    // independently -- the first reading drives a persisted discard
+    // decision (replayDeferredMidnightEvent's watchdog branch).
+    const QDateTime now = now_provider_();
+
     // Snapshot and clear both possible deferred events up front so a
     // re-entrant/duplicate endExclusiveEdit() call cannot replay either one
     // twice.
@@ -1551,19 +1699,19 @@ void TimeTracker::endExclusiveEdit()
     // LongOngoingLock fired (lock_time).
     if (midnightEvent.has_value() && lockCorrection.has_value()
         && lockCorrection->lock_time < midnightEvent->timestamp) {
-        replayDeferredLockCorrection(*lockCorrection);
-        replayDeferredMidnightEvent(*midnightEvent);
+        replayDeferredLockCorrection(*lockCorrection, now);
+        replayDeferredMidnightEvent(*midnightEvent, now);
     } else if (midnightEvent.has_value()) {
-        replayDeferredMidnightEvent(*midnightEvent);
+        replayDeferredMidnightEvent(*midnightEvent, now);
         if (lockCorrection.has_value()) {
             // Midnight happened first (or at the same instant): a real
             // (non-deferred) LongOngoingLock arriving this late would see the
             // engine already stopped and no-op, so replay through the same
             // Activity-only gate below.
-            replayDeferredLockCorrection(*lockCorrection);
+            replayDeferredLockCorrection(*lockCorrection, now);
         }
     } else if (lockCorrection.has_value()) {
-        replayDeferredLockCorrection(*lockCorrection);
+        replayDeferredLockCorrection(*lockCorrection, now);
     }
 
     // Restart checkpoint timer only after deferred events are replayed, so
@@ -1573,7 +1721,7 @@ void TimeTracker::endExclusiveEdit()
     }
 }
 
-void TimeTracker::replayDeferredMidnightEvent(const PendingMidnightEvent& event)
+void TimeTracker::replayDeferredMidnightEvent(const PendingMidnightEvent& event, const QDateTime& now)
 {
     if (mode_ == Mode::None) {
         // Already stopped by an earlier-replayed event; nothing to do.
@@ -1583,7 +1731,7 @@ void TimeTracker::replayDeferredMidnightEvent(const PendingMidnightEvent& event)
         // Conservative discard, matching the non-deferred watchdog path:
         // the whole ongoing segment is dropped, never credited.
         Logger::Log("[MIDNIGHT] Replaying deferred watchdog cross-midnight discard after dialog close");
-        discardCrossMidnightOngoingAndStop(now_provider_());
+        discardCrossMidnightOngoingAndStop(now);
     } else {
         // Scheduled stop: finalize exactly at the captured cutoff, not at
         // whatever wall time is current now.
@@ -1592,7 +1740,7 @@ void TimeTracker::replayDeferredMidnightEvent(const PendingMidnightEvent& event)
     }
 }
 
-void TimeTracker::replayDeferredLockCorrection(const PendingLockCorrection& corr)
+void TimeTracker::replayDeferredLockCorrection(const PendingLockCorrection& corr, const QDateTime& now)
 {
     if (!corr.unlock_time.isValid()) {
         // Still locked: identical to today's replay path.
@@ -1611,9 +1759,10 @@ void TimeTracker::replayDeferredLockCorrection(const PendingLockCorrection& corr
         // corr.unlock_time as "now" (needed so the Pause->Activity
         // duration math is correct) — but the underlying QTimer counts
         // real wall-clock ms from when it starts, so arming it against a
-        // historical instant makes it fire late. Re-arm against the
-        // real current time so it still fires at 23:59:59.500.
-        day_boundary_watcher_.armScheduledStop(now_provider_());
+        // historical instant makes it fire late. Re-arm against the same
+        // civil `now` captured once by endExclusiveEdit() (D2/MEDIUM-7) so
+        // it still fires at 23:59:59.500 relative to real current time.
+        day_boundary_watcher_.armScheduledStop(now);
     }
 }
 

@@ -15,7 +15,7 @@ bool isSameSegmentId(const TimeDuration& a, const TimeDuration& b)
 
 } // namespace
 
-void HistoryEditSession::buildFromTimer(TimeTracker& timer)
+void HistoryEditSession::buildFromTimer(TimeTracker& timer, const QDate& today)
 {
     Timeline sessionSnapshot = timer.snapshot();
     const auto& currentDurations = sessionSnapshot.completed();
@@ -26,7 +26,6 @@ void HistoryEditSession::buildFromTimer(TimeTracker& timer)
         || loaded.status == SessionStoreResult::FatalError;
     history_load_skipped_ = loaded.skipped;
     history_load_repaired_ = loaded.repaired;
-    const QDate today = QDate::currentDate();
 
     // Build a list of all current (in-memory) durations for dedup comparison.
     std::vector<TimeDuration> currentComparableDurations;
