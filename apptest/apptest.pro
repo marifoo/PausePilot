@@ -48,7 +48,8 @@ SOURCES += \
     $$PWD/../settings.cpp \
     $$PWD/../logger.cpp \
     $$PWD/../timeline.cpp \
-    $$PWD/../startuprecovery.cpp
+    $$PWD/../startuprecovery.cpp \
+    $$PWD/../unixsignalbridge.cpp
 
 HEADERS += \
     test_appshell.h \
@@ -74,4 +75,5 @@ HEADERS += \
     $$PWD/../historydialog.h \
     $$PWD/../timeline.h \
     $$PWD/../startuprecovery.h \
-    $$PWD/../lockdecision.h
+    $$PWD/../lockdecision.h \
+    $$PWD/../unixsignalbridge.h

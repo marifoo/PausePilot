@@ -20,7 +20,8 @@ HEADERS = \
    $$PWD/historyeditsession.h \
    $$PWD/timeline.h \
    $$PWD/startuprecovery.h \
-   $$PWD/lockdecision.h
+   $$PWD/lockdecision.h \
+   $$PWD/unixsignalbridge.h
 
 SOURCES = \
    $$PWD/contentwidget.cpp \
@@ -38,7 +39,8 @@ SOURCES = \
    $$PWD/timeformat.cpp \
    $$PWD/logger.cpp \
    $$PWD/timeline.cpp \
-   $$PWD/startuprecovery.cpp
+   $$PWD/startuprecovery.cpp \
+   $$PWD/unixsignalbridge.cpp
 
 INCLUDEPATH = \
     $$PWD/.

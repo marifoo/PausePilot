@@ -10,9 +10,6 @@
 #ifdef Q_OS_LINUX
 #include <QLoggingCategory>
 #include <QSocketNotifier>
-#include <sys/socket.h>
-#include <signal.h>
-#include <unistd.h>
 #endif
 
 #include "apppaths.h"
@@ -26,53 +23,7 @@
 #include "types.h"
 #include "startuprecovery.h"
 #include "lockdecision.h"
-
-#ifdef Q_OS_LINUX
-// Unix signal handling - safe pattern using socketpair
-// Signal handlers can only call async-signal-safe functions,
-// so we write to a socket and let Qt handle it in the event loop
-
-static int signalFd[2] = {-1, -1};
-
-static void unixSignalHandler(int signum)
-{
-    // Write the signal number to the socket (async-signal-safe)
-    char sig = static_cast<char>(signum);
-    if (write(signalFd[0], &sig, sizeof(sig)) == -1) {
-        // Can't do much here - we're in a signal handler
-    }
-}
-
-static bool setupUnixSignalHandlers()
-{
-    // Create socket pair for signal communication
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, signalFd) != 0) {
-        qWarning() << "Failed to create socketpair for signal handling";
-        return false;
-    }
-
-    // Install signal handlers
-    struct sigaction sa;
-    sa.sa_handler = unixSignalHandler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;  // Restart interrupted system calls
-
-    if (sigaction(SIGTERM, &sa, nullptr) != 0) {
-        qWarning() << "Failed to install SIGTERM handler";
-        return false;
-    }
-    if (sigaction(SIGINT, &sa, nullptr) != 0) {
-        qWarning() << "Failed to install SIGINT handler";
-        return false;
-    }
-    if (sigaction(SIGHUP, &sa, nullptr) != 0) {
-        qWarning() << "Failed to install SIGHUP handler";
-        return false;
-    }
-
-    return true;
-}
-#endif
+#include "unixsignalbridge.h"
 
 /**
  * Application Entry Point.
@@ -94,9 +45,17 @@ int main(int argc, char *argv[])
 	// Suppress KDE Framework warnings about missing platform plugin
 	QLoggingCategory::setFilterRules("kf.windowsystem=false");
 
-	// Set up Unix signal handlers before creating QApplication
-	if (!setupUnixSignalHandlers()) {
-		qWarning() << "Failed to set up Unix signal handlers; graceful shutdown on SIGTERM/SIGINT/SIGHUP will not work";
+	// Set up the Unix signal bridge before creating QApplication. On
+	// failure, continue startup without UI, a fallback signal mechanism, or
+	// a degraded-mode flag (D4, section 2 "Application shell and
+	// diagnostics"); Logger::Log() is a silent no-op until Settings is
+	// registered below, which is exactly "if available" at this point.
+	UnixSignalBridge signal_bridge;
+	if (!signal_bridge.setup()) {
+		const QString msg = "Failed to set up Unix signal bridge; graceful shutdown on SIGTERM/SIGINT/SIGHUP will not work";
+		std::fprintf(stderr, "[SIGNAL] %s\n", msg.toLocal8Bit().constData());
+		std::fflush(stderr);
+		Logger::Log("[SIGNAL] " + msg);
 	}
 #endif
 
@@ -175,24 +134,15 @@ int main(int argc, char *argv[])
 	MainWin main_win(settings, time_tracker, session_store, shutdown_coordinator);
 
 #ifdef Q_OS_LINUX
-	// Set up socket notifier to handle Unix signals in the Qt event loop
+	// Set up socket notifier to handle Unix signals in the Qt event loop.
+	// drainPending() coalesces however many signals arrived between two
+	// event-loop turns into this one shutdown invocation (D4 step 3).
 	QSocketNotifier* signalNotifier = nullptr;
-	if (signalFd[1] != -1) {
-		signalNotifier = new QSocketNotifier(signalFd[1], QSocketNotifier::Read, &application);
+	if (signal_bridge.notifierFd() != -1) {
+		signalNotifier = new QSocketNotifier(signal_bridge.notifierFd(), QSocketNotifier::Read, &application);
 		QObject::connect(signalNotifier, &QSocketNotifier::activated, [&](int) {
-			// Read and discard the signal number
-			char sig;
-			if (read(signalFd[1], &sig, sizeof(sig)) > 0) {
-				{
-					QString signalName;
-					switch (sig) {
-						case SIGTERM: signalName = "SIGTERM"; break;
-						case SIGINT:  signalName = "SIGINT"; break;
-						case SIGHUP:  signalName = "SIGHUP"; break;
-						default:      signalName = QString::number(sig); break;
-					}
-					Logger::Log("[SIGNAL] Received " + signalName + " - initiating shutdown");
-				}
+			if (signal_bridge.drainPending()) {
+				Logger::Log("[SIGNAL] Received Unix signal - initiating shutdown");
 
 				// Trigger graceful shutdown
 				main_win.onAboutToQuit();

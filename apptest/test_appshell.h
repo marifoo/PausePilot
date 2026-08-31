@@ -51,6 +51,19 @@ private slots:
     void test_startup_recovery_quit_declines_without_retry();
     // Recovery succeeds immediately: no modal at all.
     void test_startup_recovery_success_shows_no_modal();
+
+    // D4 (R15-003): the Unix signal bridge must be nonblocking, coalesced,
+    // and clean up after itself.
+    void test_setup_creates_nonblocking_closeonexec_descriptors();
+    void test_each_signal_is_delivered_and_drained_data();
+    void test_each_signal_is_delivered_and_drained();
+    void test_repeated_signals_coalesce_into_one_drain();
+    void test_write_retries_only_eintr();
+    void test_write_treats_eagain_as_already_pending();
+    void test_write_preserves_errno();
+    void test_full_channel_does_not_block();
+    void test_setup_failure_leaks_no_descriptors();
+    void test_qt_receipt_invokes_shutdown_exactly_once();
 };
 
 #endif // TEST_APPSHELL_H

@@ -131,6 +131,7 @@
     <ClCompile Include="..\logger.cpp" />
     <ClCompile Include="..\timeline.cpp" />
     <ClCompile Include="..\startuprecovery.cpp" />
+    <ClCompile Include="..\unixsignalbridge.cpp" />
   </ItemGroup>
   <ItemGroup>
     <QtMoc Include="test_appshell.h" />
@@ -157,6 +158,7 @@
     <ClInclude Include="..\timeline.h" />
     <ClInclude Include="..\startuprecovery.h" />
     <ClInclude Include="..\lockdecision.h" />
+    <ClInclude Include="..\unixsignalbridge.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Condition="Exists('$(QtMsBuild)\qt.targets')">

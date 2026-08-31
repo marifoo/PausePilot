@@ -201,6 +201,7 @@
     <ClCompile Include="splitdialog.cpp" />
     <ClCompile Include="sqlitesessionstore.cpp" />
     <ClCompile Include="startuprecovery.cpp" />
+    <ClCompile Include="unixsignalbridge.cpp" />
     <ClCompile Include="timeformat.cpp" />
     <ClCompile Include="timeline.cpp" />
     <ClCompile Include="timetracker.cpp" />
@@ -218,6 +219,7 @@
     <ClInclude Include="dayvalidity.h" />
     <ClInclude Include="historyeditsession.h" />
     <ClInclude Include="lockdecision.h" />
+    <ClInclude Include="unixsignalbridge.h" />
     <ClInclude Include="logger.h" />
     <ClInclude Include="sessionstore.h" />
     <ClInclude Include="settings.h" />

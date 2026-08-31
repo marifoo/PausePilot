@@ -5,22 +5,32 @@
 #include "timetracker.h"
 #include "startuprecovery.h"
 #include "lockdecision.h"
+#include "unixsignalbridge.h"
 #include <QtTest>
 #include <QApplication>
 #include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
 #include <QMessageBox>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QPushButton>
+#include <QSocketNotifier>
 #include <QTimer>
 #include <functional>
 #include <memory>
 #ifdef Q_OS_UNIX
 #include <unistd.h>
+#endif
+#ifdef Q_OS_LINUX
+#include <cerrno>
+#include <csignal>
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
 #endif
 
 using TestCommon::createSettingsFile;
@@ -720,4 +730,322 @@ void AppShellTest::test_two_simultaneous_starts_have_one_owner_and_one_loser()
     QCOMPARE(loser->exitCode(), 2);
     QVERIFY2(loserStderr.contains("Another instance"), loserOutput.constData());
     QVERIFY(owner->state() == QProcess::Running);
+}
+
+// ---------------------------------------------------------------------------
+// D4 (R15-003): Unix signal bridge -- nonblocking, coalesced, cleaned up.
+// ---------------------------------------------------------------------------
+
+#ifdef Q_OS_LINUX
+namespace {
+
+// Pumps the event loop in short bursts until predicate() is true or
+// budgetMs elapses, mirroring ShutdownCoordinator::pumpEvents()'s bounded
+// style rather than a real timed wait.
+bool pumpUntil(const std::function<bool()>& predicate, int budgetMs)
+{
+    QElapsedTimer timer;
+    timer.start();
+    while (!predicate() && timer.elapsed() < budgetMs)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    return predicate();
+}
+
+// Restores a saved RLIMIT_NOFILE on scope exit, including when a
+// QVERIFY/QCOMPARE above it fails and returns from the test slot early --
+// otherwise a clamped descriptor limit leaks into every later test (M-1).
+struct RlimitGuard {
+    struct rlimit original;
+    ~RlimitGuard() { ::setrlimit(RLIMIT_NOFILE, &original); }
+};
+
+} // namespace
+#endif
+
+void AppShellTest::test_setup_creates_nonblocking_closeonexec_descriptors()
+{
+#ifdef Q_OS_LINUX
+    // Arrange
+    UnixSignalBridge bridge;
+
+    // Act
+    const bool ok = bridge.setup();
+
+    // Assert
+    QVERIFY(ok);
+    const int readFd = bridge.notifierFd();
+    const int writeFd = bridge.writeFd_dbg();
+    QVERIFY(readFd != -1);
+    QVERIFY(writeFd != -1);
+    QVERIFY2((fcntl(readFd, F_GETFL, 0) & O_NONBLOCK) != 0, "read end must be nonblocking");
+    QVERIFY2((fcntl(writeFd, F_GETFL, 0) & O_NONBLOCK) != 0, "write end must be nonblocking");
+    QVERIFY2((fcntl(readFd, F_GETFD, 0) & FD_CLOEXEC) != 0, "read end must be close-on-exec");
+    QVERIFY2((fcntl(writeFd, F_GETFD, 0) & FD_CLOEXEC) != 0, "write end must be close-on-exec");
+
+    bridge.teardown();
+#else
+    QSKIP("Linux-only signal bridge");
+#endif
+}
+
+void AppShellTest::test_each_signal_is_delivered_and_drained_data()
+{
+#ifdef Q_OS_LINUX
+    QTest::addColumn<int>("signum");
+    QTest::newRow("SIGTERM") << SIGTERM;
+    QTest::newRow("SIGINT") << SIGINT;
+    QTest::newRow("SIGHUP") << SIGHUP;
+#endif
+}
+
+void AppShellTest::test_each_signal_is_delivered_and_drained()
+{
+#ifdef Q_OS_LINUX
+    QFETCH(int, signum);
+
+    // Arrange
+    UnixSignalBridge bridge;
+    QVERIFY(bridge.setup());
+
+    // Act
+    ::raise(signum);
+
+    // Assert
+    QVERIFY(bridge.drainPending());
+    QVERIFY(!bridge.drainPending());
+
+    bridge.teardown();
+#else
+    QSKIP("Linux-only signal bridge");
+#endif
+}
+
+void AppShellTest::test_repeated_signals_coalesce_into_one_drain()
+{
+#ifdef Q_OS_LINUX
+    // Arrange
+    UnixSignalBridge bridge;
+    QVERIFY(bridge.setup());
+
+    // Act: more real signals than drainPending()'s internal read buffer
+    // (64 bytes) holds in one read(2) call, all delivered before anything
+    // drains -- this makes the drain *loop* itself load-bearing (L-6): a
+    // single read of a smaller batch would pass even if the loop were
+    // replaced by one non-looping read.
+    const int kSignals[] = { SIGTERM, SIGINT, SIGHUP };
+    for (int i = 0; i < 200; ++i)
+        ::raise(kSignals[i % 3]);
+
+    // Assert: one drain call consumes every byte; a second call finds
+    // nothing left, proving the channel was fully drained rather than
+    // leaving bytes to trigger a spurious second shutdown.
+    QVERIFY(bridge.drainPending());
+    QVERIFY(!bridge.drainPending());
+
+    bridge.teardown();
+#else
+    QSKIP("Linux-only signal bridge");
+#endif
+}
+
+#ifdef Q_OS_LINUX
+namespace {
+
+int g_fakeWriteCalls = 0;
+std::function<ssize_t(int, const void*, size_t)> g_fakeWrite;
+
+ssize_t fakeWriteTrampoline(int fd, const void* buf, size_t count)
+{
+    ++g_fakeWriteCalls;
+    return g_fakeWrite(fd, buf, count);
+}
+
+// Restores the real write(2) syscall on scope exit, including when a
+// QVERIFY/QCOMPARE above it fails and returns from the test slot early --
+// otherwise a fake write left installed by one failing test silently
+// corrupts every later test's real writes (M-1).
+struct WriteSyscallGuard {
+    ~WriteSyscallGuard() { UnixSignalBridge::setWriteSyscall_dbg(nullptr); }
+};
+
+} // namespace
+#endif
+
+void AppShellTest::test_write_retries_only_eintr()
+{
+#ifdef Q_OS_LINUX
+    // Arrange: the first two attempts are interrupted (EINTR), the third
+    // succeeds.
+    g_fakeWriteCalls = 0;
+    g_fakeWrite = [](int, const void*, size_t) -> ssize_t {
+        if (g_fakeWriteCalls <= 2) { errno = EINTR; return -1; }
+        return 1;
+    };
+    WriteSyscallGuard writeSyscallGuard;
+    UnixSignalBridge::setWriteSyscall_dbg(&fakeWriteTrampoline);
+
+    // Act
+    const UnixSignalBridge::WriteOutcome outcome = UnixSignalBridge::writeSignalByte_dbg(-1, 1);
+
+    // Assert
+    QCOMPARE(outcome, UnixSignalBridge::WriteOutcome::Written);
+    QCOMPARE(g_fakeWriteCalls, 3);
+#else
+    QSKIP("Linux-only signal bridge");
+#endif
+}
+
+void AppShellTest::test_write_treats_eagain_as_already_pending()
+{
+#ifdef Q_OS_LINUX
+    // Arrange
+    g_fakeWriteCalls = 0;
+    g_fakeWrite = [](int, const void*, size_t) -> ssize_t {
+        errno = EAGAIN;
+        return -1;
+    };
+    WriteSyscallGuard writeSyscallGuard;
+    UnixSignalBridge::setWriteSyscall_dbg(&fakeWriteTrampoline);
+
+    // Act
+    const UnixSignalBridge::WriteOutcome outcome = UnixSignalBridge::writeSignalByte_dbg(-1, 1);
+
+    // Assert: EAGAIN means a byte is already queued for the Qt side, so
+    // this is a benign outcome, not a retry target.
+    QCOMPARE(outcome, UnixSignalBridge::WriteOutcome::AlreadyPending);
+    QCOMPARE(g_fakeWriteCalls, 1);
+#else
+    QSKIP("Linux-only signal bridge");
+#endif
+}
+
+void AppShellTest::test_write_preserves_errno()
+{
+#ifdef Q_OS_LINUX
+    // Arrange: a distinctive errno set before the call, and a fake write
+    // that reports EINTR once, then EAGAIN.
+    g_fakeWriteCalls = 0;
+    g_fakeWrite = [](int, const void*, size_t) -> ssize_t {
+        if (g_fakeWriteCalls == 1) { errno = EINTR; return -1; }
+        errno = EAGAIN;
+        return -1;
+    };
+    WriteSyscallGuard writeSyscallGuard;
+    UnixSignalBridge::setWriteSyscall_dbg(&fakeWriteTrampoline);
+    errno = ENOMEM;
+
+    // Act
+    UnixSignalBridge::writeSignalByte_dbg(-1, 1);
+
+    // Assert: errno reflects whatever the caller had before the handler
+    // ran, not a value the write attempts left behind.
+    QCOMPARE(errno, ENOMEM);
+#else
+    QSKIP("Linux-only signal bridge");
+#endif
+}
+
+void AppShellTest::test_full_channel_does_not_block()
+{
+#ifdef Q_OS_LINUX
+    // Arrange: a real, nonblocking socketpair with a tiny send buffer so it
+    // fills after a handful of bytes.
+    int fds[2] = {-1, -1};
+    QVERIFY(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    for (int fd : fds) {
+        const int flags = fcntl(fd, F_GETFL, 0);
+        QVERIFY(fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0);
+    }
+    const int tinyBuf = 1;
+    ::setsockopt(fds[0], SOL_SOCKET, SO_SNDBUF, &tinyBuf, sizeof(tinyBuf));
+
+    // Act: write until the channel reports it is full instead of blocking.
+    int written = 0;
+    UnixSignalBridge::WriteOutcome outcome = UnixSignalBridge::WriteOutcome::Written;
+    for (int i = 0; i < 10000 && outcome == UnixSignalBridge::WriteOutcome::Written; ++i) {
+        outcome = UnixSignalBridge::writeSignalByte_dbg(fds[0], 1);
+        if (outcome == UnixSignalBridge::WriteOutcome::Written)
+            ++written;
+    }
+
+    // Assert: the loop above returned (no block), the channel eventually
+    // reported AlreadyPending, and at least one byte got through.
+    QCOMPARE(outcome, UnixSignalBridge::WriteOutcome::AlreadyPending);
+    QVERIFY(written > 0);
+
+    ::close(fds[0]);
+    ::close(fds[1]);
+#else
+    QSKIP("Linux-only signal bridge");
+#endif
+}
+
+void AppShellTest::test_setup_failure_leaks_no_descriptors()
+{
+#ifdef Q_OS_LINUX
+    // Arrange: lower the descriptor limit to the current usage so the next
+    // socketpair() call fails with EMFILE. RlimitGuard restores the
+    // original limit on scope exit even if an assertion below fails and
+    // returns early -- otherwise a clamped descriptor limit leaks into
+    // every later test (M-1).
+    struct rlimit originalLimit;
+    QVERIFY(getrlimit(RLIMIT_NOFILE, &originalLimit) == 0);
+    RlimitGuard rlimitGuard{originalLimit};
+    int highestFd = -1;
+    for (int fd = 0; fd < 4096; ++fd) {
+        if (::fcntl(fd, F_GETFD) != -1)
+            highestFd = fd;
+    }
+    struct rlimit tightLimit = originalLimit;
+    tightLimit.rlim_cur = static_cast<rlim_t>(highestFd + 1);
+    QVERIFY(setrlimit(RLIMIT_NOFILE, &tightLimit) == 0);
+
+    // Act
+    UnixSignalBridge bridge;
+    const bool ok = bridge.setup();
+
+    // Assert: setup failed and left no descriptor or notifier fd behind.
+    QVERIFY(!ok);
+    QCOMPARE(bridge.notifierFd(), -1);
+    QCOMPARE(bridge.writeFd_dbg(), -1);
+
+    // Restore the limit and prove the bridge (and a fresh one) can still
+    // succeed -- no descriptor was leaked by the failed attempt.
+    QVERIFY(setrlimit(RLIMIT_NOFILE, &originalLimit) == 0);
+    QVERIFY(bridge.setup());
+    bridge.teardown();
+#else
+    QSKIP("Linux-only signal bridge");
+#endif
+}
+
+void AppShellTest::test_qt_receipt_invokes_shutdown_exactly_once()
+{
+#ifdef Q_OS_LINUX
+    // Arrange: wire the bridge to a QSocketNotifier the way main.cpp does.
+    UnixSignalBridge bridge;
+    QVERIFY(bridge.setup());
+    QSocketNotifier notifier(bridge.notifierFd(), QSocketNotifier::Read);
+    int shutdownCalls = 0;
+    QObject::connect(&notifier, &QSocketNotifier::activated, [&](int) {
+        if (bridge.drainPending())
+            ++shutdownCalls;
+    });
+
+    // Act: two signals arrive together; the event loop must observe them
+    // as a single readable notification cycle that drains both.
+    ::raise(SIGTERM);
+    ::raise(SIGINT);
+    QVERIFY(pumpUntil([&]() { return shutdownCalls > 0; }, 2000));
+    // Give any further (spurious) activations a chance to fire before
+    // asserting there were none.
+    pumpUntil([]() { return false; }, 100);
+
+    // Assert
+    QCOMPARE(shutdownCalls, 1);
+
+    bridge.teardown();
+#else
+    QSKIP("Linux-only signal bridge");
+#endif
 }
