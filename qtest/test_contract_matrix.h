@@ -127,6 +127,17 @@ private slots:
     // fatal: not distinctly returned; see C4/R07-003
     // CallerBug: N/A — no keys that can violate constraints
 
+    // ── markCleanShutdown (D6/R05-002/R15-004) ────────────────────────
+    // The single durable shutdown operation: marker write, then -- only if
+    // that succeeded -- the FULL durability barrier.
+    void test_markCleanShutdown_success();
+    void test_markCleanShutdown_disabled_returns_Disabled();
+    // transient: covered by ShutdownCoordinatorTest (injected marker/flush
+    // failure via FakeSessionStore) and DatabaseTest's real-store marker
+    // reopen test; not duplicated here.
+    // fatal: not distinctly returned; see C4/R07-003
+    // CallerBug: N/A — markCleanShutdown takes no caller-supplied parameters
+
     // ── recoverStartupCheckpoints ────────────────────────────────────
     // success (no orphans): already covered by DatabaseTest
     // disabled: returns status == Disabled with zero counts (B2)

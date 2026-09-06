@@ -1541,6 +1541,15 @@ SessionStoreResult SqliteSessionStore::flushToDisc()
     }
 
     QSqlQuery pragma(db);
+    // Low-5: every restore below is best-effort -- flushToDisc()'s own
+    // result never depends on it succeeding -- but a silently-failed
+    // restore leaves the connection at FULL indefinitely, so it must at
+    // least be logged rather than discarded.
+    auto restoreSynchronousNormal = [&pragma]() {
+        if (!pragma.exec("PRAGMA synchronous=NORMAL")) {
+            Logger::Log("[DB] flushToDisc: warning: failed to restore synchronous=NORMAL: " + pragma.lastError().text());
+        }
+    };
     if (!pragma.exec("PRAGMA synchronous=FULL")) {
         Logger::Log("[DB] flushToDisc: set synchronous=FULL failed: " + pragma.lastError().text());
         return SessionStoreResult::transient("Failed to set synchronous=FULL: " + pragma.lastError().text());
@@ -1548,7 +1557,7 @@ SessionStoreResult SqliteSessionStore::flushToDisc()
 
     if (!db.transaction()) {
         Logger::Log("[DB] flushToDisc: could not begin transaction");
-        pragma.exec("PRAGMA synchronous=NORMAL");
+        restoreSynchronousNormal();
         return SessionStoreResult::transient("Failed to start flush transaction: " + db.lastError().text());
     }
 
@@ -1560,18 +1569,18 @@ SessionStoreResult SqliteSessionStore::flushToDisc()
     if (!query.exec()) {
         Logger::Log("[DB] flushToDisc: write failed: " + query.lastError().text());
         db.rollback();
-        pragma.exec("PRAGMA synchronous=NORMAL");
+        restoreSynchronousNormal();
         return SessionStoreResult::transient("Flush write failed: " + query.lastError().text());
     }
     if (!db.commit()) {
         Logger::Log("[DB] flushToDisc: commit failed: " + db.lastError().text());
         db.rollback();
-        pragma.exec("PRAGMA synchronous=NORMAL");
+        restoreSynchronousNormal();
         return SessionStoreResult::transient("Flush commit failed: " + db.lastError().text());
     }
 
     Logger::Log("[DB] flushToDisc: durable heartbeat committed");
-    pragma.exec("PRAGMA synchronous=NORMAL");
+    restoreSynchronousNormal();
     return SessionStoreResult::success();
 }
 
@@ -1893,6 +1902,31 @@ SessionStoreResult SqliteSessionStore::setLastCleanShutdownMarker(const QDateTim
     }
 
     return SessionStoreResult::success();
+}
+
+/**
+ * D6 (R05-002/R15-004): the single durable shutdown operation. Writes the
+ * clean-shutdown marker timestamped via now_provider_ (the same injected
+ * seam flushToDisc()'s heartbeat write already uses), then -- only if that
+ * write succeeded -- executes the FULL durability barrier so the marker's
+ * own commit is covered by the fsync rather than left outside it (R15-004).
+ * Each step takes db_mutex_ independently; this method holds it for
+ * neither, so there is no nested-lock risk.
+ *
+ * M1: markerWritten distinguishes which step a failure came from -- false
+ * for a marker-write failure (the record was never committed), true for a
+ * barrier failure (the marker WAS committed; only the covering fsync
+ * failed). Callers must not treat these the same way.
+ */
+MarkCleanShutdownResult SqliteSessionStore::markCleanShutdown()
+{
+    const SessionStoreResult markerResult = setLastCleanShutdownMarker(now_provider_());
+    if (!markerResult.ok()) {
+        // Disabled or a failure: do not attempt the barrier. Either way the
+        // marker write itself did not durably complete.
+        return {markerResult, false};
+    }
+    return {flushToDisc(), true};
 }
 
 std::optional<SqliteSessionStore::MarkerResult> SqliteSessionStore::readLastCleanShutdownMarker()

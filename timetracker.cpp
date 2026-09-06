@@ -802,15 +802,6 @@ void TimeTracker::stopTimer(const QDateTime& now, StopReason reason)
     // no clean-marker gate is needed either: the marker only feeds
     // notify_user, never orphan finalization eligibility.
     const bool clockReversed = isClockReversed(now, session_.segment_start_time);
-    // Captured before clearSegment() below invalidates it: on a reversal,
-    // the clean-marker write further down must not use the reversed `now`
-    // (which could be far earlier than this segment's own start, understating
-    // -- moving backward relative to -- what THIS stop covers, a false
-    // statement, D2/LOW-G) -- it falls back to this instead. This bounds
-    // only this one stop's own contribution; it is not a general monotonic
-    // guard against every previously stored marker (see the write site
-    // below for the precise claim).
-    const QDateTime segmentStartBeforeClear = session_.segment_start_time;
     SegmentId discardedSegmentId;
     if (session_.segment_start_time.isValid()
         && isCrossMidnight(session_.segment_start_time, now)) {
@@ -850,29 +841,14 @@ void TimeTracker::stopTimer(const QDateTime& now, StopReason reason)
     const bool committed = persistDurationsOrRetainForRetry();
     if (committed) {
         session_.resetForNewSession();
-    }
-
-    // The clean-shutdown marker must not be written while a commit or a
-    // discard intent remains unresolved (A4/R05-001): writing it here while
-    // a checkpoint-discard (a cross-midnight one; see above) is still only
-    // pending could let startup recovery treat that not-yet-durable
-    // rejection as ordinary crash data. A backward-clock reversal above
-    // registers no discard intent (HIGH-A) and needs none here either: the
-    // retained checkpoint prefix is ordinary crash-recovery data, resolved
-    // by the next ordinary startup, not by anything this process can retry
-    // (D2/MEDIUM-B; see the D2 packet's deviation note) -- so Start is not
-    // blocked and the marker is written normally, using
-    // segmentStartBeforeClear instead of the reversed `now` so THIS stop's
-    // own marker write cannot understate its own coverage (D2/LOW-G). This
-    // does not make the marker monotonic across the process's whole
-    // lifetime -- a large enough step-back immediately before an entirely
-    // later session could still move it backward relative to an earlier
-    // stored marker (pre-existing, not introduced here; a monotonic
-    // guard is a later packet's call, not this one's).
-    if (committed && !pending_discards_.hasPending()) {
-        db_.setLastCleanShutdownMarker(clockReversed ? segmentStartBeforeClear : now);
         Logger::Log("[DB] Session durations updated");
     }
+    // D6 (R05-002/R15-004): stopTimer() no longer writes the clean-shutdown
+    // marker itself. Marking clean is now exclusively the store-level
+    // durable shutdown operation ShutdownCoordinator invokes once
+    // TimeTracker::drainForShutdown() reports the whole drain (commit AND
+    // any pending discard intent) resolved -- see sessionstore.h's
+    // markCleanShutdown().
 
     emit stopped(reason);
 }
@@ -1294,14 +1270,10 @@ TimeTracker::ShutdownResult TimeTracker::shutdown()
     QMutexLocker locker(&mutex_);
     shutdown_called_ = true;
     ++shutdown_epoch_;
-    bool stopCalled = false;
     if (mode_ != Mode::None) {
         stopTimer(now_provider_(), StopReason::Shutdown);
-        stopCalled = true;
     }
-    const bool stopped = (mode_ == Mode::None);
-    const bool canCleanMark = stopped && !pending_commit_.hasPending() && !pending_discards_.hasPending();
-    return {stopped, canCleanMark, stopCalled};
+    return {mode_ == Mode::None};
 }
 
 DrainResult TimeTracker::drainForShutdown(DrainAttempt attempt)
@@ -1313,14 +1285,12 @@ DrainResult TimeTracker::drainForShutdown(DrainAttempt attempt)
         pending_commit_.forgetDrainFailure();
     }
     // Close any live segment first, using the one "now" captured inside
-    // shutdown(). No-op (stopCalled=false) if already None -- this is what
-    // makes a repeated call idempotent on the close-segment half.
-    const ShutdownResult sr = shutdown();
-    // stopTimer() writes its own clean-shutdown marker synchronously when its
-    // commit succeeds inline. That only happens when this call actually
-    // stopped a live segment AND that commit did not leave a pending payload
-    // or discard intent behind.
-    const bool markerAlreadyWritten = sr.stopCalled && !pending_commit_.hasPending() && !pending_discards_.hasPending();
+    // shutdown(). No-op if already None -- this is what makes a repeated
+    // call idempotent on the close-segment half. D6: the clean-shutdown
+    // marker is no longer written here or by stopTimer() -- it is written
+    // exclusively by the store-level durable shutdown operation
+    // ShutdownCoordinator invokes once this whole drain reports clean.
+    shutdown();
 
     if (pending_commit_.hasPending()) {
         Logger::Log("[DB] Drain: retrying pending commit at shutdown");
@@ -1350,7 +1320,7 @@ DrainResult TimeTracker::drainForShutdown(DrainAttempt attempt)
                                         "A previously discarded checkpoint could not be removed from storage");
     }
 
-    return DrainResult::complete(markerAlreadyWritten);
+    return DrainResult::complete();
 }
 
 bool TimeTracker::appendDurationsToDB()

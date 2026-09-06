@@ -389,13 +389,13 @@ void IntegrationTest::test_F_shutdown_sequence_stop_flush_marker()
     // Test F: shutdown sequence end-to-end through ShutdownCoordinator.
     //
     // ShutdownCoordinator::run(DrainEvents) owns the sequence:
-    //   1. timetracker_.drainForShutdown()       — stops the engine and retries
-    //                                              any pending commit (A3)
-    //   2. pumpEvents(150)                        — drains queued signals
-    //   3. db_.flushToDisc()                     — durability flush
-    //   4. db_.setLastCleanShutdownMarker(...)   — iff the typed DrainResult is
-    //                                              Complete and stopTimer did not
-    //                                              already write it inline
+    //   1. timetracker_.drainForShutdown()  — stops the engine and retries any
+    //                                         pending commit/discard intent (A3/A4)
+    //   2. pumpEvents(150)                   — drains queued signals
+    //   3. db_.markCleanShutdown(), iff the drain was clean (D6) — one store
+    //      operation that writes the marker then runs the FULL durability
+    //      barrier (setLastCleanShutdownMarker() then flushToDisc(), in that
+    //      order, inside FakeSessionStore's/SqliteSessionStore's own composition)
     //
     // This test drives the production owner rather than reproducing the
     // sequence by hand.
@@ -426,12 +426,12 @@ void IntegrationTest::test_F_shutdown_sequence_stop_flush_marker()
     QVERIFY(fakeDb.callLog.contains("flushToDisc"));
     QVERIFY(fakeDb.callLog.contains("setLastCleanShutdownMarker"));
 
-    // The clean-shutdown marker is written by TimeTracker::shutdown() before the
-    // coordinator calls flushToDisc, so marker must precede flush.
+    // D6: markCleanShutdown() writes the marker, then only on success runs
+    // the FULL barrier -- so marker must always precede flush.
     int flushIdx  = fakeDb.callLog.lastIndexOf("flushToDisc");
     int markerIdx = fakeDb.callLog.lastIndexOf("setLastCleanShutdownMarker");
     QVERIFY2(markerIdx < flushIdx,
-             "setLastCleanShutdownMarker (from stopTimer) must precede flushToDisc");
+             "setLastCleanShutdownMarker must precede flushToDisc (D6: marker then barrier)");
 }
 
 // ============================================================================
@@ -1464,53 +1464,58 @@ void IntegrationTest::test_D2_real_sqlite_backward_clock_stop_preserves_checkpoi
     QCOMPARE(loaded[0].endTime.toUTC(), checkpointEnd.toUTC());
 }
 
-// D2 test list ("marker timestamp") / LOW-G: proves the clean-shutdown
-// marker's actual stored VALUE against a real SQLite store -- an ordinary
-// Stop stores exactly the captured stop time, and a backward-clock Stop
-// does not regress the marker below the live segment's own start (which
-// would be a false statement about what is covered, even though harmless
-// in effect).
-void IntegrationTest::test_D2_marker_timestamp_normal_stop_and_reversed_stop_does_not_regress()
+// D6 (R05-002/R15-004; carries forward D2/MEDIUM-7's marker-timestamp seam
+// obligation, recorded as a deviation note in the D6 packet): the marker is
+// now written exclusively by the store-level durable shutdown operation
+// (SqliteSessionStore::markCleanShutdown(), invoked by ShutdownCoordinator),
+// timestamped via the store's own injected now-provider rather than the
+// real clock or any individual stop's captured `now`. Proves both facts
+// against the real store: the injected clock is what gets persisted, and
+// that persisted value survives closing and reopening the database file.
+void IntegrationTest::test_D6_real_sqlite_shutdown_marker_uses_injected_clock_and_survives_reopen()
 {
     resetDatabaseFile();
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
-    SqliteSessionStore db(settings);
-    TimeTracker tracker(settings, db);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-    tracker.useTimerViaButton(Button::Start);
+    const QDateTime shutdownTime(QDate(2025, 6, 1), QTime(9, 30, 0), Qt::LocalTime);
 
-    auto readMarker = [&]() -> QDateTime {
+    {
+        SqliteSessionStore db(settings);
+        db.setNowProvider_dbg([&shutdownTime]() { return shutdownTime; });
+        TimeTracker tracker(settings, db);
+        ShutdownCoordinator coordinator(tracker, db);
+
+        FakeClock clock(t0);
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+        tracker.useTimerViaButton(Button::Start);
+        clock.setNow(shutdownTime);
+
+        // Act: a real shutdown through the production owner.
+        const DrainResult result = coordinator.run(ShutdownMode::DrainEvents);
+        QVERIFY(result.clean());
+
+        // Assert: the marker holds the STORE's injected clock reading, not
+        // the tracker's -- proving markCleanShutdown() captured its own
+        // timestamp via now_provider_ rather than being handed one.
+        QVERIFY(db.ensureOpen_dbg());
         QSqlQuery q(db.rawDb_dbg());
-        if (!q.exec("SELECT value FROM app_settings WHERE key='last_clean_shutdown'") || !q.next())
-            return QDateTime();
-        return QDateTime::fromString(q.value(0).toString(), Qt::ISODateWithMs);
-    };
+        QVERIFY(q.exec("SELECT value FROM app_settings WHERE key='last_clean_shutdown'"));
+        QVERIFY(q.next());
+        QCOMPARE(QDateTime::fromString(q.value(0).toString(), Qt::ISODateWithMs), shutdownTime.toUTC());
+        db.closeConnection_dbg();
+    }
 
-    // Act: an ordinary Stop.
-    const QDateTime firstStop = t0.addSecs(1800); // 09:30
-    clock.setNow(firstStop);
-    tracker.useTimerViaButton(Button::Stop);
+    // Act: close and reopen -- a fresh store instance over the same file.
+    SqliteSessionStore reopened(settings);
+    QVERIFY(reopened.ensureOpen_dbg());
+    QSqlQuery q2(reopened.rawDb_dbg());
+    QVERIFY(q2.exec("SELECT value FROM app_settings WHERE key='last_clean_shutdown'"));
+    QVERIFY(q2.next());
 
-    // Assert: the marker's stored value is exactly the captured stop time.
-    QCOMPARE(readMarker(), firstStop.toUTC());
-
-    // Act: start again, then a backward-clock Stop.
-    const QDateTime segStart2 = t0.addSecs(1900);
-    clock.setNow(segStart2);
-    tracker.useTimerViaButton(Button::Start);
-    clock.setNow(segStart2.addSecs(-600)); // backward step
-    tracker.useTimerViaButton(Button::Stop);
-
-    // Assert: the marker does not regress below this segment's own start --
-    // it must NOT store the reversed `now`, and must never move backward
-    // relative to the previous marker value.
-    const QDateTime marker2 = readMarker();
-    QVERIFY(marker2.isValid());
-    QCOMPARE(marker2, segStart2.toUTC());
-    QVERIFY(marker2 >= firstStop.toUTC());
+    // Assert: the marker durably survived the reopen with the same value.
+    QCOMPARE(QDateTime::fromString(q2.value(0).toString(), Qt::ISODateWithMs), shutdownTime.toUTC());
+    reopened.closeConnection_dbg();
 }

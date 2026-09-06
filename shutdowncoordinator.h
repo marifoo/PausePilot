@@ -44,7 +44,15 @@ public:
 
 private:
     void pumpEvents(int budgetMs);
-    /// Shared flush + marker-write tail used by both run() and retryDrain().
+    /// Shared tail used by both run() and retryDrain(): iff the drain
+    /// result is clean, invokes the store's single durable shutdown
+    /// operation (D6: marker write + FULL durability barrier); a failure
+    /// there downgrades the result to non-clean, marked markerOnlyFailure
+    /// only when the marker-WRITE step itself failed (M1) -- a barrier
+    /// failure after a successfully written marker is a genuine durability
+    /// failure and is deliberately NOT markerOnlyFailure. An
+    /// already-incomplete drain still runs the durability barrier alone
+    /// (Medium-2) -- it just never attempts the clean marker.
     DrainResult finishDrain(DrainResult result);
 
     TimeTracker& timetracker_;

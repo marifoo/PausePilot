@@ -31,10 +31,12 @@ The schema is created on first open by `ensureSchema` in
     - `is_finalized` (`1` = a completed segment, `0` = an in-progress
       checkpoint). Discussed below.
 - **`app_settings`** — a key/value table for lifecycle markers. Currently
-  the only entry is `last_clean_shutdown`, written by `TimeTracker` on every
-  clean stop (`ShutdownCoordinator` writes it too, but only as a fallback
-  for a session that was already stopped before `run()` executed) and
-  consumed internally by `recoverStartupCheckpoints()` on the next startup.
+  the only entry is `last_clean_shutdown`, written exclusively by
+  `SqliteSessionStore::markCleanShutdown()` -- the single durable shutdown
+  operation `ShutdownCoordinator` invokes once `TimeTracker::drainForShutdown()`
+  reports the whole drain (commit and any pending checkpoint-discard intent)
+  resolved. `TimeTracker` itself never writes this marker. Consumed
+  internally by `recoverStartupCheckpoints()` on the next startup.
 
 Indices: `idx_start_utc` on `durations.start_utc`, a partial index
 restricted to `WHERE is_finalized = 1` (used by `hasEntriesForDate` and
@@ -102,10 +104,18 @@ does all of the reconciliation internally (see `sqlitesessionstore.cpp`
 mechanics never cross the `SessionStore` interface.
 
 The **clean-shutdown marker** controls whether the user sees a recovery
-notification afterwards. `TimeTracker` writes `last_clean_shutdown = now` on every
-clean stop (`ShutdownCoordinator` writes it too, but only as a fallback for
-a session that was already stopped before `run()` executed). On the next
-startup, `recoverStartupCheckpoints()` reads and consumes the marker
+notification afterwards. It is written only by `SqliteSessionStore::markCleanShutdown()`,
+timestamped via the store's own injected now-provider (not a value the
+caller supplies), and only once `ShutdownCoordinator` sees a clean drain --
+the same sequence for a running session, an already-stopped one, and
+Disabled history. It also participates in the shutdown durability barrier:
+`markCleanShutdown()` writes the marker first, then -- only if that write
+succeeded -- runs the FULL-durability flush (temporarily promoting
+`PRAGMA synchronous`, writing, and restoring `NORMAL`), so the marker's own
+commit is covered by that fsync rather than left outside it. A normal
+Exit-Anyway termination or a failed OS-forced shutdown never reaches this
+operation at all -- no marker, no barrier. On the next startup,
+`recoverStartupCheckpoints()` reads and consumes the marker
 internally (it is deleted on read once reconciliation succeeds). If the
 marker is at or after the oldest finalized orphan's end time, that means the
 orphan was already covered by a clean stop and the user does not need a

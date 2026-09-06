@@ -25,6 +25,9 @@ private slots:
     void test_close_retry_succeeds_after_failure();
     // Close fails; the user clicks Exit Anyway: no further retry, no marker.
     void test_close_exit_anyway_stops_retrying_and_writes_no_marker();
+    // D6/Medium-3: a marker-only failure (data committed fine) must be
+    // presented as "your session was saved", not as unsaved data.
+    void test_close_marker_only_failure_shows_data_was_saved();
     // Regression: Exit Anyway is latched, so the second shutdown entry point
     // (aboutToQuit after the last window closes) must not ask again.
     void test_exit_anyway_is_not_asked_again_on_aboutToQuit();

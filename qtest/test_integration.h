@@ -82,10 +82,12 @@ private slots:
     // finalizes exactly that prefix.
     void test_D2_real_sqlite_backward_clock_stop_preserves_checkpoint_for_recovery();
 
-    // D2 test list ("marker timestamp") / LOW-G: the clean-shutdown
-    // marker's stored VALUE on an ordinary Stop, and proof it does not
-    // regress below the live segment's own start on a backward-clock Stop.
-    void test_D2_marker_timestamp_normal_stop_and_reversed_stop_does_not_regress();
+    // D6 (R05-002/R15-004, carrying forward D2's marker-timestamp seam
+    // obligation): a real ShutdownCoordinator/SqliteSessionStore shutdown
+    // writes the clean-shutdown marker using the store's injected
+    // now-provider (not the real clock), and that marker durably survives a
+    // close and reopen of the database file.
+    void test_D6_real_sqlite_shutdown_marker_uses_injected_clock_and_survives_reopen();
 };
 
 #endif // TEST_INTEGRATION_H

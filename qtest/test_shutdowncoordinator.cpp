@@ -33,9 +33,9 @@ void ShutdownCoordinatorTest::test_G_happy_path_stop_flush_marker()
 
     int flushIdx  = fakeDb.callLog.lastIndexOf("flushToDisc");
     int markerIdx = fakeDb.callLog.lastIndexOf("setLastCleanShutdownMarker");
-    // stopTimer (inside shutdown) writes the marker; the coordinator writes
-    // flushToDisc afterward — so marker must precede flush here.
-    QVERIFY2(markerIdx < flushIdx, "marker must precede flush (written by stopTimer)");
+    // D6: markCleanShutdown() writes the marker, then only on success runs
+    // the FULL barrier -- so marker must precede flush.
+    QVERIFY2(markerIdx < flushIdx, "marker must precede flush (D6: markCleanShutdown writes marker then barrier)");
 }
 
 // ============================================================================
@@ -118,7 +118,7 @@ void ShutdownCoordinatorTest::test_I_force_direct_skips_retry_loop()
     QVERIFY(fakeDb.callLog.contains("flushToDisc"));
     QVERIFY(fakeDb.callLog.contains("setLastCleanShutdownMarker"));
     QVERIFY2(fakeDb.callLog.lastIndexOf("setLastCleanShutdownMarker") < fakeDb.callLog.lastIndexOf("flushToDisc"),
-             "marker must precede flush (written by stopTimer)");
+             "marker must precede flush (D6: markCleanShutdown writes marker then barrier)");
 }
 
 // ============================================================================
@@ -189,11 +189,13 @@ void ShutdownCoordinatorTest::test_L_nested_run_during_pump_flushes_once()
 }
 
 // ============================================================================
-// Test M — timer already stopped before run(): the coordinator (not stopTimer)
-// writes the clean marker, and it must land AFTER the flush.
+// Test M — timer already stopped before run(): the coordinator's single
+// markCleanShutdown() call still fires (D6), marker before flush like every
+// other clean-drain case -- there is no separate "already stopped" branch
+// anymore.
 // ============================================================================
 
-void ShutdownCoordinatorTest::test_M_marker_after_flush_when_already_stopped()
+void ShutdownCoordinatorTest::test_M_marker_before_flush_when_already_stopped()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -202,16 +204,16 @@ void ShutdownCoordinatorTest::test_M_marker_after_flush_when_already_stopped()
     TimeTracker tracker(settings, fakeDb);
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
-    // TimeTracker never started → already in Mode::None. shutdown() does not call
-    // stopTimer, so the coordinator's own marker branch fires.
+    // TimeTracker never started -> already in Mode::None, no pending payload:
+    // drainForShutdown() reports clean immediately.
     fakeDb.callLog.clear();
 
     coordinator.run(ShutdownMode::DrainEvents);
 
     QVERIFY(fakeDb.callLog.contains("flushToDisc"));
     QVERIFY(fakeDb.callLog.contains("setLastCleanShutdownMarker"));
-    QVERIFY2(fakeDb.callLog.lastIndexOf("setLastCleanShutdownMarker") > fakeDb.callLog.lastIndexOf("flushToDisc"),
-             "marker must follow flush (written by the coordinator, not stopTimer)");
+    QVERIFY2(fakeDb.callLog.lastIndexOf("setLastCleanShutdownMarker") < fakeDb.callLog.lastIndexOf("flushToDisc"),
+             "marker must precede flush (D6: markCleanShutdown writes the marker, then the barrier)");
 }
 
 // ============================================================================
@@ -459,6 +461,138 @@ void ShutdownCoordinatorTest::test_D5_cancelShutdown_makes_history_available_wit
     // ShutdownCoordinator/TimeTracker contract check, not a History proxy.)
     QVERIFY(!tracker.wasShutDown());
     QVERIFY(tracker.isStopped());
+}
+
+// ============================================================================
+// D6 (R05-002/R15-004): clean marking (marker write + FULL barrier) is one
+// durable store operation, attempted only when the drain itself is clean.
+// Medium-2: an incomplete drain still bypasses the clean MARKER but must
+// still run the durability barrier on its own -- plan section 2 promises
+// existing durable checkpoints remain "available for best-effort startup
+// recovery", which requires this fsync.
+// ============================================================================
+
+void ShutdownCoordinatorTest::test_D6_incomplete_drain_skips_marker_but_still_barriers()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(20);
+
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+    fakeDb.callLog.clear();
+
+    const DrainResult result = coordinator.run(ShutdownMode::DrainEvents);
+
+    QVERIFY(!result.clean());
+    QVERIFY2(fakeDb.callLog.contains("flushToDisc"),
+             "Medium-2: the durability barrier must still run for an "
+             "incomplete drain -- only the clean marker is bypassed");
+    QVERIFY(!fakeDb.callLog.contains("setLastCleanShutdownMarker"));
+
+    // Cleanup so destruction does not find an unresolved commit.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(coordinator.retryDrain().clean());
+}
+
+// High-1 (R05-002): a marker write failure on an otherwise-clean drain must
+// downgrade the result to non-clean AND must never reach the durability
+// barrier -- SessionStore::markCleanShutdown()'s contract is that the
+// barrier is attempted only after a successful marker write. Regression bar
+// (per review): reverting finishDrain()'s downgrade to a log-only warning
+// must turn this test red.
+void ShutdownCoordinatorTest::test_D6_marker_failure_is_not_clean_and_skips_barrier()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(20);
+
+    fakeDb.setMarkerResult = SessionStoreResult::transient("injected marker failure");
+    fakeDb.callLog.clear();
+
+    // Act
+    const DrainResult result = coordinator.run(ShutdownMode::DrainEvents);
+
+    // Assert: not clean, but the failure is attributed to the marker only --
+    // session data itself was drained successfully (Medium-3).
+    QVERIFY(!result.clean());
+    QVERIFY(result.markerOnlyFailure);
+    QVERIFY(fakeDb.callLog.contains("setLastCleanShutdownMarker"));
+    QVERIFY2(!fakeDb.callLog.contains("flushToDisc"),
+             "no barrier attempted after a failed marker write");
+}
+
+// High-1/M1 (R05-002): the durability-barrier half of markCleanShutdown()
+// failing (marker write itself succeeded) must also report non-clean, and
+// is NOT a markerOnlyFailure -- the marker WAS committed; only the fsync
+// meant to cover it (and the session data) failed, which is a genuine
+// durability failure, not "the record was never written". Presenting it as
+// markerOnlyFailure would falsely reassure the user in exactly the case
+// where durability is known to have failed (M1).
+void ShutdownCoordinatorTest::test_D6_barrier_failure_after_successful_marker_is_not_clean()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(20);
+
+    fakeDb.flushToDiscResult = SessionStoreResult::transient("injected barrier failure");
+    fakeDb.callLog.clear();
+
+    // Act
+    const DrainResult result = coordinator.run(ShutdownMode::DrainEvents);
+
+    // Assert: marker WAS written (it precedes the barrier), but the whole
+    // result is still non-clean since the barrier that must cover it failed
+    // -- and this must NOT be reported as markerOnlyFailure (M1).
+    QVERIFY(fakeDb.callLog.contains("setLastCleanShutdownMarker"));
+    QVERIFY(!result.clean());
+    QVERIFY(!result.markerOnlyFailure);
+}
+
+// High-1 (R05-002/R05-005): Disabled history's marker write must not be
+// treated as a failure -- markCleanShutdown() returning Disabled keeps the
+// drain clean, exactly like every other Disabled no-op in this codebase.
+void ShutdownCoordinatorTest::test_D6_disabled_history_marker_keeps_drain_clean()
+{
+    // Arrange: FakeSessionStore's returned result is purely test-configured
+    // (it does not read Settings itself, unlike SqliteSessionStore) --
+    // inject Disabled directly on setMarkerResult to model history_days == 0.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(20);
+    fakeDb.setMarkerResult = SessionStoreResult::disabled();
+    fakeDb.callLog.clear();
+
+    // Act
+    const DrainResult result = coordinator.run(ShutdownMode::DrainEvents);
+
+    // Assert
+    QVERIFY(result.clean());
 }
 
 void ShutdownCoordinatorTest::test_D5_cancelShutdown_while_already_stopped()

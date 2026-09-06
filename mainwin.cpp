@@ -238,9 +238,17 @@ void MainWin::shutdown(ShutdownMode mode)
 			return;
 		}
 		QMessageBox box(this);
-		box.setWindowTitle("uTimer - Could Not Save");
 		box.setIcon(QMessageBox::Warning);
-		box.setText("Could not save the current session. Retry, or exit and keep only what was already saved?");
+		if (result.markerOnlyFailure) {
+			// Medium-3 (R05-002 follow-up): the drain itself was Complete --
+			// session data is already saved. Only the clean-shutdown record
+			// failed to write, so this must not be presented as data loss.
+			box.setWindowTitle("uTimer - Shutdown Record Not Written");
+			box.setText("Your session was saved, but uTimer could not write the clean-shutdown record. Retry, or exit anyway?");
+		} else {
+			box.setWindowTitle("uTimer - Could Not Save");
+			box.setText("Could not save the current session. Retry, or exit and keep only what was already saved?");
+		}
 		QAbstractButton* retryButton = box.addButton("Retry", QMessageBox::AcceptRole);
 		box.addButton("Exit Anyway", QMessageBox::DestructiveRole);
 		box.setDefaultButton(static_cast<QPushButton*>(retryButton));

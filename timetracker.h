@@ -567,8 +567,6 @@ public:
 
     struct ShutdownResult {
         bool stopped;     ///< true iff timer is now in Mode::None
-        bool canCleanMark; ///< true iff state is clean enough for a shutdown marker
-        bool stopCalled;   ///< true iff shutdown called stopTimer (which writes the marker)
     };
     /// Stops the timer if running and returns the resulting state.
     /// Thread-safe; may be called multiple times (idempotent on an already-stopped timer).

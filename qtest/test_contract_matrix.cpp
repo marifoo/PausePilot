@@ -23,11 +23,11 @@
 using TestCommon::createSettingsFile;
 
 // C4 (R02-003/"done when"): this file has one section below per
-// SessionStore::Operation. If SessionStore grows an 11th virtual, add its
+// SessionStore::Operation. If SessionStore grows a 12th virtual, add its
 // Operation enumerator AND a matching section here, then update this count --
 // otherwise this fails to compile as a reminder instead of silently shipping
 // an unverified operation.
-static_assert(static_cast<int>(Operation::Count) == 10,
+static_assert(static_cast<int>(Operation::Count) == 11,
     "SessionStore::Operation changed size -- add a matrix section to "
     "test_contract_matrix.cpp for the new/removed operation, then update "
     "this static_assert's count.");
@@ -569,6 +569,47 @@ void ContractMatrixTest::test_setLastCleanShutdownMarker_disabled_returns_Disabl
     const SessionStoreResult r = db.setLastCleanShutdownMarker(QDateTime::currentDateTime());
     QCOMPARE(r.category, SessionStoreResult::Disabled);
     QVERIFY(!r.ok());
+}
+
+// ── markCleanShutdown (D6/R05-002/R15-004) ────────────────────────────────────
+
+// Success: writes the marker (via the store's own now_provider_ seam, not a
+// caller-supplied timestamp) then completes the FULL durability barrier.
+// M1: markerWritten must be true -- the marker step itself succeeded.
+void ContractMatrixTest::test_markCleanShutdown_success()
+{
+    resetDatabaseFile();
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    SqliteSessionStore db(Settings(enabledSettings(dir)));
+    db.checkSchemaOnStartup();
+
+    const MarkCleanShutdownResult r = db.markCleanShutdown();
+    QCOMPARE(r.result.category, SessionStoreResult::Success);
+    QVERIFY(r.ok());
+    QVERIFY(r.markerWritten);
+
+    QVERIFY(db.ensureOpen_dbg());
+    QSqlQuery q(db.rawDb_dbg());
+    q.prepare("SELECT value FROM app_settings WHERE key = 'last_clean_shutdown'");
+    QVERIFY(q.exec());
+    QVERIFY(q.next());
+    QVERIFY(!q.value(0).toString().isEmpty());
+}
+
+// Disabled: history off, so the marker write itself returns Disabled and the
+// barrier is never attempted. M1: markerWritten must be false -- Disabled
+// means the marker step did not itself commit (no-op), same as a failure
+// for the purpose of "was the barrier reached".
+void ContractMatrixTest::test_markCleanShutdown_disabled_returns_Disabled()
+{
+    resetDatabaseFile();
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    SqliteSessionStore db(Settings(disabledSettings(dir)));
+
+    const MarkCleanShutdownResult r = db.markCleanShutdown();
+    QCOMPARE(r.result.category, SessionStoreResult::Disabled);
+    QVERIFY(!r.ok());
+    QVERIFY(!r.markerWritten);
 }
 
 // ── recoverStartupCheckpoints ────────────────────────────────────────────────

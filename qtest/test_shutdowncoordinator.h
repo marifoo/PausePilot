@@ -28,8 +28,8 @@ private slots:
     // Test L: a re-entrant run() dispatched inside the pump flushes only once (A14)
     void test_L_nested_run_during_pump_flushes_once();
 
-    // Test M: timer already stopped → coordinator writes the marker after flush
-    void test_M_marker_after_flush_when_already_stopped();
+    // Test M: timer already stopped -- coordinator still writes marker before flush (D6)
+    void test_M_marker_before_flush_when_already_stopped();
 
     // Test N: a START click during the pump is re-stopped (A14 pump re-entrancy)
     void test_N_restart_during_pump_is_restopped();
@@ -69,6 +69,27 @@ private slots:
     // Cancelling a shutdown that ran while the tracker was already stopped
     // (no live segment) still clears the terminal flag.
     void test_D5_cancelShutdown_while_already_stopped();
+
+    // ========================================================================
+    // D6 (R05-002/R15-004): clean marking (marker write + FULL barrier) is
+    // one durable shutdown/store operation, attempted only when the drain
+    // itself is clean.
+    // ========================================================================
+
+    // Medium-2: an incomplete drain (Exit-Anyway/forced-shutdown-failure
+    // shape) bypasses only the clean MARKER -- the durability barrier still
+    // runs on its own so already-durable checkpoints stay covered by fsync.
+    void test_D6_incomplete_drain_skips_marker_but_still_barriers();
+    // High-1: a marker write failure must downgrade the result to
+    // non-clean, tag it markerOnlyFailure (Medium-3), and never reach the
+    // durability barrier at all.
+    void test_D6_marker_failure_is_not_clean_and_skips_barrier();
+    // High-1: a barrier failure AFTER a successful marker write must also
+    // be non-clean, and is NOT markerOnlyFailure.
+    void test_D6_barrier_failure_after_successful_marker_is_not_clean();
+    // High-1/R05-005: Disabled history keeps the drain clean -- Disabled is
+    // a no-op, not a failure.
+    void test_D6_disabled_history_marker_keeps_drain_clean();
 };
 
 #endif // TEST_SHUTDOWNCOORDINATOR_H

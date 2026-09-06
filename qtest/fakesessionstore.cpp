@@ -164,6 +164,20 @@ SessionStoreResult FakeSessionStore::setLastCleanShutdownMarker(const QDateTime&
     return setMarkerResult;
 }
 
+MarkCleanShutdownResult FakeSessionStore::markCleanShutdown()
+{
+    // D6/M1: marker write, then -- only if it succeeded -- the durability
+    // barrier. Mirrors SqliteSessionStore::markCleanShutdown() so tests can
+    // inject marker/flush failures independently via setMarkerResult and
+    // flushToDiscResult and observe both call order, short-circuiting, and
+    // which step (markerWritten) a failure is attributed to.
+    const SessionStoreResult markerResult = setLastCleanShutdownMarker(QDateTime());
+    if (!markerResult.ok()) {
+        return {markerResult, false};
+    }
+    return {flushToDisc(), true};
+}
+
 StartupRecoveryResult FakeSessionStore::recoverStartupCheckpoints(const QDateTime& /*now*/)
 {
     callLog.append("recoverStartupCheckpoints");

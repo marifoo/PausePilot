@@ -112,6 +112,29 @@ struct SessionStoreResult {
 };
 
 /**
+ * Result of markCleanShutdown() (D6/R05-002/R15-004/M1).
+ *
+ * markCleanShutdown() is two internal steps -- marker write, then (only if
+ * that succeeded) the FULL durability barrier -- and callers must be able to
+ * tell WHICH step failed: a marker-write failure means the clean-shutdown
+ * record itself was never committed (session data is unaffected), while a
+ * barrier failure happens only after the marker WAS successfully committed,
+ * so it is a durability-of-everything-including-the-marker failure, not a
+ * "record not written" failure. Presenting these the same way to the user is
+ * false in the barrier case (M1).
+ */
+struct MarkCleanShutdownResult {
+    SessionStoreResult result;
+    /// True once the internal marker-write step itself returned Success
+    /// (i.e. the FULL barrier was reached at all). False if the marker
+    /// write failed or was Disabled -- in both of those cases the barrier
+    /// is never attempted, so this is also false then.
+    bool markerWritten = false;
+
+    bool ok() const { return result.ok(); }
+};
+
+/**
  * Result of TimeTracker::drainForShutdown() — the terminal-shutdown attempt to
  * persist all pending commit work, independent of tracker mode.
  *
@@ -127,19 +150,33 @@ struct DrainResult {
     Status status = Status::Complete;
     SessionStoreResult::Category category = SessionStoreResult::Success;
     QString message;
-    /// True when this drain's own live-segment stop already wrote the
-    /// clean-shutdown marker synchronously (no retry was needed). Lets
-    /// ShutdownCoordinator avoid a redundant marker write. Never used to
-    /// decide clean-marker eligibility -- see clean().
-    bool markerAlreadyWritten = false;
+    /// D6/Medium-3/M1 (R05-002): true only when drainForShutdown() itself
+    /// reported Complete (session data fully committed, nothing pending)
+    /// AND this result was downgraded to Incomplete specifically because
+    /// markCleanShutdown()'s MARKER-WRITE step failed (its
+    /// MarkCleanShutdownResult::markerWritten was false) -- the
+    /// clean-shutdown record itself was never committed, but session data
+    /// is NOT at risk. Deliberately false for a barrier-step failure (the
+    /// marker WAS committed there; only the covering fsync failed) -- that
+    /// is a genuine durability failure, not "record not written", and must
+    /// not be presented the same reassuring way. Callers (MainWin) must not
+    /// present this flag's true case the same way as a genuinely unsaved
+    /// session.
+    bool markerOnlyFailure = false;
 
     bool clean() const { return status == Status::Complete; }
 
-    static DrainResult complete(bool markerAlreadyWritten = false) {
-        return {Status::Complete, SessionStoreResult::Success, {}, markerAlreadyWritten};
+    static DrainResult complete() {
+        return {Status::Complete, SessionStoreResult::Success, {}, false};
     }
     static DrainResult incomplete(SessionStoreResult::Category cat, QString msg) {
         return {Status::Incomplete, cat, std::move(msg), false};
+    }
+    /// A clean drain whose own commit/discard work is fully resolved, but
+    /// whose clean-shutdown MARKER WRITE failed (not the barrier -- see
+    /// markerOnlyFailure above).
+    static DrainResult markerFailed(SessionStoreResult::Category cat, QString msg) {
+        return {Status::Incomplete, cat, std::move(msg), true};
     }
 };
 
@@ -250,7 +287,7 @@ enum class SchemaStatus { Ready, Created, Outdated, Inaccessible };
 enum class Operation {
     CommitSession, ReplaceAll, LoadDurations, HasEntriesForDate, SaveCheckpoint,
     DiscardCheckpoint, CheckSchemaOnStartup, FlushToDisc, SetLastCleanShutdownMarker,
-    RecoverStartupCheckpoints, Count
+    RecoverStartupCheckpoints, MarkCleanShutdown, Count
 };
 
 class SessionStore
@@ -344,7 +381,32 @@ public:
     /// Returns Disabled when history is off (no-op, not an error).
     /// Returns TransientError on write failure.
     /// CallerBug is not applicable.
+    /// Called only by markCleanShutdown() below (D6) -- no other caller
+    /// remains: writing this marker outside the FULL durability barrier is
+    /// exactly the ordering bug D6/R15-004 fixed.
     virtual SessionStoreResult setLastCleanShutdownMarker(const QDateTime& timestamp) = 0;
+
+    /// D6 (R05-002/R15-004): the single durable shutdown operation. The sole
+    /// owner of "durably mark clean" -- ShutdownCoordinator is the only
+    /// caller, and only once TimeTracker::drainForShutdown() has reported a
+    /// clean drain (all commit/discard work resolved). Internally:
+    ///   1. writes the clean-shutdown marker, timestamped via the store's own
+    ///      injected now-provider seam (the same seam D2 gave
+    ///      flushToDisc()'s heartbeat write -- see the D6 packet's deviation
+    ///      note), not a timestamp supplied by the caller;
+    ///   2. only if that write succeeded, executes the FULL durability
+    ///      barrier (temporarily promotes to PRAGMA synchronous=FULL, writes
+    ///      and flushes, then restores NORMAL) so the marker's own commit is
+    ///      covered by the fsync, not left outside it.
+    /// Returns Disabled when history is off (no-op, not an error) or
+    /// TransientError if either step fails; the barrier is never attempted
+    /// after a failed or Disabled marker write, and success requires both
+    /// steps to complete. The returned markerWritten (M1) tells the caller
+    /// WHICH step a failure came from: false for a marker-write failure
+    /// (the record itself was never committed), true for a barrier failure
+    /// (the marker WAS committed; only the covering fsync failed) -- callers
+    /// must not treat these two failures the same way.
+    virtual MarkCleanShutdownResult markCleanShutdown() = 0;
 
     /// Recovers unfinalized checkpoint rows left by a previous crash or unclean exit.
     /// Internally consumes the last-clean-shutdown marker, applies too-short/stale/

@@ -46,6 +46,7 @@ public:
     SchemaStatus checkSchemaOnStartup() override;
     SessionStoreResult flushToDisc() override;
     SessionStoreResult setLastCleanShutdownMarker(const QDateTime& timestamp) override;
+    MarkCleanShutdownResult markCleanShutdown() override;
     StartupRecoveryResult recoverStartupCheckpoints(const QDateTime& now) override;
 
     // ---- Call log (for assertions) ----

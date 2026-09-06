@@ -4404,9 +4404,12 @@ void TimerTest::test_C4_start_refused_when_discard_retry_latches_with_no_pending
 // that would authorize deleting a valid checkpoint prefix -- see the
 // dedicated "never_discards_checkpoint" test and the real-SQLite recovery
 // test), and -- because there is nothing left unresolved for this process
-// to retry (MEDIUM-B; see the D2 packet's deviation note) -- the
-// clean-shutdown marker IS written normally.
-void TimerTest::test_D2_stop_backward_clock_step_zero_mutation_marker_still_written()
+// to retry (MEDIUM-B; see the D2 packet's deviation note) -- a later drain
+// can still clean-mark. D6: stopTimer() itself writes no marker at all
+// anymore (that is now exclusively ShutdownCoordinator's job via the
+// store's markCleanShutdown()), so this proves the drain-eligibility side
+// of the old claim via drainForShutdown().clean() instead.
+void TimerTest::test_D2_stop_backward_clock_step_zero_mutation_drain_still_clean()
 {
     // Arrange: running session, clock then steps backward within the same day.
     QTemporaryDir tempDir;
@@ -4427,11 +4430,14 @@ void TimerTest::test_D2_stop_backward_clock_step_zero_mutation_marker_still_writ
     // Act
     tracker.useTimerViaButton(Button::Stop);
 
-    // Assert
+    // Assert: zero mutation, nothing pending, stopTimer wrote no marker
+    // itself, and a subsequent drain (what ShutdownCoordinator performs)
+    // is clean -- nothing this reversal left behind blocks clean marking.
     QVERIFY(tracker.isStopped());
     QVERIFY(fakeDb.storedDurations.empty());
     QVERIFY(!tracker.hasPendingDiscards_dbg());
-    QVERIFY(fakeDb.callLog.contains("setLastCleanShutdownMarker"));
+    QVERIFY(!fakeDb.callLog.contains("setLastCleanShutdownMarker"));
+    QVERIFY(tracker.drainForShutdown().clean());
 }
 
 // D2/HIGH-A (round-2 review): a backward-clock Stop must never register a

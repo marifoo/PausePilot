@@ -50,6 +50,7 @@ public:
     SchemaStatus checkSchemaOnStartup() override;
     SessionStoreResult flushToDisc() override;
     SessionStoreResult setLastCleanShutdownMarker(const QDateTime& timestamp) override;
+    MarkCleanShutdownResult markCleanShutdown() override;
     StartupRecoveryResult recoverStartupCheckpoints(const QDateTime& now) override;
 
     // Non-virtual helpers kept for test seeding and internal use.

@@ -365,10 +365,11 @@ private slots:
 
     // D2 (R11-003): a backward wall-clock step (NTP/manual/DST) makes `now`
     // precede the live segment's captured start. Stop drops only the
-    // closing interval (zero DB mutation) and writes the clean marker
-    // normally -- there is nothing left unresolved (round-2 review
-    // MEDIUM-B; see the D2 packet's deviation note).
-    void test_D2_stop_backward_clock_step_zero_mutation_marker_still_written();
+    // closing interval (zero DB mutation) and leaves nothing unresolved
+    // (round-2 review MEDIUM-B; see the D2 packet's deviation note) -- so a
+    // later drain can still clean-mark (D6: stopTimer() itself no longer
+    // writes any marker; that is verified via drainForShutdown() here).
+    void test_D2_stop_backward_clock_step_zero_mutation_drain_still_clean();
     // D2/HIGH-A (round-2 review): a backward-clock Stop must never register
     // a checkpoint-discard intent -- that would authorize deleting a valid
     // already-checkpointed prefix along with the invalid closing delta.

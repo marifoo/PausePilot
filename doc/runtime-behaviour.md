@@ -118,24 +118,23 @@ sequenceDiagram
 
     Caller->>MW: onAboutToQuit() / shutdown(force_direct)
     MW->>SC: run(force_direct)
-    alt timer was running
-        SC->>T: useTimerViaButton(Stop)
-        Note over SC: pump event loop ~150 ms<br/>(skipped when force_direct=true)
-    end
-    SC->>S: flushToDisc()
-    alt clean shutdown
-        SC->>S: setLastCleanShutdownMarker(now)
+    SC->>T: drainForShutdown()
+    Note over SC: pump event loop ~150 ms<br/>(skipped when force_direct=true)
+    alt drain clean
+        SC->>S: markCleanShutdown()
+        Note over S: writes marker, then (only on success)<br/>runs the FULL durability barrier
     end
     SC-->>MW: returns
 ```
 
 `ShutdownCoordinator::run` is idempotent (`shutdown_completed_` guard) so
-multiple triggers fire it exactly once. The clean-shutdown marker is only
-written when `TimeTracker::canMarkCleanShutdown()` reports that the session was
-fully drained — this is what lets the next startup distinguish "we left
-checkpoints behind because we crashed" from "we left checkpoints behind
-because we shut down before flushing"; see `persistence.md` for how that
-distinction is used.
+multiple triggers fire it exactly once. The clean-shutdown marker is written
+by exactly one owner, `SqliteSessionStore::markCleanShutdown()`, and only
+when `TimeTracker::drainForShutdown()` reports the whole drain (commit and
+any pending checkpoint-discard intent) resolved — this is what lets the next
+startup distinguish "we left checkpoints behind because we crashed" from "we
+left checkpoints behind because we shut down before flushing"; see
+`persistence.md` for how that distinction is used.
 
 ### Linux: Unix signals via socketpair
 

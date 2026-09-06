@@ -164,13 +164,14 @@ int g_modalsClicked = 0;
 // `beforeClick` runs immediately before the click (e.g. to fix the store for
 // a Retry). Bounded by a watchdog so a regression that never shows the modal
 // fails the test instead of hanging the whole suite.
-ModalPoller armModalClick(QMessageBox::ButtonRole role, std::function<void()> beforeClick = {})
+ModalPoller armModalClick(QMessageBox::ButtonRole role, std::function<void()> beforeClick = {},
+                           QString* capturedText = nullptr)
 {
     ModalPoller poll(new QTimer());
     QTimer* raw = poll.get();
     raw->setInterval(5);
     auto attempts = std::make_shared<int>(0);
-    QObject::connect(raw, &QTimer::timeout, [raw, role, beforeClick, attempts]() {
+    QObject::connect(raw, &QTimer::timeout, [raw, role, beforeClick, attempts, capturedText]() {
         QMessageBox* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
         if (!box) {
             if (++(*attempts) > 1000) {  // ~5 s
@@ -181,6 +182,7 @@ ModalPoller armModalClick(QMessageBox::ButtonRole role, std::function<void()> be
         }
         raw->stop();
         ++g_modalsClicked;
+        if (capturedText) *capturedText = box->text();
         if (beforeClick) beforeClick();
         const auto buttons = box->buttons();
         for (QAbstractButton* btn : buttons) {
@@ -321,12 +323,11 @@ void AppShellTest::test_close_exit_anyway_stops_retrying_and_writes_no_marker()
     auto poller = armModalClick(QMessageBox::DestructiveRole);
     mainWin.close();
 
-    // Assert: exactly one coordinator run total (the initial run() -- Exit
-    // Anyway must not trigger ShutdownCoordinator::retryDrain()). A single
-    // drainForShutdown() call may itself submit the failing commit twice
-    // (the Stop-time commit, then its own immediate pending retry), but
-    // flushToDisc()/the marker are only reached once per coordinator run.
-    QCOMPARE(fakeDb.callLog.count("flushToDisc"), 1);
+    // Assert: an incomplete drain bypasses the clean MARKER (D6), but the
+    // durability barrier still runs on its own (Medium-2) -- Exit Anyway
+    // "leaves existing durable checkpoints available for ... recovery"
+    // (plan section 2), which requires this fsync to still happen.
+    QVERIFY(fakeDb.callLog.contains("flushToDisc"));
     QVERIFY(!fakeDb.callLog.contains("setLastCleanShutdownMarker"));
     QVERIFY(tracker.hasPendingCommit_dbg());
 
@@ -335,6 +336,39 @@ void AppShellTest::test_close_exit_anyway_stops_retrying_and_writes_no_marker()
     // so no orchestration-bug assert is at risk here either way).
     fakeDb.commitSessionResult = SessionStoreResult::success();
     QVERIFY(tracker.drainForShutdown().clean());
+}
+
+// D6/Medium-3 (R05-002 follow-up): a marker-only failure (session data DID
+// commit; only the clean-shutdown record failed) must be presented
+// truthfully -- MainWin must not tell the user their session was not saved
+// when it was.
+void AppShellTest::test_close_marker_only_failure_shows_data_was_saved()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+    MainWin mainWin(settings, tracker, fakeDb, coordinator);
+
+    mainWin.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&mainWin));
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(20);
+    // The drain itself (session data commit) succeeds; only the marker fails.
+    fakeDb.setMarkerResult = SessionStoreResult::transient("injected marker failure");
+
+    // Act: capture the modal's text and dismiss via Exit Anyway.
+    QString shownText;
+    auto poller = armModalClick(QMessageBox::DestructiveRole, {}, &shownText);
+    mainWin.close();
+
+    // Assert: the modal must say the session WAS saved, not that it wasn't.
+    QVERIFY(!tracker.hasPendingCommit_dbg());
+    QVERIFY(shownText.contains("was saved", Qt::CaseInsensitive));
+    QVERIFY(!shownText.contains("could not save the current session", Qt::CaseInsensitive));
 }
 
 // Regression: "Exit Anyway" is a decision about the whole termination, not
