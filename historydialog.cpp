@@ -402,7 +402,7 @@ void HistoryDialog::addReadOnlyRow(QTableWidget* table, int row, const TimeDurat
     QTableWidgetItem* typeItem = new QTableWidgetItem(typeStr);
     QTableWidgetItem* startEndItem = new QTableWidgetItem(
         d.startTime.toString("hh:mm:ss") + " - " + d.endTime.toString("hh:mm:ss"));
-    QTableWidgetItem* durationItem = new QTableWidgetItem(convMSecToTimeStr(d.duration) + "  ");
+    QTableWidgetItem* durationItem = new QTableWidgetItem(convMSecToTimeStr(d.duration()) + "  ");
     for (auto* item : {typeItem, startEndItem, durationItem}) {
         item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
         item->setBackground(grayBg);
@@ -470,7 +470,6 @@ void HistoryDialog::updateTable(uint idx)
             const auto& pending  = comp[i];
             const auto& original = originalDurations[i];
             if (pending.type != original.type ||
-                pending.duration != original.duration ||
                 pending.startTime != original.startTime ||
                 pending.endTime != original.endTime) {
                 pageModified = true;
@@ -486,7 +485,7 @@ void HistoryDialog::updateTable(uint idx)
         QTableWidgetItem* typeItem = new QTableWidgetItem(typeStr);
         QTableWidgetItem* startEndItem = new QTableWidgetItem(
             d.startTime.toString("hh:mm:ss") + " - " + d.endTime.toString("hh:mm:ss"));
-        QTableWidgetItem* durationItem = new QTableWidgetItem(convMSecToTimeStr(d.duration) + "  ");
+        QTableWidgetItem* durationItem = new QTableWidgetItem(convMSecToTimeStr(d.duration()) + "  ");
         table_->setItem(row, 0, typeItem);
         table_->setItem(row, 1, startEndItem);
         table_->setItem(row, 2, durationItem);
@@ -541,7 +540,7 @@ void HistoryDialog::updateTable(uint idx)
         QTableWidgetItem* startEndItem = new QTableWidgetItem(
             og.startTime.toString("hh:mm:ss") + " - " + og.endTime.toString("hh:mm:ss"));
         QTableWidgetItem* durationItem = new QTableWidgetItem(
-            convMSecToTimeStr(og.duration) + "  (Running)");
+            convMSecToTimeStr(og.duration()) + "  (Running)");
         table_->setItem(row, 0, typeItem);
         table_->setItem(row, 1, startEndItem);
         table_->setItem(row, 2, durationItem);
@@ -678,7 +677,7 @@ void HistoryDialog::onSplitRow()
 
     const auto& completed = pendingTimelines[idx].completed();
     const TimeDuration& duration = completed[row];
-    qint64 originalDuration = duration.duration;
+    qint64 originalDuration = duration.duration();
     QDateTime start = duration.startTime;
     QDateTime end = duration.endTime;
 

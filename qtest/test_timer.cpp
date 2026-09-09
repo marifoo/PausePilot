@@ -258,7 +258,7 @@ void TimerTest::test_timer_retry_append_failure_then_success_preserves_segments(
     for (const auto& d : unsavedCopy) {
         bool found = false;
         for (const auto& row : loaded) {
-            if (row.type == d.type && row.startTime == d.startTime && row.endTime == d.endTime && row.duration == d.duration) {
+            if (row.type == d.type && row.startTime == d.startTime && row.endTime == d.endTime && row.duration() == d.duration()) {
                 found = true;
                 break;
             }
@@ -1137,7 +1137,7 @@ void TimerTest::test_E_boot_time_gate_entries_yes_skips_boot_time()
     qint64 totalActivity = 0;
     for (const auto& d : tracker.sessionState_dbg().durations)
         if (d.type == DurationType::Activity)
-            totalActivity += d.duration;
+            totalActivity += d.duration();
     QVERIFY2(totalActivity < 5000,
              "Boot time must not be added when DB reports Yes for today");
 
@@ -1169,7 +1169,7 @@ void TimerTest::test_E_boot_time_gate_entries_no_adds_boot_time()
     qint64 totalActivity = 0;
     for (const auto& d : tracker.sessionState_dbg().durations)
         if (d.type == DurationType::Activity)
-            totalActivity += d.duration;
+            totalActivity += d.duration();
     QVERIFY2(totalActivity >= 29000,
              "Boot time must be added when DB reports No entries for today");
 
@@ -1202,7 +1202,7 @@ void TimerTest::test_E_boot_time_gate_entries_unknown_skips_boot_time()
     qint64 totalActivity = 0;
     for (const auto& d : tracker.sessionState_dbg().durations)
         if (d.type == DurationType::Activity)
-            totalActivity += d.duration;
+            totalActivity += d.duration();
     QVERIFY2(totalActivity < 5000,
              "Boot time must not be added when DB reports Unknown for today");
 
@@ -1245,8 +1245,8 @@ void TimerTest::test_E_boot_time_inmemory_start_date_skips_boot_time()
     // Assert: boot time was NOT added (in-memory start-date check fired).
     qint64 totalActivity = 0;
     for (const auto& d : tracker.sessionState_dbg().durations)
-        if (d.type == DurationType::Activity && d.duration >= 25000)
-            totalActivity += d.duration;
+        if (d.type == DurationType::Activity && d.duration() >= 25000)
+            totalActivity += d.duration();
     QVERIFY2(totalActivity < 29000,
              "Boot time must not be added when in-memory entry has startTime == today");
 
@@ -2446,7 +2446,7 @@ void TimerTest::test_seam_fake_clock_drives_ongoing_duration()
     QVERIFY(ongoing.has_value());
     QCOMPARE(ongoing->startTime, start);
     QCOMPARE(ongoing->endTime, start.addMSecs(ninetyMinutesMs));
-    QCOMPARE(ongoing->duration, ninetyMinutesMs);
+    QCOMPARE(ongoing->duration(), ninetyMinutesMs);
 }
 
 void TimerTest::test_A2_backpause_anchors_at_lock_time_across_suspend()

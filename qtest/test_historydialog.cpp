@@ -68,7 +68,7 @@ void HistoryDialogTest::test_historydialog_createPages_includes_current_db_ongoi
     // completed=1 (DB row), ongoing=1; total display rows=2
     QCOMPARE(dialog.editSession_dbg().pendingTimelines()[0].completed().size(), static_cast<size_t>(1));
     QVERIFY(dialog.editSession_dbg().pendingTimelines()[0].ongoing().has_value());
-    QVERIFY(dialog.editSession_dbg().pendingTimelines()[0].ongoing()->duration > 0);
+    QVERIFY(dialog.editSession_dbg().pendingTimelines()[0].ongoing()->duration() > 0);
     QCOMPARE(dialog.editSession_dbg().pendingTimelines()[0].completed().size(), static_cast<size_t>(1));
 }
 

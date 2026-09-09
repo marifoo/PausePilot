@@ -1,5 +1,6 @@
 #include "test_timeline.h"
 #include "timeline.h"
+#include "dayvalidity.h"
 #include <QtTest>
 
 using TestCommon::mk;
@@ -92,7 +93,7 @@ void TimelineTest::test_O_withSplit_preserves_total_duration()
     QCOMPARE(second.endTime, makeUtc(base + 10000));
 
     // Total duration preserved
-    QCOMPARE(first.duration + second.duration, static_cast<qint64>(10000));
+    QCOMPARE(first.duration() + second.duration(), static_cast<qint64>(10000));
 
     // First half retains original segment_id; second gets a new one
     QCOMPARE(first.segment_id, origId);
@@ -120,14 +121,14 @@ void TimelineTest::test_P_normalized_matches_cleanDurations()
 
     auto makeDeque = [&]() {
         std::deque<TimeDuration> d;
-        // Two Activity segments with small gap (< 500ms) — should be merged (Branch 6)
+        // Two Activity segments that touch exactly (gap == 0) — merge.
         d.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
             QDateTime::fromMSecsSinceEpoch(base, Qt::UTC),
             QDateTime::fromMSecsSinceEpoch(base + 1000, Qt::UTC), id1));
         d.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
-            QDateTime::fromMSecsSinceEpoch(base + 1200, Qt::UTC),
+            QDateTime::fromMSecsSinceEpoch(base + 1000, Qt::UTC),
             QDateTime::fromMSecsSinceEpoch(base + 2000, Qt::UTC), id2));
-        // Near-duplicate Pause entries (within 50ms diff) — should be de-duped (Branch 1)
+        // Overlapping Pause entries — merge.
         d.push_back(TimeDuration::fromPersistedRow(DurationType::Pause,
             QDateTime::fromMSecsSinceEpoch(base + 3000, Qt::UTC),
             QDateTime::fromMSecsSinceEpoch(base + 4000, Qt::UTC), id3));
@@ -151,7 +152,7 @@ void TimelineTest::test_P_normalized_matches_cleanDurations()
         QCOMPARE(normedComp[i].startTime, forClean[i].startTime);
         QCOMPARE(normedComp[i].endTime, forClean[i].endTime);
         QCOMPARE(normedComp[i].type, forClean[i].type);
-        QCOMPARE(normedComp[i].duration, forClean[i].duration);
+        QCOMPARE(normedComp[i].duration(), forClean[i].duration());
     }
 }
 
@@ -173,7 +174,7 @@ void TimelineTest::test_R_factory_accepts_same_day()
     QDateTime end(QDate(2025, 6, 15), QTime(10, 0, 0), Qt::LocalTime);
     auto result = TimeDuration::create(DurationType::Activity, start, end);
     QVERIFY(result.has_value());
-    QVERIFY(result->duration > 0);
+    QVERIFY(result->duration() > 0);
 }
 
 void TimelineTest::test_R_factory_rejects_zero_duration()
@@ -242,7 +243,8 @@ void TimelineTest::test_S_normalized_no_cross_day_merge()
 {
     // Segment A ends at 2025-06-15 23:59:59.500, segment B starts at 2025-06-16 00:00:00.000.
     // Each is individually same-day (assertSameDayInvariant passes for both).
-    // Branch 6 (gap = 500ms) should NOT merge them because they cross a day boundary.
+    // gap = 500ms, a positive gap, so they must NOT merge (D7: a positive gap
+    // is never filled, regardless of day-crossing).
     QDateTime aStart(QDate(2025, 6, 15), QTime(23, 0, 0), Qt::LocalTime);
     QDateTime aEnd(QDate(2025, 6, 15), QTime(23, 59, 59, 500), Qt::LocalTime);
     QDateTime bStart(QDate(2025, 6, 16), QTime(0, 0, 0), Qt::LocalTime);
@@ -263,13 +265,12 @@ void TimelineTest::test_S_normalized_no_cross_day_merge()
     QCOMPARE(normed.completed().size(), static_cast<size_t>(2));
 }
 
-void TimelineTest::test_S_normalized_same_day_still_merges()
+void TimelineTest::test_S_normalized_overlap_still_merges()
 {
-    // Two same-type segments on the same day with gap = 100ms < 500ms — should merge.
-    // aEnd = 10:00:01.000, bStart = 10:00:01.100, gap = 100ms
+    // Two same-type segments on the same day that genuinely overlap — merge.
     QDateTime aStart(QDate(2025, 6, 15), QTime(10, 0, 0), Qt::LocalTime);
-    QDateTime aEnd(QDate(2025, 6, 15), QTime(10, 0, 1, 0), Qt::LocalTime);
-    QDateTime bStart(QDate(2025, 6, 15), QTime(10, 0, 1, 100), Qt::LocalTime);
+    QDateTime aEnd(QDate(2025, 6, 15), QTime(10, 0, 30), Qt::LocalTime);
+    QDateTime bStart(QDate(2025, 6, 15), QTime(10, 0, 15), Qt::LocalTime);
     QDateTime bEnd(QDate(2025, 6, 15), QTime(10, 30, 0), Qt::LocalTime);
 
     auto segA = TimeDuration::create(DurationType::Activity, aStart, aEnd);
@@ -287,8 +288,38 @@ void TimelineTest::test_S_normalized_same_day_still_merges()
     QCOMPARE(normed.completed().size(), static_cast<size_t>(1));
 }
 
+void TimelineTest::test_S_normalized_exactTouchAtMidnight_notMerged()
+{
+    // Segment A ends exactly at 2025-06-16 00:00:00.000 (the legal half-open
+    // boundary of its own day, 2025-06-15 -- see isCrossMidnight's exception
+    // in types.h); segment B starts at that exact same instant. gap == 0, an
+    // exact touch, which normally merges -- but curr (B) starts on a
+    // different calendar date than prev (A), so merging would splice a
+    // cross-midnight interval. Must NOT merge.
+    QDateTime aStart(QDate(2025, 6, 15), QTime(23, 0, 0), Qt::LocalTime);
+    QDateTime aEnd(QDate(2025, 6, 16), QTime(0, 0, 0), Qt::LocalTime);
+    QDateTime bStart(QDate(2025, 6, 16), QTime(0, 0, 0), Qt::LocalTime);
+    QDateTime bEnd(QDate(2025, 6, 16), QTime(1, 0, 0), Qt::LocalTime);
+
+    auto segA = TimeDuration::create(DurationType::Activity, aStart, aEnd);
+    auto segB = TimeDuration::create(DurationType::Activity, bStart, bEnd);
+    QVERIFY(segA.has_value());
+    QVERIFY(segB.has_value());
+    QCOMPARE(classifyMerge(*segA, *segB), MergeDecision::None);
+
+    std::deque<TimeDuration> comp;
+    comp.push_back(std::move(*segA));
+    comp.push_back(std::move(*segB));
+
+    Timeline t(std::move(comp), std::nullopt);
+    Timeline normed = t.normalized();
+
+    QCOMPARE(normed.completed().size(), static_cast<size_t>(2));
+}
+
 // ============================================================================
-// 9.3: classifyMerge targeted cases — exercise each branch directly
+// 9.3: classifyMerge — only two outcomes are reachable once input is sorted
+// by start (D7/R04-001): None and Merge.
 // ============================================================================
 
 namespace {
@@ -313,77 +344,250 @@ void TimelineTest::test_classifyMerge_none_for_different_types()
     QCOMPARE(classifyMerge(act, pau), MergeDecision::None);
 }
 
-void TimelineTest::test_classifyMerge_branch1_near_duplicate()
+void TimelineTest::test_classifyMerge_merge_for_overlap()
 {
-    // Two segments whose endpoints differ by < 50 ms → near-duplicate → EraseIt
-    const qint64 base = 6'000'000;
-    TimeDuration prev = makeAct(base, base + 1000);
-    TimeDuration curr = makeAct(base + 5, base + 1030); // diff_end=30ms, diff_dur=30ms
-    QCOMPARE(classifyMerge(prev, curr), MergeDecision::EraseIt);
-}
-
-void TimelineTest::test_classifyMerge_branch2_supersede()
-{
-    // curr starts earlier and is at least as long → Supersede
-    const qint64 base = 7'000'000;
-    TimeDuration prev = makeAct(base + 100, base + 1000);
-    TimeDuration curr = makeAct(base,       base + 1000); // starts earlier, same end
-    QCOMPARE(classifyMerge(prev, curr), MergeDecision::Supersede);
-}
-
-void TimelineTest::test_classifyMerge_branch3_extend_prev_start()
-{
-    // curr starts before prev but ends inside it → ExtendPrevStart
-    const qint64 base = 8'000'000;
-    TimeDuration prev = makeAct(base + 200, base + 1000);
-    TimeDuration curr = makeAct(base,       base + 600); // starts before, ends inside
-    QCOMPARE(classifyMerge(prev, curr), MergeDecision::ExtendPrevStart);
-}
-
-void TimelineTest::test_classifyMerge_branch4_forward_overlap()
-{
-    // curr starts inside prev and extends past it → ExtendPrevEnd
     const qint64 base = 9'000'000;
     TimeDuration prev = makeAct(base,       base + 1000);
     TimeDuration curr = makeAct(base + 500, base + 2000); // starts inside, ends after
-    QCOMPARE(classifyMerge(prev, curr), MergeDecision::ExtendPrevEnd);
+    QCOMPARE(classifyMerge(prev, curr), MergeDecision::Merge);
 }
 
-void TimelineTest::test_classifyMerge_branch5_subset()
+void TimelineTest::test_classifyMerge_merge_for_subset()
 {
-    // curr is entirely inside prev → EraseIt
     const qint64 base = 10'000'000;
     TimeDuration prev = makeAct(base,       base + 2000);
     TimeDuration curr = makeAct(base + 200, base + 1800); // fully inside
-    QCOMPARE(classifyMerge(prev, curr), MergeDecision::EraseIt);
+    QCOMPARE(classifyMerge(prev, curr), MergeDecision::Merge);
 }
 
-void TimelineTest::test_classifyMerge_branch6_small_gap()
+void TimelineTest::test_classifyMerge_merge_for_exact_touch()
 {
-    // gap < 500 ms, same calendar day → ExtendPrevEnd
-    // Use a fixed UTC base on the same day (1970-01-01)
     const qint64 base = 11'000'000;
     TimeDuration prev = makeAct(base, base + 1000);
-    TimeDuration curr = makeAct(base + 1200, base + 2000); // gap = 200ms < 500ms
-    QCOMPARE(classifyMerge(prev, curr), MergeDecision::ExtendPrevEnd);
+    TimeDuration curr = makeAct(base + 1000, base + 2000); // gap == 0, exact touch
+    QCOMPARE(classifyMerge(prev, curr), MergeDecision::Merge);
 }
 
-void TimelineTest::test_classifyMerge_branch7_slight_overlap()
+void TimelineTest::test_classifyMerge_none_for_any_positive_gap()
 {
-    // gap = -50ms (50ms overlap, < 100ms threshold), same day → ExtendPrevEnd
-    const qint64 base = 12'000'000;
-    TimeDuration prev = makeAct(base, base + 1000);
-    TimeDuration curr = makeAct(base + 950, base + 2000); // overlap = 50ms
-    QCOMPARE(classifyMerge(prev, curr), MergeDecision::ExtendPrevEnd);
-}
-
-void TimelineTest::test_classifyMerge_none_large_gap()
-{
-    // gap >= 500ms, same type → None (no merge)
     const qint64 base = 13'000'000;
     TimeDuration prev = makeAct(base, base + 1000);
-    TimeDuration curr = makeAct(base + 2000, base + 3000); // gap = 1000ms > 500ms
+    // A single millisecond of positive gap is enough to block the merge —
+    // there is no small-gap allowance any more.
+    TimeDuration curr = makeAct(base + 1001, base + 2000);
     QCOMPARE(classifyMerge(prev, curr), MergeDecision::None);
+}
+
+// ============================================================================
+// D7/R04-003: same-type merges only on overlap or exact touch; a positive
+// gap, of any size, is never filled. Data-driven over the gap distance.
+// ============================================================================
+
+void TimelineTest::test_normalized_overlapOrTouch_vs_positiveGap_data()
+{
+    QTest::addColumn<qint64>("gapMs");
+    QTest::addColumn<bool>("expectMerge");
+
+    // Negative gapMs means overlap.
+    QTest::newRow("deep overlap (-500ms)")    << (qint64)-500 << true;
+    QTest::newRow("slight overlap (-1ms)")    << (qint64)-1   << true;
+    QTest::newRow("exact touch (0ms)")        << (qint64)0    << true;
+    QTest::newRow("1ms positive gap")         << (qint64)1    << false;
+    QTest::newRow("100ms positive gap")       << (qint64)100  << false;
+    QTest::newRow("499ms positive gap")       << (qint64)499  << false;
+    QTest::newRow("500ms positive gap")       << (qint64)500  << false;
+    QTest::newRow("large positive gap (5s)")  << (qint64)5000 << false;
+}
+
+void TimelineTest::test_normalized_overlapOrTouch_vs_positiveGap()
+{
+    QFETCH(qint64, gapMs);
+    QFETCH(bool, expectMerge);
+
+    const qint64 base = 20'000'000;
+    const qint64 prevEnd = base + 1000;
+    std::deque<TimeDuration> comp;
+    comp.push_back(makeAct(base, prevEnd));
+    comp.push_back(makeAct(prevEnd + gapMs, prevEnd + gapMs + 1000));
+
+    Timeline t(comp, std::nullopt);
+    Timeline normed = t.normalized();
+
+    QCOMPARE(normed.completed().size(), expectMerge ? static_cast<size_t>(1) : static_cast<size_t>(2));
+}
+
+// ============================================================================
+// D7/R04-002: earliest-starting ID survives; equal starts break
+// lexicographically. Exact-duplicate survival is therefore deterministic.
+// ============================================================================
+
+void TimelineTest::test_normalized_earliestStart_idSurvives()
+{
+    // Two overlapping segments with different starts: the earlier-starting
+    // id ("id-late" starts later despite its name) must survive regardless
+    // of which one is longer or which was pushed first.
+    const qint64 base = 30'000'000;
+    std::deque<TimeDuration> comp;
+    comp.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime::fromMSecsSinceEpoch(base + 500, Qt::UTC),
+        QDateTime::fromMSecsSinceEpoch(base + 5000, Qt::UTC), SegmentId::fromString("id-late")));
+    comp.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime::fromMSecsSinceEpoch(base, Qt::UTC),
+        QDateTime::fromMSecsSinceEpoch(base + 1000, Qt::UTC), SegmentId::fromString("id-early")));
+
+    Timeline t(comp, std::nullopt);
+    Timeline normed = t.normalized();
+
+    QCOMPARE(normed.completed().size(), static_cast<size_t>(1));
+    QCOMPARE(normed.completed()[0].segment_id.toString(), QString("id-early"));
+    QCOMPARE(normed.completed()[0].endTime.toMSecsSinceEpoch(), base + 5000);
+}
+
+void TimelineTest::test_normalized_equalStart_lexicographicIdSurvives()
+{
+    // Two overlapping segments with the SAME start: the lexicographically
+    // smaller id survives, regardless of push order -- and regardless of
+    // which end is later. The smaller id ("aaa...") deliberately gets the
+    // LATER end here: under the old (start, end, duration) sort, the
+    // shorter-ending "zzz..." row would sort first and "survive" purely by
+    // having the earlier end, which would pass this assertion for the wrong
+    // reason. Giving the smaller id the later end makes the assertion
+    // actually discriminate the lexicographic-id tie-break it is named for.
+    const qint64 base = 31'000'000;
+    std::deque<TimeDuration> comp;
+    comp.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime::fromMSecsSinceEpoch(base, Qt::UTC),
+        QDateTime::fromMSecsSinceEpoch(base + 1000, Qt::UTC), SegmentId::fromString("zzz-later-pushed-shorter")));
+    comp.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime::fromMSecsSinceEpoch(base, Qt::UTC),
+        QDateTime::fromMSecsSinceEpoch(base + 9000, Qt::UTC), SegmentId::fromString("aaa-first-pushed-longer")));
+
+    Timeline t(comp, std::nullopt);
+    Timeline normed = t.normalized();
+
+    QCOMPARE(normed.completed().size(), static_cast<size_t>(1));
+    QCOMPARE(normed.completed()[0].segment_id.toString(), QString("aaa-first-pushed-longer"));
+    // The surviving id keeps the union's end, not just its own original end.
+    QCOMPARE(normed.completed()[0].endTime.toMSecsSinceEpoch(), base + 9000);
+}
+
+void TimelineTest::test_normalized_exactDuplicate_permutations_sameSurvivor()
+{
+    // Two byte-identical intervals with distinct ids: the same (lexicographically
+    // smaller) id must survive no matter which order they're supplied in.
+    const qint64 base = 32'000'000;
+    auto build = [&](bool bFirst) {
+        std::deque<TimeDuration> comp;
+        auto a = TimeDuration::fromPersistedRow(DurationType::Activity,
+            QDateTime::fromMSecsSinceEpoch(base, Qt::UTC),
+            QDateTime::fromMSecsSinceEpoch(base + 1000, Qt::UTC), SegmentId::fromString("a-id"));
+        auto b = TimeDuration::fromPersistedRow(DurationType::Activity,
+            QDateTime::fromMSecsSinceEpoch(base, Qt::UTC),
+            QDateTime::fromMSecsSinceEpoch(base + 1000, Qt::UTC), SegmentId::fromString("b-id"));
+        if (bFirst) {
+            comp.push_back(std::move(b));
+            comp.push_back(std::move(a));
+        } else {
+            comp.push_back(std::move(a));
+            comp.push_back(std::move(b));
+        }
+        return comp;
+    };
+
+    Timeline normedAFirst = Timeline(build(false), std::nullopt).normalized();
+    Timeline normedBFirst = Timeline(build(true), std::nullopt).normalized();
+
+    QCOMPARE(normedAFirst.completed().size(), static_cast<size_t>(1));
+    QCOMPARE(normedBFirst.completed().size(), static_cast<size_t>(1));
+    QCOMPARE(normedAFirst.completed()[0].segment_id.toString(), QString("a-id"));
+    QCOMPARE(normedBFirst.completed()[0].segment_id.toString(), QString("a-id"));
+}
+
+// ============================================================================
+// D7/R04-003: Timeline never merges differing types and never guesses. A
+// cross-type overlap survives normalization unmerged, unrejected, and
+// undropped -- rejecting it is DayValidity/SessionStore/HistoryEditSession's
+// job (see dayvalidity.h and their own tests), not Timeline's.
+// ============================================================================
+
+void TimelineTest::test_normalized_crossTypeOverlap_neverMerged_flaggedByDayValidity()
+{
+    const qint64 base = 33'000'000;
+    std::deque<TimeDuration> comp;
+    comp.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime::fromMSecsSinceEpoch(base, Qt::UTC),
+        QDateTime::fromMSecsSinceEpoch(base + 20000, Qt::UTC)));
+    comp.push_back(TimeDuration::fromPersistedRow(DurationType::Pause,
+        QDateTime::fromMSecsSinceEpoch(base + 10000, Qt::UTC),
+        QDateTime::fromMSecsSinceEpoch(base + 15000, Qt::UTC)));
+
+    Timeline t(comp, std::nullopt);
+    Timeline normed = t.normalized();
+
+    // Not merged, not dropped: both rows survive exactly as given.
+    QCOMPARE(normed.completed().size(), static_cast<size_t>(2));
+    QCOMPARE(normed.activeMsec(), static_cast<qint64>(20000));
+    QCOMPARE(normed.pauseMsec(), static_cast<qint64>(5000));
+
+    // The shared civil-interval primitive (owned by DayValidity, reused here
+    // rather than duplicated) is what actually rejects this at a write
+    // boundary -- Timeline's job stops at not corrupting it further.
+    QCOMPARE(DayValidity::validatePayload(normed.completed()), DayValidity::Violation::TypeOverlap);
+}
+
+// ============================================================================
+// D7: normalizedWithRemovedIds() reports exactly the merged-away IDs.
+// ============================================================================
+
+void TimelineTest::test_normalizedWithRemovedIds_reportsRemoved()
+{
+    const qint64 base = 34'000'000;
+    std::deque<TimeDuration> comp;
+    comp.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime::fromMSecsSinceEpoch(base, Qt::UTC),
+        QDateTime::fromMSecsSinceEpoch(base + 1000, Qt::UTC), SegmentId::fromString("id-survivor")));
+    comp.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime::fromMSecsSinceEpoch(base + 1000, Qt::UTC), // touches exactly
+        QDateTime::fromMSecsSinceEpoch(base + 2000, Qt::UTC), SegmentId::fromString("id-merged-away")));
+    comp.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime::fromMSecsSinceEpoch(base + 5000, Qt::UTC), // large gap, untouched
+        QDateTime::fromMSecsSinceEpoch(base + 6000, Qt::UTC), SegmentId::fromString("id-untouched")));
+
+    Timeline t(comp, std::nullopt);
+    NormalizedResult result = t.normalizedWithRemovedIds();
+
+    QCOMPARE(result.timeline.completed().size(), static_cast<size_t>(2));
+    QCOMPARE((int)result.removedIds.size(), 1);
+    QCOMPARE(result.removedIds[0], QString("id-merged-away"));
+}
+
+// ============================================================================
+// D7: normalizing an already-normalized timeline changes nothing further.
+// ============================================================================
+
+void TimelineTest::test_normalized_isIdempotent()
+{
+    const qint64 base = 35'000'000;
+    std::deque<TimeDuration> comp;
+    comp.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime::fromMSecsSinceEpoch(base, Qt::UTC),
+        QDateTime::fromMSecsSinceEpoch(base + 1000, Qt::UTC), SegmentId::fromString("id-a")));
+    comp.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime::fromMSecsSinceEpoch(base + 1000, Qt::UTC),
+        QDateTime::fromMSecsSinceEpoch(base + 2000, Qt::UTC), SegmentId::fromString("id-b")));
+    comp.push_back(TimeDuration::fromPersistedRow(DurationType::Pause,
+        QDateTime::fromMSecsSinceEpoch(base + 3000, Qt::UTC),
+        QDateTime::fromMSecsSinceEpoch(base + 4000, Qt::UTC), SegmentId::fromString("id-c")));
+
+    Timeline once = Timeline(comp, std::nullopt).normalized();
+    Timeline twice = once.normalized();
+
+    QCOMPARE(twice.completed().size(), once.completed().size());
+    for (size_t i = 0; i < once.completed().size(); ++i) {
+        QCOMPARE(twice.completed()[i].segment_id, once.completed()[i].segment_id);
+        QCOMPARE(twice.completed()[i].startTime, once.completed()[i].startTime);
+        QCOMPARE(twice.completed()[i].endTime, once.completed()[i].endTime);
+    }
 }
 
 // ============================================================================

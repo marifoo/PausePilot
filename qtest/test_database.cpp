@@ -67,7 +67,7 @@ void DatabaseTest::test_explicitStartTimes_constructorComputesDuration()
     TimeDuration d = TimeDuration::fromPersistedRow(DurationType::Activity, start, end);
 
     // Assert
-    QCOMPARE(d.duration, (qint64)4000);
+    QCOMPARE(d.duration(), (qint64)4000);
     QCOMPARE(d.startTime.toMSecsSinceEpoch(), (qint64)1000);
     QCOMPARE(d.endTime.toMSecsSinceEpoch(), (qint64)5000);
 }
@@ -79,7 +79,7 @@ void DatabaseTest::test_explicitStartTimes_startTimePreservedAfterClean()
     // Arrange
     std::deque<TimeDuration> d;
     d.push_back(mk(DurationType::Activity, 0, 1000));
-    d.push_back(mk(DurationType::Activity, 1050, 2000)); // will merge
+    d.push_back(mk(DurationType::Activity, 1000, 2000)); // touches exactly -> will merge
 
     // Act
     cleanDurations(&d);
@@ -88,7 +88,7 @@ void DatabaseTest::test_explicitStartTimes_startTimePreservedAfterClean()
     QCOMPARE((int)d.size(), 1);
     QCOMPARE(d.front().startTime.toMSecsSinceEpoch(), (qint64)0);
     QCOMPARE(d.front().endTime.toMSecsSinceEpoch(), (qint64)2000);
-    QCOMPARE(d.front().duration, (qint64)2000);
+    QCOMPARE(d.front().duration(), (qint64)2000);
 }
 
 void DatabaseTest::test_explicitStartTimes_mergeUpdatesAllFields()
@@ -107,7 +107,7 @@ void DatabaseTest::test_explicitStartTimes_mergeUpdatesAllFields()
     QCOMPARE((int)d.size(), 1);
     QCOMPARE(d.front().startTime.toMSecsSinceEpoch(), (qint64)500);
     QCOMPARE(d.front().endTime.toMSecsSinceEpoch(), (qint64)2000);
-    QCOMPARE(d.front().duration, (qint64)1500);
+    QCOMPARE(d.front().duration(), (qint64)1500);
 }
 
 void DatabaseTest::test_splitPreservesStartTime()
@@ -126,10 +126,10 @@ void DatabaseTest::test_splitPreservesStartTime()
     // Assert
     QCOMPARE(first.startTime.toMSecsSinceEpoch(), (qint64)1000);
     QCOMPARE(first.endTime.toMSecsSinceEpoch(), (qint64)3000);
-    QCOMPARE(first.duration, (qint64)2000);
+    QCOMPARE(first.duration(), (qint64)2000);
     QCOMPARE(second.startTime.toMSecsSinceEpoch(), (qint64)3000);
     QCOMPARE(second.endTime.toMSecsSinceEpoch(), (qint64)5000);
-    QCOMPARE(second.duration, (qint64)2000);
+    QCOMPARE(second.duration(), (qint64)2000);
 }
 
 void DatabaseTest::test_zeroDurationNotAdded()
@@ -141,7 +141,7 @@ void DatabaseTest::test_zeroDurationNotAdded()
     TimeDuration d = TimeDuration::fromPersistedRow(DurationType::Activity, now, now);
 
     // Assert
-    QCOMPARE(d.duration, (qint64)0);
+    QCOMPARE(d.duration(), (qint64)0);
 }
 
 void DatabaseTest::test_negativeDurationHandled()
@@ -154,7 +154,7 @@ void DatabaseTest::test_negativeDurationHandled()
     TimeDuration d = TimeDuration::fromPersistedRow(DurationType::Activity, start, end);
 
     // Assert - duration is negative, validation layer should reject
-    QCOMPARE(d.duration, (qint64)-2000);
+    QCOMPARE(d.duration(), (qint64)-2000);
 }
 
 void DatabaseTest::test_exactMatching_upsertReplacesById()
@@ -570,7 +570,7 @@ void DatabaseTest::test_database_update_by_id_updates_existing_row_on_start_drif
     
     auto loaded = manager.loadDurations();
     QCOMPARE(loaded.size(), (size_t)1);
-    QCOMPARE(loaded[0].duration, (qint64)10000);
+    QCOMPARE(loaded[0].duration(), (qint64)10000);
     
     // Update same segment with drifted start time and longer end.
     std::deque<TimeDuration> updated;
@@ -582,7 +582,7 @@ void DatabaseTest::test_database_update_by_id_updates_existing_row_on_start_drif
     // Should update existing row by segment_id (no duplicate).
     loaded = manager.loadDurations();
     QCOMPARE(loaded.size(), (size_t)1);
-    QCOMPARE(loaded[0].duration, driftedStart.msecsTo(end2));
+    QCOMPARE(loaded[0].duration(), driftedStart.msecsTo(end2));
     QCOMPARE(loaded[0].startTime, driftedStart);
 }
 
@@ -648,7 +648,7 @@ void DatabaseTest::test_database_load_negative_duration()
     // Duration is computed from timestamps at load — always non-negative.
     auto loaded = manager.loadDurations();
     QCOMPARE(loaded.size(), (size_t)1);
-    QVERIFY(loaded[0].duration >= 0);
+    QVERIFY(loaded[0].duration() >= 0);
 }
 
 void DatabaseTest::test_database_load_start_after_end()
@@ -730,7 +730,7 @@ void DatabaseTest::test_database_load_duration_mismatch_tolerance()
     // Duration is computed from timestamps.
     auto loaded = manager.loadDurations();
     QCOMPARE(loaded.size(), (size_t)1);
-    QCOMPARE(loaded[0].duration, (qint64)1000);
+    QCOMPARE(loaded[0].duration(), (qint64)1000);
 }
 
 void DatabaseTest::test_database_timezone_roundtrip()
@@ -990,7 +990,7 @@ void DatabaseTest::test_database_load_200ms_mismatch_increments_repaired_and_use
     auto loaded = manager.loadDurations();
     QCOMPARE(loaded.repaired, 0);
     QCOMPARE(loaded.size(), static_cast<size_t>(1));
-    QCOMPARE(loaded[0].duration, static_cast<qint64>(1000));
+    QCOMPARE(loaded[0].duration(), static_cast<qint64>(1000));
 }
 
 void DatabaseTest::test_database_millisecond_precision()
@@ -1018,7 +1018,7 @@ void DatabaseTest::test_database_millisecond_precision()
     QCOMPARE(loaded.size(), (size_t)1);
     // Milliseconds should be preserved
     QCOMPARE(loaded[0].startTime.time().msec(), 123);
-    QCOMPARE(loaded[0].duration, (qint64)4567);
+    QCOMPARE(loaded[0].duration(), (qint64)4567);
 }
 
 void DatabaseTest::test_database_schema_validation_fresh_database()

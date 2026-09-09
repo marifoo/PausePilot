@@ -214,9 +214,12 @@ void HistoryEditSession::refreshOngoing(TimeTracker& timer)
     if (stillSameOngoing) {
         // Advance the end time from the engine snapshot while preserving any
         // type edit the user may have made to the pending ongoing segment.
-        TimeDuration updated = cur.value();
-        updated.endTime = fresh->endTime;
-        updated.duration = updated.startTime.msecsTo(updated.endTime);
+        // D7 (R03-002): take the whole validated snapshot from the engine
+        // (its duration is always consistent with its own endpoints) rather
+        // than poking endTime on the pending copy and re-deriving duration
+        // by hand.
+        TimeDuration updated = fresh.value();
+        updated.type = cur->type;
         pendingTimelines_[0] = Timeline(pendingTimelines_[0].completed(), updated);
     } else if (!fresh.has_value() && cur.has_value()) {
         // Engine has no valid ongoing (e.g. cross-midnight after a deferred

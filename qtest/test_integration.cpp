@@ -353,8 +353,9 @@ void IntegrationTest::test_integration_duplicate_prevention()
     durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
     
     QVERIFY(manager.updateDurationsById(durations).ok());
+    // D7 (R03-002): duration is now derived from the endpoints, so moving
+    // endTime is all that's needed -- no separate repair assignment.
     durations.front().endTime = end.addSecs(10);
-    durations.front().duration = durations.front().startTime.msecsTo(durations.front().endTime);
     QVERIFY(manager.updateDurationsById(durations).ok());
     
     auto loaded = manager.loadDurations();
@@ -1065,8 +1066,8 @@ void IntegrationTest::test_bootCredit_suppressed_by_legacy_cross_midnight_row_on
 
     qint64 totalActivity = 0;
     for (const auto& d : tracker.sessionState_dbg().durations)
-        if (d.type == DurationType::Activity && d.duration >= 25000)
-            totalActivity += d.duration;
+        if (d.type == DurationType::Activity && d.duration() >= 25000)
+            totalActivity += d.duration();
     QVERIFY2(totalActivity < 29000,
              "Boot time must not be added when a legacy cross-midnight row already "
              "overlaps today, even though it did not start today");
@@ -1320,7 +1321,7 @@ void IntegrationTest::test_A3_exit_anyway_leaves_checkpoint_untouched_for_recove
     auto loaded = db3.loadDurations();
     QCOMPARE(loaded.size(), static_cast<size_t>(1));
     QCOMPARE(loaded[0].segment_id.toString(), checkpointSegmentId.toString());
-    QCOMPARE(loaded[0].duration, static_cast<qint64>(20000));
+    QCOMPARE(loaded[0].duration(), static_cast<qint64>(20000));
 }
 
 // A4 (R05-001): end-to-end proof that a checkpoint-discard failure is

@@ -32,7 +32,7 @@ qint64 sumDurations(const std::deque<TimeDuration>& d, DurationType type)
 {
     qint64 total = 0;
     for (const auto& t : d) {
-        if (t.type == type) total += t.duration;
+        if (t.type == type) total += t.duration();
     }
     return total;
 }

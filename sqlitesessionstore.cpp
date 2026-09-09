@@ -637,7 +637,7 @@ BackupResult SqliteSessionStore::createBackup(const std::deque<TimeDuration>& du
 
         for (const auto& d : durations) {
             out << "Type: " << (d.type == DurationType::Activity ? "Activity" : "Pause") << " | ";
-            out << "Duration: " << d.duration << "ms | ";
+            out << "Duration: " << d.duration() << "ms | ";
             out << "Start Date: " << d.startTime.toUTC().date().toString(Qt::ISODate) << " | ";
             out << "Start Time: " << d.startTime.toUTC().time().toString("HH:mm:ss.zzz") << " | ";
             out << "End Date: " << d.endTime.toUTC().date().toString(Qt::ISODate) << " | ";

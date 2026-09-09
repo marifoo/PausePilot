@@ -112,9 +112,13 @@ enum class DurationCreateError {
 struct TimeDuration {
     SegmentId segment_id;
     DurationType type;
-    qint64 duration;
     QDateTime startTime;
     QDateTime endTime;
+
+    // D7 (R03-002): duration is derived from the endpoints rather than stored,
+    // so it can never disagree with startTime/endTime -- there is no separate
+    // field for a caller to forget to repair after moving an endpoint.
+    qint64 duration() const { return startTime.msecsTo(endTime); }
 
     static SegmentId createSegmentId() { return SegmentId::mint(); }
 
@@ -145,7 +149,7 @@ private:
     // Called only by the static factories (fromPersistedRow, fromLiveSession, create).
     explicit TimeDuration(DurationType type, QDateTime start, QDateTime end, SegmentId segmentId = SegmentId{})
         : segment_id(segmentId.isEmpty() ? SegmentId::mint() : std::move(segmentId)),
-          type(type), duration(start.msecsTo(end)), startTime(start), endTime(end) {
+          type(type), startTime(start), endTime(end) {
     }
 
 };

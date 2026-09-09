@@ -1,7 +1,6 @@
 #include "timeline.h"
 #include "logger.h"
 #include <algorithm>
-#include <cmath>
 #include <cassert>
 
 Timeline::Timeline()
@@ -41,10 +40,10 @@ qint64 Timeline::activeMsec() const
     qint64 sum = 0;
     for (const auto& d : completed_) {
         if (d.type == DurationType::Activity)
-            sum += d.duration;
+            sum += d.duration();
     }
     if (ongoing_.has_value() && ongoing_->type == DurationType::Activity)
-        sum += ongoing_->duration;
+        sum += ongoing_->duration();
     return sum;
 }
 
@@ -53,10 +52,10 @@ qint64 Timeline::pauseMsec() const
     qint64 sum = 0;
     for (const auto& d : completed_) {
         if (d.type == DurationType::Pause)
-            sum += d.duration;
+            sum += d.duration();
     }
     if (ongoing_.has_value() && ongoing_->type == DurationType::Pause)
-        sum += ongoing_->duration;
+        sum += ongoing_->duration();
     return sum;
 }
 
@@ -114,122 +113,82 @@ void Timeline::assertSameDayInvariant() const
 }
 #endif
 
-// Thresholds used by the classifyMerge() branches 1, 6, 7.
-// Two segments whose endpoints differ by less than this are treated as the
-// same segment (clock jitter / duplicate saves).
-static constexpr qint64 kNearDuplicateMs = 50;
-// A gap this small between same-type segments is noise — merge them.
-static constexpr qint64 kSmallGapMergeMs = 500;
-// A negative gap (overlap) this small is likely a rounding artefact — merge.
-static constexpr qint64 kSlightOverlapMs = 100;
-
 /**
  * Classify how prev and curr should be merged during normalization.
  *
- * Returns MergeDecision::None when the types differ or when no branch applies.
- * Branches 1–7 are mutually exclusive and order-dependent: each is checked
- * only after the earlier ones have been ruled out.
+ * Precondition (established by normalized()'s sort): prev.startTime <=
+ * curr.startTime. Given that, a same-type pair has exactly two reachable
+ * outcomes (D7/R04-001, plan section 2's resolved policy):
  *
- *  1. Near-duplicate  → EraseIt          (same endpoint within 50 ms)
- *  2. curr supersedes → Supersede        (curr starts earlier and is at least as long)
- *  3. curr joins prev → ExtendPrevStart  (curr starts earlier but ends before prev)
- *  4. Forward overlap → ExtendPrevEnd    (curr starts inside prev and extends past it)
- *  5. Subset          → EraseIt          (curr is contained within prev)
- *  6. Small gap       → ExtendPrevEnd    (gap < 500 ms, same calendar day)
- *  7. Slight overlap  → ExtendPrevEnd    (overlap < 100 ms, same calendar day)
+ *  - They overlap or touch exactly (curr starts at or before prev's end) →
+ *    Merge: extend prev to cover curr, then erase curr.
+ *  - There is a positive gap between them, however small → None: a positive
+ *    gap is never filled.
+ *
+ * curr.startTime landing on a different local date than prev.startTime also
+ * forces None, even on exact touch (gap == 0): each input row is already
+ * individually same-day valid, so curr's own end can only be bounded by
+ * *its* day's boundary, not prev's -- merging them could otherwise splice a
+ * cross-midnight interval past release builds' disabled same-day assertion
+ * (assertSameDayInvariant() is #ifndef QT_NO_DEBUG only). This is the one
+ * case where two same-type, individually-valid rows can still touch exactly
+ * at a boundary (a segment legally ending exactly at the next local
+ * midnight, isCrossMidnight's half-open exception) without being mergeable.
  */
 MergeDecision classifyMerge(const TimeDuration& prev, const TimeDuration& curr)
 {
     if (prev.type != curr.type)
         return MergeDecision::None;
+    if (prev.startTime.toLocalTime().date() != curr.startTime.toLocalTime().date())
+        return MergeDecision::None;
 
-    const qint64 prev_start = prev.startTime.toMSecsSinceEpoch();
-    const qint64 curr_start = curr.startTime.toMSecsSinceEpoch();
     const qint64 prev_end   = prev.endTime.toMSecsSinceEpoch();
-    const qint64 curr_end   = curr.endTime.toMSecsSinceEpoch();
+    const qint64 curr_start = curr.startTime.toMSecsSinceEpoch();
 
-    const qint64 diff_end  = prev_end - curr_end;
-    const qint64 diff_dur  = prev.duration - curr.duration;
-    const qint64 gap       = curr_start - prev_end;
-
-    // Branch 1: near-duplicate
-    if (std::abs(diff_end) < kNearDuplicateMs && std::abs(diff_dur) < kNearDuplicateMs)
-        return MergeDecision::EraseIt;
-
-    // Branch 2: curr supersedes prev (starts earlier, at least as long)
-    if (curr_start < prev_start && prev_end <= curr_end)
-        return MergeDecision::Supersede;
-
-    // Branch 3: curr starts before prev but ends inside it — join
-    if (curr_start < prev_start && curr_end < prev_end && curr_start < prev_end)
-        return MergeDecision::ExtendPrevStart;
-
-    // Branch 4: overlap extending forward
-    if (prev_start <= curr_start && curr_start <= prev_end && prev_end <= curr_end)
-        return MergeDecision::ExtendPrevEnd;
-
-    // Branch 5: curr is a subset of prev
-    if (prev_start <= curr_start && curr_start <= prev_end && curr_end <= prev_end)
-        return MergeDecision::EraseIt;
-
-    const bool crossesDay = isCrossMidnight(prev.endTime, curr.startTime);
-
-    // Branch 6: small gap between same-day segments
-    if (!crossesDay && gap >= 0 && gap < kSmallGapMergeMs)
-        return MergeDecision::ExtendPrevEnd;
-
-    // Branch 7: slight overlap between same-day segments
-    if (!crossesDay && gap < 0 && std::abs(gap) < kSlightOverlapMs)
-        return MergeDecision::ExtendPrevEnd;
-
-    return MergeDecision::None;
+    if (curr_start > prev_end)
+        return MergeDecision::None;
+    return MergeDecision::Merge;
 }
 
 /// Apply a merge decision to the (prev, curr) iterator pair.
-/// Erases curr when the decision is not None, returning the new valid iterator.
+/// On Merge, extends prev to cover curr (keeping prev's identity) and erases
+/// curr; returns the resulting valid iterator.
 static std::deque<TimeDuration>::iterator applyMergeDecision(
     MergeDecision decision,
     std::deque<TimeDuration>::iterator prevIt,
     std::deque<TimeDuration>::iterator it,
     std::deque<TimeDuration>& durations)
 {
-    const qint64 curr_end = it->endTime.toMSecsSinceEpoch();
-
-    switch (decision) {
-    case MergeDecision::EraseIt:
-        return durations.erase(it);
-
-    case MergeDecision::Supersede:
-        prevIt->segment_id = it->segment_id;
-        prevIt->startTime  = it->startTime;
-        prevIt->endTime    = it->endTime;
-        prevIt->duration   = it->duration;
-        return durations.erase(it);
-
-    case MergeDecision::ExtendPrevStart: {
-        const qint64 prev_end = prevIt->endTime.toMSecsSinceEpoch();
-        prevIt->segment_id = it->segment_id;
-        prevIt->startTime  = it->startTime;
-        prevIt->duration   = prev_end - it->startTime.toMSecsSinceEpoch();
-        return durations.erase(it);
-    }
-
-    case MergeDecision::ExtendPrevEnd:
-        prevIt->endTime  = it->endTime;
-        prevIt->duration = prevIt->startTime.msecsTo(prevIt->endTime);
-        return durations.erase(it);
-
-    case MergeDecision::None:
+    if (decision == MergeDecision::None)
         return std::next(it);
-    }
-    Q_UNREACHABLE();
+
+    if (prevIt->endTime < it->endTime)
+        prevIt->endTime = it->endTime;
+    return durations.erase(it);
 }
 
 Timeline Timeline::normalized() const
 {
-    // Precondition: input entries are sorted by (start, end) — the sort below
-    // establishes this.  classifyMerge() branches 1–7 are mutually exclusive and
-    // order-dependent: each is checked only after earlier ones have been ruled out.
+    // Precondition: input entries are sorted by (start, type, segment_id) —
+    // the sort below establishes this. classifyMerge() relies on ascending
+    // start order.
+    //
+    // Two entries that share a start and a type always overlap (both have a
+    // positive duration, so curr_start == prev_start < prev_end) and
+    // therefore always merge -- for that pair, segment_id is the tie-break
+    // that decides which identity survives (D7/R04-002, plan section 2:
+    // "equal starts use the lexicographically smaller ID" -- stated
+    // unconditionally, not only for byte-identical/exact-duplicate rows, so
+    // the tie-break must win regardless of which of the two has the later
+    // end).
+    //
+    // Two entries that share a start but differ in type never merge
+    // (classifyMerge() checks type first), so their relative order has no
+    // survivor to decide -- but it must still be deterministic, or two
+    // byte-identical inputs (e.g. an Activity/Pause pair at the same
+    // instant) would come out in a different order every run depending on
+    // each row's randomly-minted id. type is ordered ahead of segment_id
+    // for exactly this pair, so id is never consulted for it.
     std::deque<TimeDuration> durations = completed_;
 
     if (durations.size() < 2) {
@@ -237,13 +196,9 @@ Timeline Timeline::normalized() const
     }
 
     std::sort(durations.begin(), durations.end(), [](const TimeDuration& a, const TimeDuration& b) {
-        const qint64 a_start = a.startTime.toMSecsSinceEpoch();
-        const qint64 b_start = b.startTime.toMSecsSinceEpoch();
-        if (a_start != b_start) return a_start < b_start;
-        const qint64 a_end = a.endTime.toMSecsSinceEpoch();
-        const qint64 b_end = b.endTime.toMSecsSinceEpoch();
-        if (a_end != b_end) return a_end < b_end;
-        return a.duration < b.duration;
+        if (a.startTime != b.startTime) return a.startTime < b.startTime;
+        if (a.type != b.type) return a.type < b.type;
+        return a.segment_id.toString() < b.segment_id.toString();
     });
 
     for (auto it = durations.begin() + 1; it != durations.end(); ) {

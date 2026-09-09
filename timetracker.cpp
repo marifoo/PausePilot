@@ -1077,7 +1077,7 @@ bool TimeTracker::maybeReanchorCheckpoint(const TimeDuration& seg)
 {
     if (checkpoint_interval_msec_ == 0 || mode_ != Mode::Activity || seg.type != DurationType::Activity)
         return true;
-    if (seg.duration <= 0 || !seg.startTime.isValid() || !seg.endTime.isValid())
+    if (seg.duration() <= 0 || !seg.startTime.isValid() || !seg.endTime.isValid())
         return true;
     if (dialog_open_ || is_locked_)
         return true;
@@ -1524,7 +1524,7 @@ void TimeTracker::addDuration(DurationType type,
         }
         return;
     }
-    const qint64 dur = seg->duration;
+    const qint64 dur = seg->duration();
     session_.durations.emplace_back(std::move(*seg));
     Logger::Log(QString("[DEBUG] Added duration (%1, %2 ms)")
         .arg(type == DurationType::Activity ? "Activity" : "Pause")

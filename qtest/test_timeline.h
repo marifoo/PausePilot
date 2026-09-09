@@ -36,18 +36,40 @@ private slots:
 
     // Test S: normalized() cross-day merge guard
     void test_S_normalized_no_cross_day_merge();
-    void test_S_normalized_same_day_still_merges();
+    void test_S_normalized_overlap_still_merges();
+    void test_S_normalized_exactTouchAtMidnight_notMerged();
 
-    // 9.3: classifyMerge targeted cases
+    // 9.3: classifyMerge — only two outcomes are reachable once input is sorted
+    // by start (D7/R04-001): None (differing types, or a positive gap) and
+    // Merge (overlap or exact touch).
     void test_classifyMerge_none_for_different_types();
-    void test_classifyMerge_branch1_near_duplicate();
-    void test_classifyMerge_branch2_supersede();
-    void test_classifyMerge_branch3_extend_prev_start();
-    void test_classifyMerge_branch4_forward_overlap();
-    void test_classifyMerge_branch5_subset();
-    void test_classifyMerge_branch6_small_gap();
-    void test_classifyMerge_branch7_slight_overlap();
-    void test_classifyMerge_none_large_gap();
+    void test_classifyMerge_merge_for_overlap();
+    void test_classifyMerge_merge_for_subset();
+    void test_classifyMerge_merge_for_exact_touch();
+    void test_classifyMerge_none_for_any_positive_gap();
+
+    // D7 (R04-003, plan section 2): same-type merges only on overlap or exact
+    // touch; a positive gap, of any size, is never filled. Data-driven table.
+    void test_normalized_overlapOrTouch_vs_positiveGap_data();
+    void test_normalized_overlapOrTouch_vs_positiveGap();
+
+    // D7 (R04-002): earliest-starting ID survives; equal starts break
+    // lexicographically. Exact-duplicate survival is therefore deterministic.
+    void test_normalized_earliestStart_idSurvives();
+    void test_normalized_equalStart_lexicographicIdSurvives();
+    void test_normalized_exactDuplicate_permutations_sameSurvivor();
+
+    // D7 (R04-003): Timeline never merges differing types and never guesses —
+    // a cross-type overlap survives normalization unmerged; rejecting it is
+    // DayValidity/SessionStore/HistoryEditSession's job (already covered by
+    // their own tests), not Timeline's.
+    void test_normalized_crossTypeOverlap_neverMerged_flaggedByDayValidity();
+
+    // D7: normalizedWithRemovedIds() reports exactly the merged-away IDs.
+    void test_normalizedWithRemovedIds_reportsRemoved();
+
+    // D7: normalizing an already-normalized timeline is a no-op (idempotence).
+    void test_normalized_isIdempotent();
 };
 
 #endif // TEST_TIMELINE_H

@@ -62,17 +62,26 @@ struct NormalizedResult {
 
 /// Merge decision returned by classifyMerge().
 /// Describes what normalized() should do with the (prev, curr) pair.
+///
+/// D7 (R04-001/R04-003, plan section 2): normalized() sorts its input by
+/// (start, type, segment_id) before scanning adjacent pairs, so
+/// prev.startTime <= curr.startTime always holds here. That leaves exactly
+/// two reachable outcomes for a same-type pair: they overlap or touch
+/// exactly (merge, extending prev to cover curr and keeping prev's
+/// identity), or they don't (a positive gap, however small, is never
+/// filled -- plan section 2's resolved policy). The earlier four/seven-way
+/// branch table collapsed into this because every one of its
+/// "extend"/"erase" outcomes was just this one merge computed differently,
+/// and its curr-starts-earlier branches were unreachable once the sort
+/// guarantees ascending start order.
 enum class MergeDecision {
-    None,            ///< No merge — types differ or no branch matched; advance iterator.
-    EraseIt,         ///< Erase curr (prev is unchanged, e.g. near-duplicate or subset).
-    Supersede,       ///< curr supersedes prev: copy curr's fields to prev, then erase curr.
-    ExtendPrevStart, ///< Extend prev's start to curr's start (join), then erase curr.
-    ExtendPrevEnd    ///< Extend prev's end to curr's end (overlap/gap merge), then erase curr.
+    None, ///< No merge — types differ, or curr starts after a positive gap.
+    Merge ///< prev and curr overlap or touch exactly — extend prev to cover curr, erase curr.
 };
 
 /// Classify how prev and curr should be merged in normalized().
-/// Only meaningful when prev.type == curr.type; returns None for differing types.
-/// Branches are order-dependent and mirror the normalized() merge loop exactly.
+/// Only meaningful when prev.type == curr.type and prev.startTime <= curr.startTime
+/// (normalized()'s sort guarantees the latter); returns None for differing types.
 MergeDecision classifyMerge(const TimeDuration& prev, const TimeDuration& curr);
 
 #endif // TIMELINE_H
