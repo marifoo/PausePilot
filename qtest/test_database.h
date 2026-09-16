@@ -229,6 +229,30 @@ private slots:
     // boundary deterministically (row just inside kept, just outside pruned)
     // without depending on the real day the suite happens to run.
     void test_D2_retentionCutoff_uses_injected_clock_exact_boundary();
+
+    // D8 (R06-001): the compatibility gate must validate the complete
+    // durations schema (types/PK/AUTOINCREMENT/NOT NULL/DEFAULT/CHECK/
+    // unique-identity/index predicates), not only column names.
+    void test_D8_schema_outdated_same_name_missing_autoincrement();
+    void test_D8_schema_outdated_same_name_missing_check_constraint();
+    void test_D8_schema_outdated_partial_unique_segment_id_index();
+    void test_D8_schema_ready_repairs_mismatched_idx_start_utc_predicate();
+
+    // D8 (R06-002): startup must prove actual write/journal capability, not
+    // just readable file permission bits.
+    void test_D8_schema_inaccessible_when_directory_not_writable();
+
+    // D8 (R06-003): the app_settings rebuild must be one atomic operation --
+    // preserving the old table and clean-shutdown marker on DROP, CREATE, or
+    // COMMIT failure, and never reporting Ready after a failed repair.
+    void test_D8_settingsRebuild_dropFailure_preservesTableAndMarker();
+    void test_D8_settingsRebuild_createFailure_preservesTableAndMarker();
+    void test_D8_settingsRebuild_commitFailure_preservesTableAndMarker();
+
+    // D8 (R06-004): centralized connection PRAGMA configuration must be
+    // re-applied on every reconnect, not only at construction.
+    void test_D8_ensureOpen_reconnect_restores_synchronous_normal();
+    void test_D8_createBackup_reopen_restores_synchronous_normal();
 };
 
 #endif // TEST_DATABASE_H

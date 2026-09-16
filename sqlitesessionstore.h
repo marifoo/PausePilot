@@ -159,6 +159,26 @@ private:
     // callers must branch on CommitOutcome::committed, not on
     // errorMessage.isEmpty(). Self-resetting once consumed.
     bool force_commit_close_before_dbg_ = false;
+    // D8 (R06-003) test seams: make ensureSettingsTable()'s rebuild fail at
+    // the DROP or CREATE step (independent of commitOrRollback's own COMMIT
+    // seam above), so tests can prove the old table/marker survive each
+    // possible failure point of the rebuild. Self-resetting once consumed.
+    // D11 scope: these two, like every other force_*_dbg_ seam above, belong
+    // to the debug-probe surface D11 strips once production callers no
+    // longer need direct SQL/state seeding.
+    bool force_settings_drop_failure_dbg_ = false;
+    bool force_settings_create_failure_dbg_ = false;
+    // D8 review round 2 (finding 7ii): a rebuild-scoped alternative to
+    // arming the shared force_commit_failure_dbg_ directly. That flag is
+    // consumed by whichever commitOrRollback() call is reached FIRST on the
+    // store instance; arming it before checkSchemaOnStartup() happens to
+    // land on ensureSettingsTable()'s rebuild today only because nothing
+    // else commits earlier on that path. This seam is consumed only at
+    // ensureSettingsTable()'s own commit site (it arms
+    // force_commit_failure_dbg_ there, immediately before that call), so the
+    // test stays correct even if an earlier commit is ever added to the
+    // path. D11 scope, same as the two seams above.
+    bool force_settings_commit_failure_dbg_ = false;
 #endif
 
     // Guards all public entry points so that no two operations can interleave.
@@ -172,6 +192,19 @@ private:
     bool ensureOpen();
     bool ensureSchema();
     void closeConnection();
+    // D8 (R06-004): applies every connection-local PRAGMA the store requires
+    // for the lifetime of a native SQLite connection (currently just
+    // synchronous=NORMAL) and reads it back to verify it took effect. Shared
+    // by construction, ensureOpen()'s transparent reconnect, and
+    // createBackup()'s reopen, so a reconnect can no longer silently drift
+    // from the configured policy. Failures are logged and non-fatal,
+    // matching this PRAGMA's pre-existing best-effort treatment.
+    bool applyConnectionPragmas();
+    // D8 (R06-002): proves the database directory can host SQLite's rollback
+    // journal, not just that the file's own permission bits are writable.
+    // Runs a real write (guaranteed to dirty a page, unlike an UPDATE that
+    // may match zero rows) inside a transaction that is always rolled back.
+    bool verifyWriteCapability();
     bool ensureSettingsTable();
     // A4 (R05-001): the discard_intents table is a durable tombstone recording
     // that the engine has deliberately rejected a segment. Additive DDL, safe
@@ -332,6 +365,25 @@ public:
     /// (which fakes a non-empty message) cannot. Only consumed once control
     /// reaches commitOrRollback(); same arming caveat as the seams above.
     void setForceCommitCloseBefore_dbg(bool v) { force_commit_close_before_dbg_ = v; }
+
+    /// Forces the next ensureSettingsTable() rebuild's DROP TABLE step to
+    /// fail, without touching the real connection. Self-resetting once
+    /// consumed (only if a rebuild is actually reached). D11 scope: part of
+    /// the debug-probe surface to strip once production callers no longer
+    /// need direct SQL/state seeding.
+    void setForceSettingsDropFailure_dbg(bool v) { force_settings_drop_failure_dbg_ = v; }
+
+    /// Forces the next ensureSettingsTable() rebuild's CREATE TABLE step to
+    /// fail (DROP succeeds), without touching the real connection.
+    /// Self-resetting once consumed. D11 scope, same as the setter above.
+    void setForceSettingsCreateFailure_dbg(bool v) { force_settings_create_failure_dbg_ = v; }
+
+    /// Forces ensureSettingsTable()'s own rebuild COMMIT to fail, scoped to
+    /// that call site specifically (unlike setForceCommitFailure_dbg(),
+    /// which is consumed by whichever commitOrRollback() call is reached
+    /// first). Self-resetting once consumed (only if a rebuild is actually
+    /// reached). D11 scope, same as the two setters above.
+    void setForceSettingsCommitFailure_dbg(bool v) { force_settings_commit_failure_dbg_ = v; }
 #endif // QT_NO_DEBUG
 
 };

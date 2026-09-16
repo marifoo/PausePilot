@@ -2,6 +2,9 @@
 #include "fakesessionstore.h"
 #include <QtTest>
 #include <algorithm>
+#ifdef Q_OS_UNIX
+#include <unistd.h>
+#endif
 
 using TestCommon::createSettingsFile;
 using TestCommon::mk;
@@ -4798,4 +4801,451 @@ void DatabaseTest::test_D2_retentionCutoff_uses_injected_clock_exact_boundary()
     auto loaded = store.loadDurations();
     QCOMPARE(static_cast<int>(loaded.size()), 1);
     QCOMPARE(loaded[0].endTime.toUTC(), keptEnd);
+}
+
+// ============================================================================
+// D8 (R06-001..004): schema semantic validation, write-capability probing,
+// atomic app_settings rebuild, and centralized reconnect PRAGMA policy.
+// ============================================================================
+
+void DatabaseTest::test_D8_schema_outdated_same_name_missing_autoincrement()
+{
+    // Same column NAMES as canonical, but "id" lacks AUTOINCREMENT: row ids
+    // can be reused after DELETE, breaking the stable-per-row identity that
+    // recovery's UPDATE/DELETE WHERE id=:id relies on.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+
+    const QString connName = "d8_no_autoincrement";
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", connName);
+        db.setDatabaseName(db_path_);
+        QVERIFY(db.open());
+        QSqlQuery q(db);
+        QVERIFY(q.exec(
+            "CREATE TABLE durations ("
+            "id INTEGER PRIMARY KEY,"
+            "segment_id TEXT NOT NULL CHECK(length(segment_id) > 0),"
+            "type INTEGER NOT NULL,"
+            "start_utc TEXT NOT NULL,"
+            "end_utc TEXT NOT NULL,"
+            "is_finalized INTEGER NOT NULL DEFAULT 0,"
+            "UNIQUE(segment_id)"
+            ")"
+        ));
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(connName);
+
+    SqliteSessionStore manager(settings);
+    QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Outdated);
+}
+
+void DatabaseTest::test_D8_schema_outdated_same_name_missing_check_constraint()
+{
+    // Same column names/types, PK/AUTOINCREMENT, and the same trailing
+    // UNIQUE(segment_id) table constraint as canonical -- exactly one
+    // difference from the canonical DDL: no CHECK(length(segment_id) > 0),
+    // so an empty segment_id could be inserted directly (which
+    // SegmentId::fromString asserts against). Isolating to one difference
+    // (review round 2, finding 7i) proves the CHECK itself is what the text
+    // comparison catches, not incidentally the UNIQUE constraint's shape.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+
+    const QString connName = "d8_no_check";
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", connName);
+        db.setDatabaseName(db_path_);
+        QVERIFY(db.open());
+        QSqlQuery q(db);
+        QVERIFY(q.exec(
+            "CREATE TABLE durations ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "segment_id TEXT NOT NULL,"
+            "type INTEGER NOT NULL,"
+            "start_utc TEXT NOT NULL,"
+            "end_utc TEXT NOT NULL,"
+            "is_finalized INTEGER NOT NULL DEFAULT 0,"
+            "UNIQUE(segment_id)"
+            ")"
+        ));
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(connName);
+
+    SqliteSessionStore manager(settings);
+    QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Outdated);
+}
+
+void DatabaseTest::test_D8_schema_outdated_partial_unique_segment_id_index()
+{
+    // Same columns/types/PK/CHECK as canonical, but segment_id uniqueness is
+    // enforced only among finalized rows via a partial index instead of a
+    // table-wide UNIQUE constraint -- two unfinalized checkpoints could
+    // collide on segment_id.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+
+    const QString connName = "d8_partial_unique";
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", connName);
+        db.setDatabaseName(db_path_);
+        QVERIFY(db.open());
+        QSqlQuery q(db);
+        QVERIFY(q.exec(
+            "CREATE TABLE durations ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "segment_id TEXT NOT NULL CHECK(length(segment_id) > 0),"
+            "type INTEGER NOT NULL,"
+            "start_utc TEXT NOT NULL,"
+            "end_utc TEXT NOT NULL,"
+            "is_finalized INTEGER NOT NULL DEFAULT 0"
+            ")"
+        ));
+        QVERIFY(q.exec(
+            "CREATE UNIQUE INDEX idx_segment_id_partial ON durations(segment_id) WHERE is_finalized = 1"
+        ));
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(connName);
+
+    SqliteSessionStore manager(settings);
+    QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Outdated);
+}
+
+void DatabaseTest::test_D8_schema_ready_repairs_mismatched_idx_start_utc_predicate()
+{
+    // A same-named idx_start_utc that is NOT partial: "CREATE INDEX IF NOT
+    // EXISTS" silently no-ops on a same-named index regardless of its
+    // definition, so a wrong existing definition must be detected and
+    // rebuilt rather than left as a full (non-partial) index.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+
+    const QString connName = "d8_wrong_idx_predicate";
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", connName);
+        db.setDatabaseName(db_path_);
+        QVERIFY(db.open());
+        QSqlQuery q(db);
+        QVERIFY(q.exec(
+            "CREATE TABLE durations ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "segment_id TEXT NOT NULL CHECK(length(segment_id) > 0),"
+            "type INTEGER NOT NULL,"
+            "start_utc TEXT NOT NULL,"
+            "end_utc TEXT NOT NULL,"
+            "is_finalized INTEGER NOT NULL DEFAULT 0,"
+            "UNIQUE(segment_id)"
+            ")"
+        ));
+        QVERIFY(q.exec("CREATE INDEX idx_start_utc ON durations(start_utc)")); // no WHERE clause
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(connName);
+
+    SqliteSessionStore manager(settings);
+    QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Ready);
+
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery verify(manager.rawDb_dbg());
+    QVERIFY(verify.exec("SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_start_utc'"));
+    QVERIFY(verify.next());
+    QCOMPARE(verify.value(0).toString(),
+             QString("CREATE INDEX idx_start_utc ON durations(start_utc) WHERE is_finalized = 1"));
+    manager.closeConnection_dbg();
+}
+
+void DatabaseTest::test_D8_schema_inaccessible_when_directory_not_writable()
+{
+#ifndef Q_OS_UNIX
+    // On Windows, QFile::setPermissions() on a *directory* does not prevent
+    // file creation inside it -- there is no POSIX-style directory write bit
+    // to clear -- so this probe cannot be reproduced this way here. R06-002's
+    // native Windows ACL counterpart is still missing (see R06's open
+    // questions); this is a real portability gap, not exercised by this test.
+    QSKIP("directory-unwritable simulation via setPermissions() is Unix-specific; R06-002's native Windows ACL case is not covered here");
+#else
+    // Arrange
+    if (geteuid() == 0)
+        QSKIP("root ignores directory permission bits, so this probe cannot be reproduced under test as root");
+
+    // R06-002: a readable, file-permission-writable DB file is not proof
+    // that its containing directory can host SQLite's rollback journal.
+    // Uses AppPaths' UTIMER_DATA_DIR override (already relied on by the
+    // apptest suite) to point a real store at an isolated temp directory
+    // instead of the shared applicationDirPath() database.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    struct EnvGuard {
+        QByteArray orig;
+        bool hadOrig;
+        ~EnvGuard() {
+            if (hadOrig) qputenv("UTIMER_DATA_DIR", orig);
+            else qunsetenv("UTIMER_DATA_DIR");
+        }
+    } envGuard{ qgetenv("UTIMER_DATA_DIR"), qEnvironmentVariableIsSet("UTIMER_DATA_DIR") };
+    qputenv("UTIMER_DATA_DIR", tempDir.path().toUtf8());
+
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+
+    // Arrange: create a valid DB while the directory is still writable.
+    {
+        SqliteSessionStore seed(settings);
+        QVERIFY(seed.saveDurations({}, TransactionMode::Append));
+    }
+
+    // Make the directory (not the file) unwritable. Restored by the guard's
+    // destructor even on an early QVERIFY failure below, so QTemporaryDir
+    // can still clean itself up.
+    struct DirPermGuard {
+        QString path;
+        QFileDevice::Permissions original;
+        ~DirPermGuard() { QFile::setPermissions(path, original); }
+    } dirGuard{ tempDir.path(), QFileInfo(tempDir.path()).permissions() };
+    QVERIFY(QFile::setPermissions(tempDir.path(),
+        QFileDevice::ReadOwner | QFileDevice::ExeOwner));
+
+    // Act
+    SqliteSessionStore manager(settings);
+
+    // Assert
+    QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Inaccessible);
+#endif
+}
+
+void DatabaseTest::test_D8_settingsRebuild_dropFailure_preservesTableAndMarker()
+{
+    // R06-003: if the DROP step of the app_settings rebuild fails, the old
+    // (malformed) table and its marker row must survive untouched, and
+    // startup must not report Ready.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+
+    const QString seedConn = "d8_drop_fail_seed";
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", seedConn);
+        db.setDatabaseName(db_path_);
+        QVERIFY(db.open());
+        QSqlQuery q(db);
+        QVERIFY(q.exec(
+            "CREATE TABLE durations ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "segment_id TEXT NOT NULL CHECK(length(segment_id) > 0),"
+            "type INTEGER NOT NULL,"
+            "start_utc TEXT NOT NULL,"
+            "end_utc TEXT NOT NULL,"
+            "is_finalized INTEGER NOT NULL DEFAULT 0,"
+            "UNIQUE(segment_id)"
+            ")"
+        ));
+        // Malformed app_settings (no PK/NOT NULL) already carrying a marker.
+        QVERIFY(q.exec("CREATE TABLE app_settings (key TEXT, value TEXT)"));
+        QSqlQuery ins(db);
+        ins.prepare("INSERT INTO app_settings (key, value) VALUES ('last_clean_shutdown', :v)");
+        ins.bindValue(":v", "2025-01-01T00:00:00.000Z");
+        QVERIFY(ins.exec());
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(seedConn);
+
+    SqliteSessionStore manager(settings);
+    manager.setForceSettingsDropFailure_dbg(true);
+
+    QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Inaccessible);
+
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery verify(manager.rawDb_dbg());
+    QVERIFY(verify.exec("SELECT value FROM app_settings WHERE key = 'last_clean_shutdown'"));
+    QVERIFY(verify.next());
+    QCOMPARE(verify.value(0).toString(), QString("2025-01-01T00:00:00.000Z"));
+
+    QSqlQuery colQuery(manager.rawDb_dbg());
+    QVERIFY(colQuery.exec("PRAGMA table_info(app_settings)"));
+    bool keyIsPk = false;
+    while (colQuery.next()) {
+        if (colQuery.value(1).toString() == "key") {
+            keyIsPk = colQuery.value(5).toInt() == 1;
+        }
+    }
+    QVERIFY(!keyIsPk); // still the malformed shape -- rebuild did not commit
+    manager.closeConnection_dbg();
+
+    // A subsequent attempt without the injected failure recovers.
+    QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Ready);
+}
+
+void DatabaseTest::test_D8_settingsRebuild_createFailure_preservesTableAndMarker()
+{
+    // R06-003: if the CREATE step fails (DROP already succeeded inside the
+    // same transaction), the rollback must restore the old table and marker
+    // -- not leave the database with no app_settings table at all.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+
+    const QString seedConn = "d8_create_fail_seed";
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", seedConn);
+        db.setDatabaseName(db_path_);
+        QVERIFY(db.open());
+        QSqlQuery q(db);
+        QVERIFY(q.exec(
+            "CREATE TABLE durations ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "segment_id TEXT NOT NULL CHECK(length(segment_id) > 0),"
+            "type INTEGER NOT NULL,"
+            "start_utc TEXT NOT NULL,"
+            "end_utc TEXT NOT NULL,"
+            "is_finalized INTEGER NOT NULL DEFAULT 0,"
+            "UNIQUE(segment_id)"
+            ")"
+        ));
+        QVERIFY(q.exec("CREATE TABLE app_settings (key TEXT, value TEXT)"));
+        QSqlQuery ins(db);
+        ins.prepare("INSERT INTO app_settings (key, value) VALUES ('last_clean_shutdown', :v)");
+        ins.bindValue(":v", "2025-01-01T00:00:00.000Z");
+        QVERIFY(ins.exec());
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(seedConn);
+
+    SqliteSessionStore manager(settings);
+    manager.setForceSettingsCreateFailure_dbg(true);
+
+    QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Inaccessible);
+
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery verify(manager.rawDb_dbg());
+    QVERIFY(verify.exec("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='app_settings'"));
+    QVERIFY(verify.next());
+    QCOMPARE(verify.value(0).toInt(), 1); // table still exists (DROP was rolled back)
+
+    QSqlQuery markerQuery(manager.rawDb_dbg());
+    QVERIFY(markerQuery.exec("SELECT value FROM app_settings WHERE key = 'last_clean_shutdown'"));
+    QVERIFY(markerQuery.next());
+    QCOMPARE(markerQuery.value(0).toString(), QString("2025-01-01T00:00:00.000Z"));
+    manager.closeConnection_dbg();
+
+    QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Ready);
+}
+
+void DatabaseTest::test_D8_settingsRebuild_commitFailure_preservesTableAndMarker()
+{
+    // R06-003: if COMMIT fails after a successful DROP+CREATE, the rollback
+    // must restore the OLD table and marker, not leave the freshly-created
+    // (uncommitted) empty table in place.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+
+    const QString seedConn = "d8_commit_fail_seed";
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", seedConn);
+        db.setDatabaseName(db_path_);
+        QVERIFY(db.open());
+        QSqlQuery q(db);
+        QVERIFY(q.exec(
+            "CREATE TABLE durations ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "segment_id TEXT NOT NULL CHECK(length(segment_id) > 0),"
+            "type INTEGER NOT NULL,"
+            "start_utc TEXT NOT NULL,"
+            "end_utc TEXT NOT NULL,"
+            "is_finalized INTEGER NOT NULL DEFAULT 0,"
+            "UNIQUE(segment_id)"
+            ")"
+        ));
+        QVERIFY(q.exec("CREATE TABLE app_settings (key TEXT, value TEXT)"));
+        QSqlQuery ins(db);
+        ins.prepare("INSERT INTO app_settings (key, value) VALUES ('last_clean_shutdown', :v)");
+        ins.bindValue(":v", "2025-01-01T00:00:00.000Z");
+        QVERIFY(ins.exec());
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(seedConn);
+
+    SqliteSessionStore manager(settings);
+    // Use the rebuild-scoped seam (review round 2, finding 7ii), not the
+    // shared setForceCommitFailure_dbg(): that one is consumed by whichever
+    // commitOrRollback() call is reached FIRST on the path, which happens to
+    // be ensureSettingsTable()'s today but would silently retarget if an
+    // earlier commit were ever added to checkSchemaOnStartup()'s path.
+    manager.setForceSettingsCommitFailure_dbg(true);
+
+    QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Inaccessible);
+
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery markerQuery(manager.rawDb_dbg());
+    QVERIFY(markerQuery.exec("SELECT value FROM app_settings WHERE key = 'last_clean_shutdown'"));
+    QVERIFY(markerQuery.next());
+    QCOMPARE(markerQuery.value(0).toString(), QString("2025-01-01T00:00:00.000Z"));
+
+    QSqlQuery colQuery(manager.rawDb_dbg());
+    QVERIFY(colQuery.exec("PRAGMA table_info(app_settings)"));
+    bool keyIsPk = false;
+    while (colQuery.next()) {
+        if (colQuery.value(1).toString() == "key") {
+            keyIsPk = colQuery.value(5).toInt() == 1;
+        }
+    }
+    QVERIFY(!keyIsPk); // old malformed shape -- the rebuild's commit never landed
+    manager.closeConnection_dbg();
+
+    QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Ready);
+}
+
+void DatabaseTest::test_D8_ensureOpen_reconnect_restores_synchronous_normal()
+{
+    // R06-004: a transparent reconnect through ensureOpen() must re-apply
+    // synchronous=NORMAL -- a brand-new native connection otherwise reverts
+    // to SQLite's default (FULL) and stays there silently.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+    QVERIFY(manager.saveDurations({}, TransactionMode::Append));
+
+    manager.closeConnection_dbg();
+    QVERIFY(manager.ensureOpen_dbg());
+
+    QSqlQuery q(manager.rawDb_dbg());
+    QVERIFY(q.exec("PRAGMA synchronous"));
+    QVERIFY(q.next());
+    QCOMPARE(q.value(0).toInt(), 1); // 1 == NORMAL
+}
+
+void DatabaseTest::test_D8_createBackup_reopen_restores_synchronous_normal()
+{
+    // R06-004: createBackup()'s close-copy-reopen cycle must also leave the
+    // connection at synchronous=NORMAL via the same centralized helper.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+    QVERIFY(manager.saveDurations({}, TransactionMode::Append));
+
+    // saveDurations(Replace) triggers createBackup()'s close-copy-reopen cycle.
+    QVERIFY(manager.saveDurations({}, TransactionMode::Replace));
+
+    QSqlQuery q(manager.rawDb_dbg());
+    QVERIFY(q.exec("PRAGMA synchronous"));
+    QVERIFY(q.next());
+    QCOMPARE(q.value(0).toInt(), 1);
 }

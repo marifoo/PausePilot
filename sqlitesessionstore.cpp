@@ -48,6 +48,55 @@
 
 namespace {
 const char* kLastCleanShutdownKey = "last_clean_shutdown";
+// D8 (R06-001): the exact column/constraint body ensureSchema() creates the
+// durations table with. Shared verbatim between creation and startup
+// validation so validation compares against what creation actually does,
+// not a second hand-maintained description of it. SQLite's sqlite3EndTable()
+// stores a CREATE statement's sqlite_master.sql text as "CREATE " + type +
+// " " + the verbatim submitted text from the table-name token onward -- so
+// "IF NOT EXISTS" is never included and the prefix is normalized to exactly
+// one space. This follows from reading SQLite's source and was verified
+// empirically against SQLite 3.51.2; it is not independently confirmed on
+// every SQLite 3.x release. Given that, an existing table can be checked for
+// full semantic compatibility -- declared types, PRIMARY KEY/AUTOINCREMENT,
+// NOT NULL, DEFAULT, the nonempty-segment_id CHECK, and the UNIQUE(segment_id)
+// constraint -- with one exact-text comparison instead of separately
+// re-deriving each property from PRAGMA table_info.
+//
+// WARNING: this string is therefore a persisted wire format, not ordinary
+// source text. Every database created since c07ec71 (see below) was created
+// with these exact bytes. Reformatting it for readability -- a space after
+// each comma, one column per line, reordering columns -- is a semantic no-op
+// in SQL but changes the compared text, which would make every such existing
+// database Outdated on next startup (main.cpp then refuses to start). Any
+// real change to this schema needs an actual migration path, not a literal
+// edit here.
+//
+// Bounded exposure of this check's introduction: a database built from
+// 520f2df up to but not including c07ec71 (before the CHECK constraint was
+// added) has the right six columns, PK/AUTOINCREMENT, and UNIQUE(segment_id)
+// but no CHECK(length(segment_id) > 0) -- Ready before D8, Outdated after,
+// with no repair mode per plan v2 section 2. No *tagged* release is affected:
+// `git ls-tree -r` finds no sqlite/database file at any of v0.9..v2.0, and
+// the database first arrived in abea78e ("Adding Database and full History
+// window"), which no release tag contains -- v2.0 predates it. This says
+// nothing about untagged builds from main in that window, which could still
+// have produced such a database.
+const char* kDurationsColumnsSql =
+    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "segment_id TEXT NOT NULL CHECK(length(segment_id) > 0),"
+    "type INTEGER NOT NULL,"
+    "start_utc TEXT NOT NULL,"
+    "end_utc TEXT NOT NULL,"
+    "is_finalized INTEGER NOT NULL DEFAULT 0,"
+    "UNIQUE(segment_id)";
+// Same idea for idx_start_utc's partial predicate: an incompatible database
+// could carry an index of this name whose definition differs (not partial,
+// or a different WHERE clause). "CREATE INDEX IF NOT EXISTS" silently no-ops
+// on a same-named index regardless of its definition, so a wrong existing
+// definition must be detected and rebuilt rather than left in place.
+const char* kIdxStartUtcTail =
+    "idx_start_utc ON durations(start_utc) WHERE is_finalized = 1";
 constexpr qint64 kMinRecoverableOrphanDurationMs = 1000;
 constexpr qint64 kOrphanStaleAgeMs = 24LL * 60LL * 60LL * 1000LL;
 // A backward clock jump can make an orphan's endTime land after "now" at
@@ -113,12 +162,9 @@ SqliteSessionStore::SqliteSessionStore(const Settings& settings, QObject *parent
         }
     } else {
         // Existing DB: no DDL until checkSchemaOnStartup() validates the schema.
-        // Set PRAGMA synchronous=NORMAL so writes on this connection behave
+        // Apply the connection PRAGMAs so writes on this connection behave
         // correctly even before the schema is confirmed.
-        QSqlQuery syncQuery(db);
-        if (!syncQuery.exec("PRAGMA synchronous=NORMAL")) {
-            Logger::Log("[DB] Warning: Failed to set synchronous=NORMAL: " + syncQuery.lastError().text());
-        }
+        applyConnectionPragmas();
     }
 }
 
@@ -166,7 +212,73 @@ bool SqliteSessionStore::ensureOpen()
         db.close();
         return false;
     }
+    // D8 (R06-004): a transparent reconnect creates a brand-new native
+    // connection, which loses every session-level PRAGMA the earlier
+    // connection had set (e.g. synchronous=NORMAL reverts to SQLite's
+    // default of FULL). Re-apply the centralized connection policy so a
+    // reconnect is genuinely transparent to callers. Best-effort: failure
+    // is logged inside applyConnectionPragmas() but does not fail the
+    // reconnect itself, matching this PRAGMA's pre-existing non-fatal
+    // treatment.
+    applyConnectionPragmas();
     return true;
+}
+
+/**
+ * D8 (R06-004): centralizes the connection-local PRAGMAs required for the
+ * lifetime of any native SQLite connection this store opens. Called from
+ * construction, ensureOpen()'s transparent reconnect, and createBackup()'s
+ * reopen, so all three apply (and verify) the same policy instead of each
+ * keeping its own copy -- which is how the reconnect path came to silently
+ * omit synchronous=NORMAL in the first place.
+ */
+bool SqliteSessionStore::applyConnectionPragmas()
+{
+    QSqlQuery setQuery(db);
+    if (!setQuery.exec("PRAGMA synchronous=NORMAL")) {
+        Logger::Log("[DB] Warning: Failed to set synchronous=NORMAL: " + setQuery.lastError().text());
+        return false;
+    }
+    QSqlQuery verifyQuery(db);
+    if (!verifyQuery.exec("PRAGMA synchronous") || !verifyQuery.next()) {
+        Logger::Log("[DB] Warning: Failed to verify synchronous mode: " + verifyQuery.lastError().text());
+        return false;
+    }
+    if (verifyQuery.value(0).toInt() != 1) { // 1 == NORMAL
+        Logger::Log(QString("[DB] Warning: synchronous mode is %1 after applying NORMAL")
+            .arg(verifyQuery.value(0).toInt()));
+        return false;
+    }
+    return true;
+}
+
+/**
+ * D8 (R06-002): proves the database directory can actually host SQLite's
+ * rollback journal, not just that the database file's own permission bits
+ * are writable (isWritable() checks above only ever prove the latter). Runs
+ * a real write against app_settings -- an INSERT OR REPLACE always dirties a
+ * page and forces journal creation, unlike an UPDATE that could match zero
+ * rows and dirty nothing -- inside a transaction that is unconditionally
+ * rolled back, so success or failure leaves no visible effect. Requires
+ * app_settings to already exist; callers run this after schema setup.
+ */
+bool SqliteSessionStore::verifyWriteCapability()
+{
+    if (!db.transaction()) {
+        Logger::Log("[DB] verifyWriteCapability: failed to begin probe transaction: " + db.lastError().text());
+        return false;
+    }
+    QSqlQuery probe(db);
+    probe.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('__write_probe__', '1')");
+    bool ok = probe.exec();
+    if (!ok) {
+        Logger::Log("[DB] verifyWriteCapability: probe write failed: " + probe.lastError().text());
+    }
+    if (!db.rollback()) {
+        Logger::Log("[DB] verifyWriteCapability: probe rollback failed: " + db.lastError().text());
+        ok = false;
+    }
+    return ok;
 }
 
 /**
@@ -187,15 +299,7 @@ bool SqliteSessionStore::ensureSchema()
 {
     QSqlQuery query_new(db);
     bool schemaOk = query_new.exec(
-        "CREATE TABLE IF NOT EXISTS durations ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        "segment_id TEXT NOT NULL CHECK(length(segment_id) > 0),"
-        "type INTEGER NOT NULL,"
-        "start_utc TEXT NOT NULL,"
-        "end_utc TEXT NOT NULL,"
-        "is_finalized INTEGER NOT NULL DEFAULT 0,"
-        "UNIQUE(segment_id)"
-        ")"
+        QString("CREATE TABLE IF NOT EXISTS durations (%1)").arg(kDurationsColumnsSql)
     );
 
     if (!schemaOk) {
@@ -220,18 +324,15 @@ bool SqliteSessionStore::ensureSchema()
     }
 
     QSqlQuery startUtcIndexQuery(db);
-    if (!startUtcIndexQuery.exec("CREATE INDEX IF NOT EXISTS idx_start_utc ON durations(start_utc) WHERE is_finalized = 1")) {
+    if (!startUtcIndexQuery.exec(QString("CREATE INDEX IF NOT EXISTS %1").arg(kIdxStartUtcTail))) {
         Logger::Log("[DB] Warning: Failed to create start_utc index: " + startUtcIndexQuery.lastError().text());
     }
 
-    // PRAGMA synchronous=NORMAL: in rollback journal mode this provides good
-    // crash safety (only OS crash / power loss can lose data, not an app crash).
+    // synchronous=NORMAL: in rollback journal mode this provides good crash
+    // safety (only OS crash / power loss can lose data, not an app crash).
     // The shutdown path (flushToDisc) temporarily promotes to FULL for the
     // final durable write before the process exits.
-    QSqlQuery syncQuery(db);
-    if (!syncQuery.exec("PRAGMA synchronous=NORMAL")) {
-        Logger::Log("[DB] Warning: Failed to set synchronous=NORMAL: " + syncQuery.lastError().text());
-    }
+    applyConnectionPragmas();
 
     return true;
 }
@@ -290,14 +391,30 @@ void SqliteSessionStore::checkSegmentIdUniqueness()
  *
  * Returns:
  *   Created      — DB file did not previously exist; fresh schema was built.
- *   Ready        — existing DB has the expected schema; safe to use.
- *   Outdated     — column set or UNIQUE(segment_id) constraint does not match;
- *                  caller must refuse to start.
- *   Inaccessible — DB file could not be opened.
+ *   Ready        — existing DB has the expected schema and demonstrated
+ *                  write/journal capability; safe to use.
+ *   Outdated     — the existing durations table's column names do not match,
+ *                  OR (D8/R06-001) its full DDL text differs from the exact
+ *                  canonical body ensureSchema() creates -- covering every
+ *                  declared type, the id PRIMARY KEY/AUTOINCREMENT identity,
+ *                  every NOT NULL/DEFAULT/CHECK constraint, and the
+ *                  UNIQUE(segment_id) constraint in one comparison, not just
+ *                  the column-name set. Caller must refuse to start.
+ *   Inaccessible — the DB file could not be opened or read, OR (D8/R06-003)
+ *                  the app_settings table is malformed and its atomic
+ *                  DROP+CREATE+COMMIT repair failed (the old table/marker are
+ *                  preserved, but startup still refuses rather than reporting
+ *                  a stronger state than the marker/recovery subsystem can
+ *                  deliver), OR (D8/R06-002) a real write inside a rolled-
+ *                  back transaction failed, proving the database directory
+ *                  cannot host SQLite's rollback journal even though the
+ *                  file's own permission bits are writable.
  *
- * idx_start_utc: if the partial index is absent it is (re)created rather than
+ * idx_start_utc: if the partial index is absent, or present with the wrong
+ * definition (D8/R06-001: a same-named index of any shape silently survives
+ * "CREATE INDEX IF NOT EXISTS"), it is dropped/(re)created rather than
  * returning Outdated, because the index can be rebuilt without data loss and
- * its absence does not indicate schema incompatibility.
+ * its absence/mismatch does not indicate schema incompatibility.
  */
 SchemaStatus SqliteSessionStore::checkSchemaOnStartup()
 {
@@ -320,6 +437,16 @@ SchemaStatus SqliteSessionStore::checkSchemaOnStartup()
         // Fresh DB: ensureSchema() already ran in the constructor.
         performRetentionCleanup();
         pruneOldBackups();
+        // D8 (R06-002): prove the directory can actually host a rollback
+        // journal, not just that ensureSchema()'s CREATE TABLE succeeded.
+        // Not literally the first write on this path -- performRetentionCleanup()
+        // and pruneOldBackups() above already wrote -- but those failures are
+        // non-fatal by design, so this is the first write whose failure is
+        // gating: the point where an unwritable directory gets reported.
+        if (!verifyWriteCapability()) {
+            Logger::Log("[DB] checkSchemaOnStartup: write-capability probe failed on fresh DB");
+            return SchemaStatus::Inaccessible;
+        }
         return SchemaStatus::Created;
     }
 
@@ -350,42 +477,67 @@ SchemaStatus SqliteSessionStore::checkSchemaOnStartup()
         }
     }
 
-    // Validate UNIQUE(segment_id) constraint via PRAGMA index_list + index_info.
+    // D8 (R06-001): the column-name set alone does not prove declared types,
+    // PRIMARY KEY/AUTOINCREMENT identity, NOT NULL/DEFAULT/CHECK
+    // constraints, or that segment_id's uniqueness is enforced by an inline
+    // (non-partial) constraint rather than some other shape. See
+    // kDurationsColumnsSql's comment above for exactly how/why SQLite's
+    // sqlite_master.sql storage of a CREATE TABLE statement's text makes one
+    // exact-text comparison against the same canonical body ensureSchema()
+    // creates catch every one of those semantic properties at once, without
+    // re-deriving each individually.
     {
-        QSqlQuery idxList(db);
-        if (!idxList.exec("PRAGMA index_list(durations)")) {
-            Logger::Log("[DB] checkSchemaOnStartup: PRAGMA index_list failed: " + idxList.lastError().text());
+        QSqlQuery sqlQuery(db);
+        if (!sqlQuery.exec("SELECT sql FROM sqlite_master WHERE type='table' AND name='durations'")) {
+            Logger::Log("[DB] checkSchemaOnStartup: sqlite_master lookup failed: " + sqlQuery.lastError().text());
             return SchemaStatus::Inaccessible;
         }
-
-        // Collect all unique indexes and check their covered columns.
-        bool foundUniqueSegmentId = false;
-        while (idxList.next()) {
-            // Columns: seq, name, unique, origin, partial
-            const QString idxName   = idxList.value(1).toString();
-            const int isUnique      = idxList.value(2).toInt();
-            if (!isUnique) {
-                continue;
-            }
-            // Check if this unique index covers exactly segment_id.
-            QSqlQuery idxInfo(db);
-            idxInfo.prepare("PRAGMA index_info(" + idxName + ")");
-            if (!idxInfo.exec()) {
-                continue;
-            }
-            QStringList coveredCols;
-            while (idxInfo.next()) {
-                coveredCols.append(idxInfo.value(2).toString()); // column 2 = name
-            }
-            if (coveredCols.size() == 1 && coveredCols[0] == "segment_id") {
-                foundUniqueSegmentId = true;
-                break;
-            }
-        }
-
-        if (!foundUniqueSegmentId) {
-            Logger::Log("[DB] checkSchemaOnStartup: missing UNIQUE(segment_id) constraint");
+        const QString expectedSql = QString("CREATE TABLE durations (%1)").arg(kDurationsColumnsSql);
+        const QString actualSql = sqlQuery.next() ? sqlQuery.value(0).toString() : QString();
+        if (actualSql != expectedSql) {
+            Logger::Log(QString("[DB] checkSchemaOnStartup: durations table definition mismatch. "
+                                "Expected \"%1\", found \"%2\"")
+                .arg(expectedSql, actualSql));
             return SchemaStatus::Outdated;
+        }
+    }
+
+    // D8 review round 2: a separate PRAGMA index_list/index_info pass that
+    // rejected a missing/partial UNIQUE(segment_id) used to live here. It was
+    // strictly dominated by the full-text comparison above -- that check only
+    // ever admits a durations table whose DDL IS the canonical body, which
+    // contains "UNIQUE(segment_id)" as a table constraint, guaranteeing a
+    // unique, non-partial sqlite_autoindex -- so the block could never
+    // actually return Outdated. Mutation testing (deleting it) left the
+    // suite green, including test_schema_status_outdated_missing_unique_constraint,
+    // which the text check alone already covers. Removed rather than kept as
+    // "defense in depth": an unreachable branch is the kind of split-across-
+    // several-partial-checks obscurity R06-001 was filed against.
+
+    // D8 (R06-001): idx_start_utc's predicate is part of what later queries
+    // (hasEntriesForDate, orphan overlap probing) rely on. "CREATE INDEX IF
+    // NOT EXISTS" below silently no-ops on a same-named index regardless of
+    // its definition, so a wrong existing definition (missing/different
+    // WHERE clause, non-partial) must be dropped here first so it gets
+    // rebuilt correctly -- this is a repair, not an incompatibility, so it
+    // does not return Outdated.
+    {
+        QSqlQuery sqlQuery(db);
+        if (sqlQuery.exec("SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_start_utc'")
+            && sqlQuery.next()) {
+            const QString expectedSql = QString("CREATE INDEX %1").arg(kIdxStartUtcTail);
+            const QString actualSql = sqlQuery.value(0).toString();
+            // Finalize this statement before running DDL on the same
+            // connection -- SQLite refuses schema-modifying statements
+            // ("database table is locked") while another statement on the
+            // same connection still has an open cursor.
+            sqlQuery.finish();
+            if (actualSql != expectedSql) {
+                QSqlQuery dropQuery(db);
+                if (!dropQuery.exec("DROP INDEX idx_start_utc")) {
+                    Logger::Log("[DB] Warning: Failed to drop mismatched idx_start_utc: " + dropQuery.lastError().text());
+                }
+            }
         }
     }
 
@@ -393,9 +545,16 @@ SchemaStatus SqliteSessionStore::checkSchemaOnStartup()
     // These objects are absent when upgrading from older app versions that
     // pre-date app_settings / idx_segment_id.  Running them here (after
     // validation passes) ensures no DDL touches an incompatible DB.
+    //
+    // D8 (R06-003): unlike the other additive objects, app_settings is not
+    // optional metadata -- it holds the clean-shutdown marker that recovery
+    // reads before reconciling orphans. Reporting Ready after a failed
+    // ensure/repair would advertise a stronger startup state than the
+    // marker/recovery subsystem can actually deliver, so a failure here
+    // refuses startup instead of continuing.
     if (!ensureSettingsTable()) {
-        Logger::Log("[DB] Warning: Failed to ensure app_settings table on existing DB");
-        // Non-fatal: log and continue; the durations table is the critical one.
+        Logger::Log("[DB] checkSchemaOnStartup: failed to ensure app_settings table on existing DB — refusing to start");
+        return SchemaStatus::Inaccessible;
     }
 
     if (!ensureDiscardIntentsTable()) {
@@ -410,11 +569,11 @@ SchemaStatus SqliteSessionStore::checkSchemaOnStartup()
         }
     }
 
-    // Recreate idx_start_utc if absent (the partial index is safe to rebuild;
-    // its absence does not indicate schema incompatibility).
+    // (Re)create idx_start_utc if absent or just dropped above for having a
+    // wrong definition. Safe to rebuild without data loss either way.
     {
         QSqlQuery startUtcIndexQuery(db);
-        if (!startUtcIndexQuery.exec("CREATE INDEX IF NOT EXISTS idx_start_utc ON durations(start_utc) WHERE is_finalized = 1")) {
+        if (!startUtcIndexQuery.exec(QString("CREATE INDEX IF NOT EXISTS %1").arg(kIdxStartUtcTail))) {
             Logger::Log("[DB] Warning: Failed to recreate idx_start_utc: " + startUtcIndexQuery.lastError().text());
             // Non-fatal: log and continue.
         }
@@ -424,6 +583,16 @@ SchemaStatus SqliteSessionStore::checkSchemaOnStartup()
     // confirmed valid.  Failures are non-fatal (logged, but do not abort startup).
     performRetentionCleanup();
     pruneOldBackups();
+
+    // D8 (R06-002): prove the directory can actually host a rollback
+    // journal before declaring the DB Ready for use. Not literally the
+    // first write here either -- performRetentionCleanup()/pruneOldBackups()
+    // just above already wrote -- but the first one whose failure gates
+    // startup instead of being logged and ignored.
+    if (!verifyWriteCapability()) {
+        Logger::Log("[DB] checkSchemaOnStartup: write-capability probe failed");
+        return SchemaStatus::Inaccessible;
+    }
 
     return SchemaStatus::Ready;
 }
@@ -523,19 +692,60 @@ bool SqliteSessionStore::ensureSettingsTable()
     Logger::Log(QString("[DB] app_settings has unexpected columns/constraints {%1} - rebuilding")
         .arg(QStringList(foundColumns.values()).join(", ")));
 
+    // D8 (R06-003): DROP+CREATE must be one atomic operation. The old table
+    // (and any clean-shutdown marker row in it) is only ever given up once
+    // the whole rebuild -- DROP, CREATE, and COMMIT -- has succeeded; any
+    // failure along the way rolls back, leaving the old table and marker
+    // exactly as they were rather than losing the table (DROP succeeded,
+    // CREATE/COMMIT did not) or the marker (DROP unconditionally discarded
+    // it regardless of what followed).
+    if (!db.transaction()) {
+        Logger::Log("[DB] Error starting app_settings rebuild transaction: " + db.lastError().text());
+        return false;
+    }
+
     QSqlQuery dropQuery(db);
+#ifndef QT_NO_DEBUG
+    if (force_settings_drop_failure_dbg_) {
+        force_settings_drop_failure_dbg_ = false;
+        Logger::Log("[DB] Error dropping malformed app_settings table: injected failure (test)");
+        db.rollback();
+        return false;
+    }
+#endif
     if (!dropQuery.exec("DROP TABLE app_settings")) {
         Logger::Log("[DB] Error dropping malformed app_settings table: " + dropQuery.lastError().text());
+        db.rollback();
         return false;
     }
 
     QSqlQuery recreateQuery(db);
+#ifndef QT_NO_DEBUG
+    if (force_settings_create_failure_dbg_) {
+        force_settings_create_failure_dbg_ = false;
+        Logger::Log("[DB] Error re-creating app_settings table: injected failure (test)");
+        db.rollback();
+        return false;
+    }
+#endif
     if (!recreateQuery.exec(kCreateSql)) {
         Logger::Log("[DB] Error re-creating app_settings table: " + recreateQuery.lastError().text());
+        db.rollback();
         return false;
     }
 
-    return true;
+#ifndef QT_NO_DEBUG
+    // D8 review round 2 (finding 7ii): scope the injected commit failure to
+    // THIS call site by arming the shared seam right here, rather than
+    // requiring the test to arm force_commit_failure_dbg_ itself and hope no
+    // earlier commit on the path consumes it first.
+    if (force_settings_commit_failure_dbg_) {
+        force_settings_commit_failure_dbg_ = false;
+        force_commit_failure_dbg_ = true;
+    }
+#endif
+    const CommitOutcome outcome = commitOrRollback("ensureSettingsTable rebuild");
+    return outcome.committed;
 }
 
 // A4 (R05-001): discard_intents is a durable tombstone table. A row here
@@ -651,15 +861,15 @@ BackupResult SqliteSessionStore::createBackup(const std::deque<TimeDuration>& du
     }
 
     // Reopen database if it was open before.
-    // Re-apply PRAGMA synchronous=NORMAL since reopening creates a fresh connection
-    // that loses all session-level PRAGMAs set in ensureSchema().
+    // D8 (R06-004): re-apply the centralized connection PRAGMAs since
+    // reopening creates a fresh connection that loses all session-level
+    // PRAGMAs set earlier.
     if (wasOpen) {
         if (!db.open()) {
             Logger::Log("[DB] CRITICAL: Failed to reopen database after backup: " + db.lastError().text());
             return BackupResult::ReopenFailed;
         }
-        QSqlQuery pragmaQuery(db);
-        pragmaQuery.exec("PRAGMA synchronous=NORMAL");
+        applyConnectionPragmas();
     }
 
     return success ? BackupResult::Success : BackupResult::BackupFailed;
