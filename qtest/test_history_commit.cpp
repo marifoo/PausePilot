@@ -58,8 +58,7 @@ void HistoryCommitTest::test_accept_stays_open_on_db_failure()
 
     // A10: an editless OK is a no-op, so make a genuine edit (toggle the DB row's
     // type) to exercise the save path that must fail under the exclusive lock.
-    dialog.editSession_dbg().pendingTimelines()[0] =
-        dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(1, DurationType::Activity);
+    dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(1, DurationType::Activity));
 
     // Hold an exclusive DB transaction to force replaceAll to fail.
     const QString lockConnName = "commit_test_db_lock";

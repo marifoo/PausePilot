@@ -31,13 +31,17 @@ class HistoryEditSession {
 public:
     /**
      * A single "page" groups time entries for one calendar date.
-     *   durations:     same-day editable rows (backed by pendingTimelines_[i]).
+     *   label:         page heading without the entry count (see pageTitle()).
      *   crossMidnight: cross-midnight rows starting on this day (display-only).
      *   continuations: cross-midnight rows ending on this day (display-only).
+     *
+     * Same-day editable rows are NOT duplicated here: they live only in
+     * pendingTimelines_[i] (and, for the build-time snapshot, originalTimelines_[i]).
+     * D9 (R14-002): a page has one representation of its rows; the ongoing
+     * segment in particular is never stored both here and separately.
      */
     struct Page {
-        QString title;
-        std::deque<TimeDuration> durations;         ///< same-day canonical (editable) rows
+        QString label;
         std::deque<TimeDuration> crossMidnight;     ///< display-only canonical cross-midnight
         std::deque<TimeDuration> continuations;     ///< display-only spillover on end date
         bool isCurrent;
@@ -127,19 +131,98 @@ public:
     /// not a user edit).
     bool hasEdits() const;
 
+    /// True iff pages_[pageIdx]'s completed rows or ongoing type differ from
+    /// the build-time snapshot -- the same edit-relevant fields hasEdits()
+    /// checks, scoped to one page. D9 (R14-002): this is the single dirty
+    /// predicate for both hasEdits() and the dialog's per-page highlight, so
+    /// no second, divergent comparison exists outside the model.
+    bool pageModified(size_t pageIdx) const;
+
+    /// Number of editable rows on pages_[pageIdx]: pending completed rows plus
+    /// the pending ongoing row if present. Excludes the page's display-only
+    /// cross-midnight/continuation rows (see displayCount()). D9 review
+    /// (finding 5): shared by the dialog's row-count and highlight rendering
+    /// and by its split-target validation, so a future row class cannot make
+    /// the table and the title/context-menu bounds drift apart again.
+    int editableRowCount(size_t pageIdx) const;
+
+    /// Current display row count for pages_[pageIdx]: editableRowCount() plus
+    /// this page's display-only cross-midnight/continuation rows. Recomputed
+    /// from pendingTimelines_ so it reflects a split or toggle immediately
+    /// (D9/R14-002) instead of the count baked into the page title at build time.
+    int displayCount(size_t pageIdx) const;
+
+    /// pages_[pageIdx].label plus the current displayCount(), e.g.
+    /// "Today (entries: 3)".
+    QString pageTitle(size_t pageIdx) const;
+
     // ---- Editing operations (pure; return new session state via mutation) ----
 
-    /// Replaces the Timeline for page[pageIdx] (used by type-toggle checkboxes).
+    /// Replaces the Timeline for page[pageIdx] wholesale. D9 review: no
+    /// production caller uses this anymore -- setCompletedType(),
+    /// setOngoingType(), and splitRow() cover the dialog's actual operations
+    /// directly. Kept as a general primitive for test setup.
     void setPageTimeline(size_t pageIdx, const Timeline& tl);
 
+    /// Changes the type of the completed row identified by `segId` on
+    /// page[pageIdx]. Returns false (no-op) if the id is not found on that page.
+    bool setCompletedType(size_t pageIdx, const SegmentId& segId, DurationType type);
+
+    /// Changes the type of the pending ongoing row on page[pageIdx]. Returns
+    /// false (no-op) if that page has no pending ongoing row.
+    bool setOngoingType(size_t pageIdx, DurationType type);
+
+    /// Why splitRow() refused a split. D9 review (finding 3): the minimum-
+    /// length rules used to live in HistoryDialog with no typed result;
+    /// splitRow() now enforces them itself and reports which rule failed so
+    /// the dialog can render the corresponding message without re-deriving
+    /// the reason.
+    enum class SplitError {
+        None,          ///< split applied; only meaningful when applied == true
+        OutOfRange,    ///< pageIdx/rowIdx was not a valid completed row
+        TooShort,      ///< the source row is below the minimum splittable length
+        HalfTooShort,  ///< `at` would leave one half below the minimum half length
+    };
+
+    /// Outcome of splitRow(): the two resulting segment ids when applied, or
+    /// !applied with `error` set to the reason.
+    struct SplitOutcome {
+        bool applied = false;
+        SplitError error = SplitError::None;
+        SegmentId firstId;
+        SegmentId secondId;
+    };
+
+    /// Whether a split of pages_[pageIdx]'s completed row `rowIdx` is
+    /// possible at all, independent of where the split point falls: OutOfRange
+    /// (bad index) or TooShort (the row itself is below
+    /// kMinimumSplitDurationSeconds, types.h). splitRow() checks this first;
+    /// D9 review (finding 1, round 3): HistoryDialog also calls it before
+    /// constructing SplitDialog, so a too-short row never opens the modal in
+    /// the first place, and the two callers share one predicate.
+    SplitError splitRejection(size_t pageIdx, size_t rowIdx) const;
+
+    /// Splits pages_[pageIdx]'s completed row `rowIdx` into two at `at`, with
+    /// `firstType`/`secondType` for the resulting halves. Registers the new
+    /// second half's origin as the same as the original row's (D9: split's
+    /// origin bookkeeping is owned here, not by HistoryDialog).
+    ///
+    /// Enforces splitRejection() first, then its own per-half rule: `at` must
+    /// leave at least kMinSplitHalfMsec (historyeditsession.cpp) on each
+    /// side -- this one depends on `at`, so splitRejection() cannot check it.
+    /// Rejects with the corresponding SplitError instead of silently
+    /// clamping/adjusting.
+    SplitOutcome splitRow(size_t pageIdx, size_t rowIdx, const QDateTime& at,
+                           DurationType firstType, DurationType secondType);
+
     /// Registers the second half's segment_id with the same origin as the first
-    /// half after a split. Called by HistoryDialog::onSplitRow().
+    /// half after a split. Called by splitRow(); also exposed for tests that
+    /// exercise origin registration directly.
     void registerSplitChild(const QString& childSegmentId, bool wasMemory);
 
     // ---- Accessors ----
     const std::vector<Page>& pages() const { return pages_; }
     const std::vector<Timeline>& pendingTimelines() const { return pendingTimelines_; }
-    std::vector<Timeline>& pendingTimelines() { return pendingTimelines_; }
     const QHash<QString, bool>& originIsMemory() const { return originIsMemory_; }
     size_t pageCount() const { return pages_.size(); }
 

@@ -62,10 +62,9 @@ HistoryDialog::HistoryDialog(TimeTracker& timetracker, const Settings& settings,
 
         const auto& pages = session_.pages();
         for (size_t i = 0; i < pages.size(); ++i) {
-            Logger::Log(QString("[HISTORY] Page %1 - Title: %2, Entries: %3, IsCurrent: %4")
+            Logger::Log(QString("[HISTORY] Page %1 - Title: %2, IsCurrent: %3")
                 .arg(i)
-                .arg(pages[i].title)
-                .arg(pages[i].durations.size())
+                .arg(session_.pageTitle(i))
                 .arg(pages[i].isCurrent));
         }
     }
@@ -391,7 +390,7 @@ void HistoryDialog::updateTotalsLabel(uint idx)
 
     QString totalsStr = QString("\nActivity: ") + convMSecToTimeStr(totalActivity)
                       + QString("  Pause: ") + convMSecToTimeStr(totalPause);
-    pageLabel_->setText(pages[idx].title + totalsStr);
+    pageLabel_->setText(session_.pageTitle(idx) + totalsStr);
 }
 
 void HistoryDialog::addReadOnlyRow(QTableWidget* table, int row, const TimeDuration& d, const QString& suffix)
@@ -410,6 +409,20 @@ void HistoryDialog::addReadOnlyRow(QTableWidget* table, int row, const TimeDurat
     table->setItem(row, 0, typeItem);
     table->setItem(row, 1, startEndItem);
     table->setItem(row, 2, durationItem);
+}
+
+void HistoryDialog::applyDirtyHighlight(uint idx)
+{
+    const bool modified = session_.pageModified(idx);
+    const QBrush highlight(QColor(180, 216, 228, 255));
+    const QBrush clear; // default (invalid) brush: falls back to the item's normal background
+    const int editableRows = session_.editableRowCount(idx);
+    for (int row = 0; row < editableRows; ++row) {
+        for (int col = 0; col < table_->columnCount(); ++col) {
+            if (table_->item(row, col))
+                table_->item(row, col)->setBackground(modified ? highlight : clear);
+        }
+    }
 }
 
 /**
@@ -447,36 +460,11 @@ void HistoryDialog::updateTable(uint idx)
     const bool hasOngoing = pendingTimelines[idx].ongoing().has_value();
     const auto& crossMidnight = pages[idx].crossMidnight;
     const auto& conts = pages[idx].continuations;
-    int rowCount = static_cast<int>(comp.size());
-    if (hasOngoing) ++rowCount;
-    rowCount += static_cast<int>(crossMidnight.size());
-    rowCount += static_cast<int>(conts.size());
-    table_->setRowCount(rowCount);
+    // D9 review (finding 5): route through the model's own row-count formula
+    // instead of recomputing the same sum here (and again in showContextMenu()).
+    table_->setRowCount(session_.displayCount(idx));
 
     updateTotalsLabel(idx);
-
-    // Determine if this page has been modified (compare completed portion only)
-    const auto& originalDurations = pages[idx].durations;
-    // For page 0, original durations includes the ongoing row at the end; compare only completed
-    size_t originalCompletedSize = originalDurations.size();
-    if (idx == 0 && pendingTimelines[0].ongoing().has_value()) {
-        originalCompletedSize = originalDurations.size() > 0 ? originalDurations.size() - 1 : 0;
-    }
-    bool pageModified = false;
-    if (comp.size() != originalCompletedSize) {
-        pageModified = true;
-    } else {
-        for (size_t i = 0; i < comp.size(); ++i) {
-            const auto& pending  = comp[i];
-            const auto& original = originalDurations[i];
-            if (pending.type != original.type ||
-                pending.startTime != original.startTime ||
-                pending.endTime != original.endTime) {
-                pageModified = true;
-                break;
-            }
-        }
-    }
 
     // Populate completed rows
     for (int row = 0; row < static_cast<int>(comp.size()); ++row) {
@@ -499,36 +487,24 @@ void HistoryDialog::updateTable(uint idx)
         connect(box, &QCheckBox::stateChanged, this, [this, capturedPageIdx = idx, segId](int state) {
             if (capturedPageIdx != pageIndex_)
                 return;
-            auto& pendingTimelines = session_.pendingTimelines();
-            const auto& comp = pendingTimelines[capturedPageIdx].completed();
-            auto it = std::find_if(comp.begin(), comp.end(),
-                [&segId](const TimeDuration& td) { return td.segment_id == segId; });
-            if (it == comp.end()) {
+            const DurationType newType = (state == Qt::Checked) ? DurationType::Activity : DurationType::Pause;
+            if (!session_.setCompletedType(capturedPageIdx, segId, newType)) {
                 Logger::Log(QString("[WARNING] Checkbox callback: segment_id not found"));
                 return;
             }
-            const size_t currentRow = static_cast<size_t>(std::distance(comp.begin(), it));
-            DurationType newType = (state == Qt::Checked) ? DurationType::Activity : DurationType::Pause;
-            pendingTimelines[capturedPageIdx] =
-                pendingTimelines[capturedPageIdx].withSegmentType(currentRow, newType);
-            const int displayRow = static_cast<int>(currentRow);
-            QString ts = newType == DurationType::Activity ? "Activity  " : "Pause  ";
+            const auto& comp = session_.pendingTimelines()[capturedPageIdx].completed();
+            auto it = std::find_if(comp.begin(), comp.end(),
+                [&segId](const TimeDuration& td) { return td.segment_id == segId; });
+            if (it == comp.end())
+                return;
+            const int displayRow = static_cast<int>(std::distance(comp.begin(), it));
+            const QString ts = newType == DurationType::Activity ? "Activity  " : "Pause  ";
             if (table_->item(displayRow, 0)) {
                 table_->item(displayRow, 0)->setText(ts);
                 updateTotalsLabel(capturedPageIdx);
-                for (int col = 0; col < table_->columnCount(); ++col) {
-                    if (table_->item(displayRow, col))
-                        table_->item(displayRow, col)->setBackground(QColor(180, 216, 228, 255));
-                }
+                applyDirtyHighlight(capturedPageIdx);
             }
         });
-
-        if (pageModified) {
-            for (int col = 0; col < table_->columnCount(); ++col) {
-                if (table_->item(row, col))
-                    table_->item(row, col)->setBackground(QColor(180, 216, 228, 255));
-            }
-        }
     }
 
     // Populate ongoing row if present
@@ -552,20 +528,24 @@ void HistoryDialog::updateTable(uint idx)
 
         connect(box, &QCheckBox::stateChanged, this, [this, capturedPageIdx = idx, displayRow = row](int state) {
             if (capturedPageIdx != pageIndex_) return;
-            auto& pendingTimelines = session_.pendingTimelines();
-            if (!pendingTimelines[capturedPageIdx].ongoing().has_value()) return;
-            DurationType newType = (state == Qt::Checked) ? DurationType::Activity : DurationType::Pause;
-            auto ongoing = pendingTimelines[capturedPageIdx].ongoing().value();
-            ongoing.type = newType;
-            pendingTimelines[capturedPageIdx] =
-                Timeline(pendingTimelines[capturedPageIdx].completed(), ongoing);
+            const DurationType newType = (state == Qt::Checked) ? DurationType::Activity : DurationType::Pause;
+            if (!session_.setOngoingType(capturedPageIdx, newType))
+                return;
             const QString ts = newType == DurationType::Activity ? "Activity  " : "Pause  ";
             if (table_->item(displayRow, 0)) {
                 table_->item(displayRow, 0)->setText(ts);
                 updateTotalsLabel(capturedPageIdx);
+                // D9 review (finding 1): the ongoing row previously received
+                // no dirty highlight at all, unlike completed rows -- the one
+                // applyDirtyHighlight() rule now covers both.
+                applyDirtyHighlight(capturedPageIdx);
             }
         });
     }
+
+    // D9 review (finding 1): apply the single dirty-highlight rule once, to
+    // every editable row, now that both the completed and ongoing rows exist.
+    applyDirtyHighlight(idx);
 
     // Populate cross-midnight canonical rows (spans midnight, display-only on start-day page)
     {
@@ -617,12 +597,11 @@ void HistoryDialog::showContextMenu(const QPoint& pos)
         return;
     }
 
-    // Don't allow split on continuation rows (display-only)
+    // Don't allow split on continuation rows (display-only). D9 review
+    // (finding 5): route through the model's own editable-row count instead
+    // of recomputing the same sum here (and again in updateTable()).
     if (pageIndex_ < session_.pageCount()) {
-        const int canonicalRows =
-            static_cast<int>(pendingTimelines[pageIndex_].completed().size())
-            + (pendingTimelines[pageIndex_].ongoing().has_value() ? 1 : 0);
-        if (row >= canonicalRows)
+        if (row >= session_.editableRowCount(pageIndex_))
             return;
     }
 
@@ -640,13 +619,33 @@ void HistoryDialog::presetSplitDialog(SplitDialog& dlg, const TimeDuration& dura
 }
 
 /**
+ * Shared tail of onSplitRow() and applySplit_dbg(): calls session_.splitRow()
+ * and, on success, rerenders via updateTable(idx). D9 review (finding 2):
+ * the minimum-length/per-half validation and the origin bookkeeping both
+ * live in HistoryEditSession::splitRow() now -- this method only applies the
+ * typed outcome and keeps the debug and production paths' rendering in sync.
+ */
+HistoryEditSession::SplitOutcome HistoryDialog::applySplitAt(uint idx, int row, const QDateTime& at,
+    DurationType firstType, DurationType secondType)
+{
+    const auto outcome = session_.splitRow(idx, static_cast<size_t>(row), at, firstType, secondType);
+    if (outcome.applied)
+        updateTable(idx);
+    return outcome;
+}
+
+/**
  * Handles the "Split" context menu action.
  *
  * Algorithm:
- * 1. Validates that the selected duration is long enough to be split (min 3s).
- * 2. Launches SplitDialog to get user input (split point and types).
- * 3. Validates the result to ensure no duration is lost or created (sum check).
- * 4. Atomically replaces the original entry with the two new entries in the deque.
+ * 1. Refuses up front (no modal) if session_.splitRejection() already knows
+ *    the row is out of range or too short (D9 review, finding 1, round 3) --
+ *    the same predicate splitRow() itself checks first, so the dialog and
+ *    the model can never classify a row differently.
+ * 2. Otherwise launches SplitDialog to get user input (split point and types).
+ * 3. Delegates the split -- and its per-half minimum-length validation -- to
+ *    session_.splitRow() via applySplitAt(), and maps its typed error to the
+ *    matching message box.
  */
 void HistoryDialog::onSplitRow()
 {
@@ -661,7 +660,7 @@ void HistoryDialog::onSplitRow()
     uint idx = static_cast<uint>(contextMenuPage_);
     contextMenuPage_ = -1;
 
-    auto& pendingTimelines = session_.pendingTimelines();
+    const auto& pendingTimelines = session_.pendingTimelines();
 
     if (idx >= pendingTimelines.size()
         || row >= static_cast<int>(pendingTimelines[idx].completed().size())) {
@@ -675,62 +674,70 @@ void HistoryDialog::onSplitRow()
         return;
     }
 
-    const auto& completed = pendingTimelines[idx].completed();
-    const TimeDuration& duration = completed[row];
-    qint64 originalDuration = duration.duration();
-    QDateTime start = duration.startTime;
-    QDateTime end = duration.endTime;
-
-    // Check if duration is long enough to split meaningfully (at least 3 seconds)
-    if (start.secsTo(end) < kMinimumSplitDurationSeconds) {
-        Logger::Log(QString("[HISTORY] Error: onSplitRow: Duration too short to split - only %1 seconds")
-            .arg(start.secsTo(end)));
+    // D9 review (finding 1, round 3): refuse before opening SplitDialog for
+    // any row splitRow() itself would reject regardless of split point --
+    // previously the modal opened with a disabled-but-live slider and fully
+    // live type radios/OK, and the user only learned the row was too short
+    // after choosing a type and pressing OK.
+    const auto rejection = session_.splitRejection(idx, static_cast<size_t>(row));
+    if (rejection == HistoryEditSession::SplitError::TooShort) {
+        Logger::Log(QString("[HISTORY] Error: onSplitRow: duration too short to split - page: %1, row: %2")
+            .arg(idx).arg(row));
+#ifndef QT_NO_DEBUG
+        if (!debugSkipSplitMessages_)
+#endif
         QMessageBox::information(this, "Split Duration",
             "This duration is too short to split meaningfully (minimum 3 seconds required).");
         return;
     }
+    if (rejection == HistoryEditSession::SplitError::OutOfRange) {
+        Logger::Log(QString("[HISTORY] Error: onSplitRow: split rejected - page: %1, row: %2")
+            .arg(idx).arg(row));
+        return;
+    }
 
-    // Show split dialog; preset type based on source row.
+    const auto& completed = pendingTimelines[idx].completed();
+    const TimeDuration& duration = completed[row];
+    const QDateTime start = duration.startTime;
+    const QDateTime end = duration.endTime;
+
+#ifndef QT_NO_DEBUG
+    ++debugSplitDialogConstructedCount_;
+#endif
     SplitDialog dlg(start, end, this);
     presetSplitDialog(dlg, duration);
-    if (dlg.exec() == QDialog::Accepted) {
-        QDateTime splitTime = dlg.getSplitTime();
-        qint64 firstDuration = start.msecsTo(splitTime);
-        qint64 secondDuration = splitTime.msecsTo(end);
+    if (dlg.exec() != QDialog::Accepted)
+        return;
 
-        // Validate split preserves total duration
-        if (firstDuration + secondDuration != originalDuration) {
-            Logger::Log(QString("[HISTORY] Warning: Split duration mismatch - original: %1ms, split sum: %2ms, adjusting")
-                .arg(originalDuration).arg(firstDuration + secondDuration));
-            secondDuration = originalDuration - firstDuration;
-        }
+    const auto outcome = applySplitAt(idx, row, dlg.getSplitTime(),
+        dlg.getFirstSegmentType(), dlg.getSecondSegmentType());
 
-        // Validate split results - ensure both segments have at least 1 second
-        if (firstDuration < 1000 || secondDuration < 1000) {
-            Logger::Log(QString("[HISTORY] Error: onSplitRow: Split results too small - first: %1ms, second: %2ms")
-                .arg(firstDuration).arg(secondDuration));
-            QMessageBox::warning(this, "Split Duration",
-                "Invalid split: both segments must be at least 1 second long.");
-            return;
-        }
-
-        DurationType firstType = dlg.getFirstSegmentType();
-        DurationType secondType = dlg.getSecondSegmentType();
-
-        // Capture the original segment_id before the split.
-        const QString origId = completed[row].segment_id.toString();
-        const bool wasMemory = session_.originIsMemory().value(origId, true);
-        const size_t prevSize = completed.size();
-
-        pendingTimelines[idx] = pendingTimelines[idx].withSplit(
-            static_cast<size_t>(row), dlg.getSplitTime(), firstType, secondType);
-
-        // Register the second-half's new segment_id with the same origin as the first.
-        const auto& newComp = pendingTimelines[idx].completed();
-        if (newComp.size() > prevSize && row + 1 < static_cast<int>(newComp.size()))
-            session_.registerSplitChild(newComp[row + 1].segment_id.toString(), wasMemory);
-
-        updateTable(idx);
+    switch (outcome.error) {
+    case HistoryEditSession::SplitError::None:
+        break;
+    case HistoryEditSession::SplitError::TooShort:
+        // Defensive: already refused above before the dialog was shown.
+        Logger::Log(QString("[HISTORY] Error: onSplitRow: duration too short to split - page: %1, row: %2")
+            .arg(idx).arg(row));
+#ifndef QT_NO_DEBUG
+        if (!debugSkipSplitMessages_)
+#endif
+        QMessageBox::information(this, "Split Duration",
+            "This duration is too short to split meaningfully (minimum 3 seconds required).");
+        break;
+    case HistoryEditSession::SplitError::HalfTooShort:
+        Logger::Log(QString("[HISTORY] Error: onSplitRow: split results too small - page: %1, row: %2")
+            .arg(idx).arg(row));
+#ifndef QT_NO_DEBUG
+        if (!debugSkipSplitMessages_)
+#endif
+        QMessageBox::warning(this, "Split Duration",
+            "Invalid split: both segments must be at least 1 second long.");
+        break;
+    case HistoryEditSession::SplitError::OutOfRange:
+        Logger::Log(QString("[HISTORY] Error: onSplitRow: split failed - page: %1, row: %2")
+            .arg(idx).arg(row));
+        break;
     }
 }
 
@@ -738,13 +745,14 @@ void HistoryDialog::onSplitRow()
 /**
  * Applies a split without showing SplitDialog, for use in tests that run under
  * the offscreen QPA plugin (where exec() triggers propagateSizeHints() warnings).
- * Splits at the midpoint of the row, same logic as onSplitRow() after dialog acceptance.
+ * Splits at the midpoint of the row and shares onSplitRow()'s applySplitAt()
+ * tail, so the debug path cannot silently skip the production rerender.
  */
 void HistoryDialog::applySplit_dbg(int row, int page, DurationType firstType, DurationType secondType)
 {
     if (page < 0) return;
     uint idx = static_cast<uint>(page);
-    auto& pendingTimelines = session_.pendingTimelines();
+    const auto& pendingTimelines = session_.pendingTimelines();
     if (idx >= pendingTimelines.size()
         || row < 0
         || row >= static_cast<int>(pendingTimelines[idx].completed().size()))
@@ -757,16 +765,7 @@ void HistoryDialog::applySplit_dbg(int row, int page, DurationType firstType, Du
     // Split at midpoint (same default as SplitDialog).
     const QDateTime splitTime = start.addSecs(start.secsTo(end) / 2);
 
-    const QString origId = completed[row].segment_id.toString();
-    const bool wasMemory = session_.originIsMemory().value(origId, true);
-    const size_t prevSize = completed.size();
-
-    pendingTimelines[idx] = pendingTimelines[idx].withSplit(
-        static_cast<size_t>(row), splitTime, firstType, secondType);
-
-    const auto& newComp = pendingTimelines[idx].completed();
-    if (newComp.size() > prevSize && row + 1 < static_cast<int>(newComp.size()))
-        session_.registerSplitChild(newComp[row + 1].segment_id.toString(), wasMemory);
+    applySplitAt(idx, row, splitTime, firstType, secondType);
 }
 
 /**

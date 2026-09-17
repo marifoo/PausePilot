@@ -100,6 +100,39 @@ private slots:
     // written -- the History boundary rejecting an invalid interval before
     // HistoryDialog could call replaceAll().
     void test_D2_payload_flags_reversed_interval_created_by_edit();
+
+    // D9 (R14-002): split/type-change/ongoing-toggle operations, dynamic
+    // display count, and per-page dirty state are owned by HistoryEditSession.
+    void test_D9_displayCount_reflects_split_immediately();
+    void test_D9_pageTitle_reflects_dynamic_count();
+    void test_D9_splitRow_registers_origin_and_returns_ids();
+    void test_D9_splitRow_out_of_range_reports_not_applied();
+    void test_D9_setCompletedType_updates_type_and_marks_page_modified();
+    void test_D9_setCompletedType_unknown_id_returns_false();
+    void test_D9_setOngoingType_updates_type_and_marks_page_modified();
+    void test_D9_setOngoingType_no_ongoing_returns_false();
+    void test_D9_pageModified_false_before_any_edit();
+    void test_D9_pageModified_scoped_to_single_page();
+    void test_D9_page_has_one_ongoing_representation();
+
+    // D9 review (finding 3): splitRow() itself enforces the minimum-length
+    // rules with a typed reason -- these pin the exact boundaries.
+    void test_D9_splitRow_rejects_source_row_under_3_seconds_as_TooShort();
+    void test_D9_splitRow_accepts_source_row_at_exactly_3_seconds();
+    void test_D9_splitRow_rejects_first_half_under_1_second_as_HalfTooShort();
+    void test_D9_splitRow_rejects_second_half_under_1_second_as_HalfTooShort();
+    void test_D9_splitRow_accepts_first_half_at_exactly_1_second();
+    // D9 review (finding 2, round 3): the original "both halves" test only
+    // pinned the first half at the boundary (second half was 2000ms) -- add
+    // the second-half boundary separately so a `<` -> `<=` mutation on
+    // either comparison is caught.
+    void test_D9_splitRow_accepts_second_half_at_exactly_1_second();
+
+    // D9 review (finding 1, round 3): the split modal must not open for a
+    // row splitRejection() already knows is too short.
+    void test_D9_splitRejection_none_for_valid_row();
+    void test_D9_splitRejection_TooShort_for_short_row();
+    void test_D9_splitRejection_OutOfRange_for_bad_indices();
 };
 
 #endif // TEST_HISTORYEDITSESSION_H

@@ -112,6 +112,32 @@ private slots:
     // refuse to save -- the shutdown's own commit must not be silently
     // dropped by a stale dialog snapshot that never saw it.
     void test_D5_dialog_spanning_cancelled_shutdown_refuses_save();
+
+    // ========================================================================
+    // D9 (R14-002): dialog is a renderer/controller of typed model operations.
+    // ========================================================================
+
+    // Split: table row count, page title count, and highlight all reflect the
+    // model's dynamic state instead of a frozen build-time count.
+    void test_D9_split_updates_table_rowcount_and_title_and_highlights();
+    // Completed-row type toggle: highlight applied, dirty state from the model.
+    void test_D9_checkbox_toggle_highlights_row_and_marks_dirty();
+    // Ongoing-row type toggle: previously received no highlight at all.
+    void test_D9_ongoing_toggle_highlights_row();
+    // Navigating away and back preserves each page's own dirty state.
+    void test_D9_navigation_preserves_per_page_dirty_state();
+    // Cancel (reject) leaves the model/runtime state untouched after edits.
+    void test_D9_cancel_after_split_and_toggle_preserves_runtime_state();
+
+    // D9 review (finding 2 (g)/finding 1): sequence regression tests where
+    // hasEdits()/pageModified() and the rendered highlight must agree.
+    void test_D9_toggle_off_then_on_clears_highlight_and_dirty_state();
+    void test_D9_toggle_twice_clears_highlight();
+    void test_D9_ongoing_toggle_then_navigate_away_and_back_highlights_ongoing_row();
+
+    // D9 review (finding 1, round 3): a too-short row must be refused before
+    // SplitDialog is ever constructed, not just before the split is applied.
+    void test_D9_split_too_short_row_does_not_open_modal();
 };
 
 #endif // TEST_HISTORYDIALOG_H

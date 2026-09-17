@@ -204,4 +204,11 @@ inline bool isCrossMidnight(const QDateTime& a, const QDateTime& b)
  */
 enum class EntriesForDateResult { Yes, No, Unknown };
 
+/// Minimum whole seconds a completed row must span to be splittable at all.
+/// D9 review (finding 1, round 3): shared by HistoryEditSession::splitRow()/
+/// splitRejection() (the authoritative rule) and SplitDialog (which disables
+/// its slider below this) so the two constants cannot drift apart. Declared
+/// here rather than in splitdialog.h so the model stays widget-free.
+constexpr int kMinimumSplitDurationSeconds = 3;
+
 #endif // TYPES_H

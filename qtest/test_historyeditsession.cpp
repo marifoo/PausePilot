@@ -221,8 +221,8 @@ void HistoryEditSessionTest::test_split_registers_child_with_same_origin()
 
     // Split at 4 s
     const QDateTime splitAt = todayUTC(10, 0, 4);
-    session.pendingTimelines()[0] = session.pendingTimelines()[0].withSplit(
-        0, splitAt, DurationType::Activity, DurationType::Pause);
+    session.setPageTimeline(0, session.pendingTimelines()[0].withSplit(
+        0, splitAt, DurationType::Activity, DurationType::Pause));
 
     // The second half gets a fresh segment_id; register it with the same origin.
     const auto& newComp = session.pendingTimelines()[0].completed();
@@ -256,8 +256,8 @@ void HistoryEditSessionTest::test_split_history_row_child_is_false_origin()
     QCOMPARE(session.originIsMemory().value(origId, true), false);
 
     const QDateTime splitAt = yesterdayUTC(10, 0, 4);
-    session.pendingTimelines()[1] = session.pendingTimelines()[1].withSplit(
-        0, splitAt, DurationType::Activity, DurationType::Pause);
+    session.setPageTimeline(1, session.pendingTimelines()[1].withSplit(
+        0, splitAt, DurationType::Activity, DurationType::Pause));
 
     const auto& newComp = session.pendingTimelines()[1].completed();
     QCOMPARE(newComp.size(), static_cast<size_t>(2));
@@ -459,10 +459,8 @@ void HistoryEditSessionTest::test_refresh_ongoing_advances_end_time_and_preserve
     QCOMPARE(session.pendingTimelines()[0].ongoing()->type, DurationType::Activity);
     const QDateTime snapshotEnd = session.pendingTimelines()[0].ongoing()->endTime;
 
-    // Simulate the user toggling the ongoing type to Pause (as historydialog.cpp does).
-    auto ongoing = session.pendingTimelines()[0].ongoing().value();
-    ongoing.type = DurationType::Pause;
-    session.pendingTimelines()[0] = Timeline(session.pendingTimelines()[0].completed(), ongoing);
+    // Simulate the user toggling the ongoing type to Pause.
+    QVERIFY(session.setOngoingType(0, DurationType::Pause));
 
     QTest::qWait(100);
 
@@ -535,10 +533,8 @@ void HistoryEditSessionTest::test_toggle_activity_to_pause_payload_end_utc_advan
     QCOMPARE(session.pendingTimelines()[0].ongoing()->type, DurationType::Activity);
     const QDateTime dialogOpenEnd = session.pendingTimelines()[0].ongoing()->endTime;
 
-    // Act: user toggles ongoing type to Pause (as historydialog.cpp does).
-    auto ongoing = session.pendingTimelines()[0].ongoing().value();
-    ongoing.type = DurationType::Pause;
-    session.pendingTimelines()[0] = Timeline(session.pendingTimelines()[0].completed(), ongoing);
+    // Act: user toggles ongoing type to Pause.
+    QVERIFY(session.setOngoingType(0, DurationType::Pause));
 
     // Advance clock so the engine snapshot is later than dialogOpenEnd.
     QTest::qWait(100);
@@ -594,9 +590,7 @@ void HistoryEditSessionTest::test_toggle_pause_to_activity_payload_end_utc_advan
     const QDateTime dialogOpenEnd = session.pendingTimelines()[0].ongoing()->endTime;
 
     // Act: user toggles ongoing type back to Activity.
-    auto ongoing = session.pendingTimelines()[0].ongoing().value();
-    ongoing.type = DurationType::Activity;
-    session.pendingTimelines()[0] = Timeline(session.pendingTimelines()[0].completed(), ongoing);
+    QVERIFY(session.setOngoingType(0, DurationType::Activity));
 
     QTest::qWait(100);
 
@@ -1159,4 +1153,482 @@ void HistoryEditSessionTest::test_D2_payload_flags_reversed_interval_created_by_
 
     // Assert: rejected, not silently written.
     QCOMPARE(payload.violation, DayValidity::Violation::NonPositive);
+}
+
+// ---------------------------------------------------------------------------
+// D9 (R14-002): split/type-change/ongoing-toggle operations, dynamic display
+// count, and per-page dirty state are owned by HistoryEditSession.
+// ---------------------------------------------------------------------------
+
+void HistoryEditSessionTest::test_D9_displayCount_reflects_split_immediately()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime start = todayUTC(10, 0);
+    const QDateTime end   = todayUTC(10, 0, 8);
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    QCOMPARE(session.displayCount(0), 1);
+
+    const auto outcome = session.splitRow(0, 0, todayUTC(10, 0, 4), DurationType::Activity, DurationType::Pause);
+    QVERIFY(outcome.applied);
+
+    // The count reflects the split immediately -- no frozen build-time title.
+    QCOMPARE(session.displayCount(0), 2);
+}
+
+void HistoryEditSessionTest::test_D9_pageTitle_reflects_dynamic_count()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime start = todayUTC(10, 0);
+    const QDateTime end   = todayUTC(10, 0, 8);
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    QVERIFY(session.pageTitle(0).contains("entries: 1"));
+
+    session.splitRow(0, 0, todayUTC(10, 0, 4), DurationType::Activity, DurationType::Pause);
+
+    QVERIFY(session.pageTitle(0).contains("entries: 2"));
+}
+
+void HistoryEditSessionTest::test_D9_splitRow_registers_origin_and_returns_ids()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime start = todayUTC(10, 0);
+    const QDateTime end   = todayUTC(10, 0, 8);
+    const SegmentId origId = SegmentId::mint();
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, start, end, origId));
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    const auto outcome = session.splitRow(0, 0, todayUTC(10, 0, 4), DurationType::Activity, DurationType::Pause);
+
+    QVERIFY(outcome.applied);
+    QCOMPARE(outcome.firstId, origId);
+    QVERIFY(!outcome.secondId.isEmpty());
+    QVERIFY(outcome.secondId != origId);
+    // D9: splitRow() itself owns origin registration -- the caller does not
+    // need to call registerSplitChild() separately.
+    QCOMPARE(session.originIsMemory().value(outcome.secondId.toString(), false), true);
+}
+
+void HistoryEditSessionTest::test_D9_splitRow_out_of_range_reports_not_applied()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    // No rows on page 0 -- both the row index and the page index are out of range.
+    const auto badRow = session.splitRow(0, 0, QDateTime::currentDateTime(), DurationType::Activity, DurationType::Pause);
+    QVERIFY(!badRow.applied);
+    QCOMPARE(badRow.error, HistoryEditSession::SplitError::OutOfRange);
+
+    const auto badPage = session.splitRow(5, 0, QDateTime::currentDateTime(), DurationType::Activity, DurationType::Pause);
+    QVERIFY(!badPage.applied);
+    QCOMPARE(badPage.error, HistoryEditSession::SplitError::OutOfRange);
+}
+
+void HistoryEditSessionTest::test_D9_setCompletedType_updates_type_and_marks_page_modified()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime start = todayUTC(10, 0);
+    const QDateTime end   = todayUTC(10, 30);
+    const SegmentId segId = SegmentId::mint();
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, start, end, segId));
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    QVERIFY(!session.pageModified(0));
+
+    QVERIFY(session.setCompletedType(0, segId, DurationType::Pause));
+
+    QCOMPARE(session.pendingTimelines()[0].completed()[0].type, DurationType::Pause);
+    QVERIFY(session.pageModified(0));
+    QVERIFY(session.hasEdits());
+}
+
+void HistoryEditSessionTest::test_D9_setCompletedType_unknown_id_returns_false()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime start = todayUTC(10, 0);
+    const QDateTime end   = todayUTC(10, 30);
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    QVERIFY(!session.setCompletedType(0, SegmentId::mint(), DurationType::Pause));
+    // No-op: nothing was modified.
+    QVERIFY(!session.pageModified(0));
+}
+
+void HistoryEditSessionTest::test_D9_setOngoingType_updates_type_and_marks_page_modified()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(20);
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    QVERIFY(!session.pageModified(0));
+    QCOMPARE(session.pendingTimelines()[0].ongoing()->type, DurationType::Activity);
+
+    QVERIFY(session.setOngoingType(0, DurationType::Pause));
+
+    QCOMPARE(session.pendingTimelines()[0].ongoing()->type, DurationType::Pause);
+    QVERIFY(session.pageModified(0));
+    QVERIFY(session.hasEdits());
+
+    tracker.useTimerViaButton(Button::Stop);
+}
+
+void HistoryEditSessionTest::test_D9_setOngoingType_no_ongoing_returns_false()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    // No Start -- page 0 has no ongoing row.
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    QVERIFY(!session.setOngoingType(0, DurationType::Pause));
+    QVERIFY(!session.pageModified(0));
+}
+
+void HistoryEditSessionTest::test_D9_pageModified_false_before_any_edit()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    fakeDb.loadDurationsResult.durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, yesterdayUTC(10, 0), yesterdayUTC(10, 30)));
+
+    TimeTracker tracker(settings, fakeDb);
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    QCOMPARE(session.pages().size(), static_cast<size_t>(2));
+    QVERIFY(!session.pageModified(0));
+    QVERIFY(!session.pageModified(1));
+    QVERIFY(!session.hasEdits());
+}
+
+void HistoryEditSessionTest::test_D9_pageModified_scoped_to_single_page()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 30));
+    FakeSessionStore fakeDb;
+
+    const SegmentId histId = SegmentId::mint();
+    fakeDb.loadDurationsResult.durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, yesterdayUTC(10, 0), yesterdayUTC(10, 30), histId));
+
+    TimeTracker tracker(settings, fakeDb);
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    QCOMPARE(session.pages().size(), static_cast<size_t>(2));
+
+    QVERIFY(session.setCompletedType(1, histId, DurationType::Pause));
+
+    // Only page 1 is dirty; page 0 (empty Today) is untouched.
+    QVERIFY(!session.pageModified(0));
+    QVERIFY(session.pageModified(1));
+}
+
+void HistoryEditSessionTest::test_D9_page_has_one_ongoing_representation()
+{
+    // R14-002: the ongoing segment must not be counted both inside the page's
+    // completed rows and again as a separate value -- displayCount() must
+    // count it exactly once.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    // Start, then Pause: Pause finalizes the Activity segment into
+    // session_.durations (1 completed row) and begins a new ongoing Pause
+    // segment -- avoids resetForNewSession() clearing a debug-injected
+    // completed row, which only Start() from Mode::None does.
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(20);
+    tracker.useTimerViaButton(Button::Pause);
+    QTest::qWait(20);
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    // 1 completed row + 1 ongoing row.
+    QCOMPARE(session.pendingTimelines()[0].completed().size(), static_cast<size_t>(1));
+    QVERIFY(session.pendingTimelines()[0].ongoing().has_value());
+    QCOMPARE(session.displayCount(0), 2);
+
+    tracker.useTimerViaButton(Button::Stop);
+}
+
+// ---------------------------------------------------------------------------
+// D9 review (finding 3): splitRow() owns the minimum-length rules with a
+// typed reason -- pin each boundary.
+// ---------------------------------------------------------------------------
+
+void HistoryEditSessionTest::test_D9_splitRow_rejects_source_row_under_3_seconds_as_TooShort()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime start = todayUTC(10, 0, 0);
+    const QDateTime end = start.addMSecs(2999); // just under the 3s minimum
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    const auto outcome = session.splitRow(0, 0, start.addMSecs(1500), DurationType::Activity, DurationType::Pause);
+
+    QVERIFY(!outcome.applied);
+    QCOMPARE(outcome.error, HistoryEditSession::SplitError::TooShort);
+    QCOMPARE(session.pendingTimelines()[0].completed().size(), static_cast<size_t>(1));
+}
+
+void HistoryEditSessionTest::test_D9_splitRow_accepts_source_row_at_exactly_3_seconds()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime start = todayUTC(10, 0, 0);
+    const QDateTime end = start.addMSecs(3000); // exactly at the 3s minimum
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    const auto outcome = session.splitRow(0, 0, start.addMSecs(1500), DurationType::Activity, DurationType::Pause);
+
+    QVERIFY(outcome.applied);
+    QCOMPARE(outcome.error, HistoryEditSession::SplitError::None);
+    QCOMPARE(session.pendingTimelines()[0].completed().size(), static_cast<size_t>(2));
+}
+
+void HistoryEditSessionTest::test_D9_splitRow_rejects_first_half_under_1_second_as_HalfTooShort()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime start = todayUTC(10, 0, 0);
+    const QDateTime end = start.addMSecs(5000);
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    // First half would be 999ms -- just under the 1s-per-half minimum.
+    const auto outcome = session.splitRow(0, 0, start.addMSecs(999), DurationType::Activity, DurationType::Pause);
+
+    QVERIFY(!outcome.applied);
+    QCOMPARE(outcome.error, HistoryEditSession::SplitError::HalfTooShort);
+    QCOMPARE(session.pendingTimelines()[0].completed().size(), static_cast<size_t>(1));
+}
+
+void HistoryEditSessionTest::test_D9_splitRow_rejects_second_half_under_1_second_as_HalfTooShort()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime start = todayUTC(10, 0, 0);
+    const QDateTime end = start.addMSecs(5000);
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    // Second half would be 999ms -- just under the 1s-per-half minimum.
+    const auto outcome = session.splitRow(0, 0, start.addMSecs(4001), DurationType::Activity, DurationType::Pause);
+
+    QVERIFY(!outcome.applied);
+    QCOMPARE(outcome.error, HistoryEditSession::SplitError::HalfTooShort);
+    QCOMPARE(session.pendingTimelines()[0].completed().size(), static_cast<size_t>(1));
+}
+
+void HistoryEditSessionTest::test_D9_splitRow_accepts_first_half_at_exactly_1_second()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime start = todayUTC(10, 0, 0);
+    const QDateTime end = start.addMSecs(3000);
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    // First half is exactly 1000ms -- at the boundary, must be accepted.
+    const auto outcome = session.splitRow(0, 0, start.addMSecs(1000), DurationType::Activity, DurationType::Pause);
+
+    QVERIFY(outcome.applied);
+    QCOMPARE(outcome.error, HistoryEditSession::SplitError::None);
+    const auto& comp = session.pendingTimelines()[0].completed();
+    QCOMPARE(comp.size(), static_cast<size_t>(2));
+    QCOMPARE(comp[0].startTime.msecsTo(comp[0].endTime), static_cast<qint64>(1000));
+    QCOMPARE(comp[1].startTime.msecsTo(comp[1].endTime), static_cast<qint64>(2000));
+}
+
+void HistoryEditSessionTest::test_D9_splitRow_accepts_second_half_at_exactly_1_second()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime start = todayUTC(10, 0, 0);
+    const QDateTime end = start.addMSecs(3000);
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    // Second half is exactly 1000ms (split at end - 1000ms) -- at the
+    // boundary, must be accepted. Pins the second-half comparison
+    // independently of test_D9_splitRow_accepts_first_half_at_exactly_1_second.
+    const auto outcome = session.splitRow(0, 0, end.addMSecs(-1000), DurationType::Activity, DurationType::Pause);
+
+    QVERIFY(outcome.applied);
+    QCOMPARE(outcome.error, HistoryEditSession::SplitError::None);
+    const auto& comp = session.pendingTimelines()[0].completed();
+    QCOMPARE(comp.size(), static_cast<size_t>(2));
+    QCOMPARE(comp[0].startTime.msecsTo(comp[0].endTime), static_cast<qint64>(2000));
+    QCOMPARE(comp[1].startTime.msecsTo(comp[1].endTime), static_cast<qint64>(1000));
+}
+
+// ---------------------------------------------------------------------------
+// D9 review (finding 1, round 3): splitRejection() -- the shared predicate
+// splitRow() and HistoryDialog's pre-dialog check both use.
+// ---------------------------------------------------------------------------
+
+void HistoryEditSessionTest::test_D9_splitRejection_none_for_valid_row()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime start = todayUTC(10, 0, 0);
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, start, start.addMSecs(3000)));
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    QCOMPARE(session.splitRejection(0, 0), HistoryEditSession::SplitError::None);
+}
+
+void HistoryEditSessionTest::test_D9_splitRejection_TooShort_for_short_row()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime start = todayUTC(10, 0, 0);
+    tracker.sessionState_dbg().durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, start, start.addMSecs(2999)));
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    QCOMPARE(session.splitRejection(0, 0), HistoryEditSession::SplitError::TooShort);
+}
+
+void HistoryEditSessionTest::test_D9_splitRejection_OutOfRange_for_bad_indices()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    HistoryEditSession session;
+    session.buildFromTimer(tracker, QDate::currentDate());
+
+    // No rows on page 0.
+    QCOMPARE(session.splitRejection(0, 0), HistoryEditSession::SplitError::OutOfRange);
+    QCOMPARE(session.splitRejection(5, 0), HistoryEditSession::SplitError::OutOfRange);
 }

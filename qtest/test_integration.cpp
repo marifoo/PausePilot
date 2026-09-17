@@ -1173,9 +1173,7 @@ void IntegrationTest::test_A_toggle_ongoing_to_pause_crash_recovery_uses_refresh
         ongoingSegId  = session.pendingTimelines()[0].ongoing()->segment_id;
 
         // User toggles ongoing type to Pause.
-        auto og = session.pendingTimelines()[0].ongoing().value();
-        og.type = DurationType::Pause;
-        session.pendingTimelines()[0] = Timeline(session.pendingTimelines()[0].completed(), og);
+        QVERIFY(session.setOngoingType(0, DurationType::Pause));
 
         // Advance clock so the refresh snapshot is clearly later than dialogOpenEnd,
         // and so the segment exceeds kMinRecoverableOrphanDurationMs (1 s) and is

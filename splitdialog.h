@@ -9,8 +9,9 @@ class QLabel;
 class QSlider;
 class QRadioButton;
 
-/// Minimum segment duration (in seconds) that can be split meaningfully.
-constexpr int kMinimumSplitDurationSeconds = 3;
+// kMinimumSplitDurationSeconds lives in types.h (D9 review, finding 1 round
+// 3): shared with HistoryEditSession::splitRow()/splitRejection() so the two
+// rules cannot drift apart.
 
 /**
  * SplitDialog — modal dialog for splitting a single TimeDuration into two.

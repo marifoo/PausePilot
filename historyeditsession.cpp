@@ -6,6 +6,12 @@
 
 namespace {
 
+// D9 review (finding 1, round 3): the total-length minimum is
+// kMinimumSplitDurationSeconds (types.h), shared with SplitDialog so the two
+// rules cannot drift apart. The per-half minimum has no other consumer, so
+// it stays local here.
+constexpr qint64 kMinSplitHalfMsec = 1000;
+
 bool isSameSegmentId(const TimeDuration& a, const TimeDuration& b)
 {
     if (a.segment_id.isEmpty() || b.segment_id.isEmpty())
@@ -95,11 +101,6 @@ void HistoryEditSession::buildFromTimer(TimeTracker& timer, const QDate& today)
             originIsMemory_.insert(d.segment_id.toString(), false);
     }
 
-    // currentPageDurations includes ongoing for the Page title count.
-    std::deque<TimeDuration> currentPageDurations = currentPageCompleted;
-    if (ongoingOpt.has_value())
-        currentPageDurations.push_back(ongoingOpt.value());
-
     {
         std::deque<TimeDuration> todayCrossMidnight;
         auto cmIt = crossMidnightByStartDay.find(today);
@@ -109,17 +110,15 @@ void HistoryEditSession::buildFromTimer(TimeTracker& timer, const QDate& today)
         auto contIt = continuationsByEndDay.find(today);
         if (contIt != continuationsByEndDay.end()) todayConts = *contIt;
 
-        const int todayShown = static_cast<int>(
-            currentPageDurations.size() + todayCrossMidnight.size() + todayConts.size());
         pages_.push_back({
-            QString("Today (entries: ") + QString::number(todayShown) + QString(")"),
-            currentPageDurations,
+            QString("Today"),
             todayCrossMidnight,
             todayConts,
             true,
             today
         });
     }
+    pendingTimelines_.push_back(Timeline(currentPageCompleted, ongoingOpt));
 
     // Add historical pages (one per day, most recent first, skip today).
     for (const QDate& date : historyDates) {
@@ -134,27 +133,18 @@ void HistoryEditSession::buildFromTimer(TimeTracker& timer, const QDate& today)
         auto contIt = continuationsByEndDay.find(date);
         if (contIt != continuationsByEndDay.end()) conts = *contIt;
 
-        const int histShown = static_cast<int>(
-            historyByDay[date].size() + crossMidnight.size() + conts.size());
+        std::deque<TimeDuration> dayCompleted = historyByDay[date];
+        for (const auto& d : dayCompleted)
+            originIsMemory_.insert(d.segment_id.toString(), false);
+
         pages_.push_back({
-            date.toString("yyyy-MM-dd") + QString(" (entries: ") +
-                QString::number(histShown) + QString(")"),
-            historyByDay[date],
+            date.toString("yyyy-MM-dd"),
             crossMidnight,
             conts,
             false,
             date
         });
-    }
-
-    // Build pendingTimelines_: page 0 = completed + ongoing, pages 1..N = completed only.
-    pendingTimelines_.reserve(pages_.size());
-    pendingTimelines_.push_back(Timeline(currentPageCompleted, ongoingOpt));
-
-    for (size_t i = 1; i < pages_.size(); ++i) {
-        pendingTimelines_.push_back(Timeline(pages_[i].durations, std::nullopt));
-        for (const auto& d : pages_[i].durations)
-            originIsMemory_.insert(d.segment_id.toString(), false);
+        pendingTimelines_.push_back(Timeline(dayCompleted, std::nullopt));
     }
 
     // Snapshot the freshly built timelines so hasEdits() can detect whether the
@@ -188,17 +178,53 @@ bool HistoryEditSession::hasEdits() const
     if (pendingTimelines_.size() != originalTimelines_.size())
         return true;
     for (size_t i = 0; i < pendingTimelines_.size(); ++i) {
-        if (!sameCompleted(pendingTimelines_[i].completed(), originalTimelines_[i].completed()))
-            return true;
-        const auto& curOng  = pendingTimelines_[i].ongoing();
-        const auto& origOng = originalTimelines_[i].ongoing();
-        if (curOng.has_value() != origOng.has_value())
-            return true;
-        // Only the ongoing's type is a user edit; its end-time advances on its own.
-        if (curOng.has_value() && curOng->type != origOng->type)
+        if (pageModified(i))
             return true;
     }
     return false;
+}
+
+bool HistoryEditSession::pageModified(size_t pageIdx) const
+{
+    if (pageIdx >= pendingTimelines_.size() || pageIdx >= originalTimelines_.size())
+        return false;
+    if (!sameCompleted(pendingTimelines_[pageIdx].completed(), originalTimelines_[pageIdx].completed()))
+        return true;
+    const auto& curOng  = pendingTimelines_[pageIdx].ongoing();
+    const auto& origOng = originalTimelines_[pageIdx].ongoing();
+    if (curOng.has_value() != origOng.has_value())
+        return true;
+    // Only the ongoing's type is a user edit; its end-time advances on its own.
+    if (curOng.has_value() && curOng->type != origOng->type)
+        return true;
+    return false;
+}
+
+int HistoryEditSession::editableRowCount(size_t pageIdx) const
+{
+    if (pageIdx >= pendingTimelines_.size())
+        return 0;
+    int count = static_cast<int>(pendingTimelines_[pageIdx].completed().size());
+    if (pendingTimelines_[pageIdx].ongoing().has_value())
+        ++count;
+    return count;
+}
+
+int HistoryEditSession::displayCount(size_t pageIdx) const
+{
+    if (pageIdx >= pages_.size())
+        return 0;
+    return editableRowCount(pageIdx)
+        + static_cast<int>(pages_[pageIdx].crossMidnight.size())
+        + static_cast<int>(pages_[pageIdx].continuations.size());
+}
+
+QString HistoryEditSession::pageTitle(size_t pageIdx) const
+{
+    if (pageIdx >= pages_.size())
+        return QString();
+    return pages_[pageIdx].label + QString(" (entries: ")
+        + QString::number(displayCount(pageIdx)) + QString(")");
 }
 
 void HistoryEditSession::refreshOngoing(TimeTracker& timer)
@@ -443,6 +469,82 @@ void HistoryEditSession::setPageTimeline(size_t pageIdx, const Timeline& tl)
 {
     if (pageIdx < pendingTimelines_.size())
         pendingTimelines_[pageIdx] = tl;
+}
+
+bool HistoryEditSession::setCompletedType(size_t pageIdx, const SegmentId& segId, DurationType type)
+{
+    if (pageIdx >= pendingTimelines_.size())
+        return false;
+    const auto& comp = pendingTimelines_[pageIdx].completed();
+    auto it = std::find_if(comp.begin(), comp.end(),
+        [&segId](const TimeDuration& td) { return td.segment_id == segId; });
+    if (it == comp.end())
+        return false;
+    const size_t rowIdx = static_cast<size_t>(std::distance(comp.begin(), it));
+    pendingTimelines_[pageIdx] = pendingTimelines_[pageIdx].withSegmentType(rowIdx, type);
+    return true;
+}
+
+bool HistoryEditSession::setOngoingType(size_t pageIdx, DurationType type)
+{
+    if (pageIdx >= pendingTimelines_.size() || !pendingTimelines_[pageIdx].ongoing().has_value())
+        return false;
+    TimeDuration ongoing = pendingTimelines_[pageIdx].ongoing().value();
+    ongoing.type = type;
+    pendingTimelines_[pageIdx] = Timeline(pendingTimelines_[pageIdx].completed(), ongoing);
+    return true;
+}
+
+HistoryEditSession::SplitError HistoryEditSession::splitRejection(size_t pageIdx, size_t rowIdx) const
+{
+    if (pageIdx >= pendingTimelines_.size())
+        return SplitError::OutOfRange;
+    const auto& completed = pendingTimelines_[pageIdx].completed();
+    if (rowIdx >= completed.size())
+        return SplitError::OutOfRange;
+
+    const TimeDuration& source = completed[rowIdx];
+    if (source.startTime.secsTo(source.endTime) < kMinimumSplitDurationSeconds)
+        return SplitError::TooShort;
+
+    return SplitError::None;
+}
+
+HistoryEditSession::SplitOutcome HistoryEditSession::splitRow(size_t pageIdx, size_t rowIdx,
+    const QDateTime& at, DurationType firstType, DurationType secondType)
+{
+    // D9 review (finding 1, round 3): shares the one OutOfRange/TooShort
+    // predicate with HistoryDialog's pre-dialog check, so the two callers
+    // (and any future one) cannot classify the same row differently.
+    const SplitError rejection = splitRejection(pageIdx, rowIdx);
+    if (rejection != SplitError::None)
+        return SplitOutcome{false, rejection, {}, {}};
+
+    const auto& completed = pendingTimelines_[pageIdx].completed();
+    const TimeDuration& source = completed[rowIdx];
+    const QDateTime start = source.startTime;
+    const QDateTime end = source.endTime;
+
+    // The per-half minimum depends on `at`, which splitRejection() does not
+    // take, so it stays here rather than folding into that shared predicate.
+    const qint64 firstMsec = start.msecsTo(at);
+    const qint64 secondMsec = at.msecsTo(end);
+    if (firstMsec < kMinSplitHalfMsec || secondMsec < kMinSplitHalfMsec)
+        return SplitOutcome{false, SplitError::HalfTooShort, {}, {}};
+
+    const QString origId = source.segment_id.toString();
+    const bool wasMemory = originIsMemory_.value(origId, true);
+    const size_t prevSize = completed.size();
+
+    pendingTimelines_[pageIdx] = pendingTimelines_[pageIdx].withSplit(rowIdx, at, firstType, secondType);
+
+    const auto& newComp = pendingTimelines_[pageIdx].completed();
+    if (newComp.size() <= prevSize || rowIdx + 1 >= newComp.size())
+        return SplitOutcome{false, SplitError::OutOfRange, {}, {}};
+
+    const SegmentId secondId = newComp[rowIdx + 1].segment_id;
+    registerSplitChild(secondId.toString(), wasMemory);
+    return SplitOutcome{true, SplitError::None, newComp[rowIdx].segment_id, secondId};
 }
 
 void HistoryEditSession::registerSplitChild(const QString& childSegmentId, bool wasMemory)

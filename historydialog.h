@@ -72,10 +72,25 @@ private:
     void updateTotalsLabel(uint idx);
     void updateTable(uint idx);
     void addReadOnlyRow(QTableWidget* table, int row, const TimeDuration& d, const QString& suffix);
+    /// D9 review (finding 1): the single dirty-highlight rule, sourced only
+    /// from session_.pageModified(idx). Highlighting is page-level because
+    /// pageModified() itself is page-scoped: once any row on a page changed,
+    /// every editable row on that page is highlighted; a per-row highlight
+    /// would need a per-row dirty predicate the model does not expose. Sets
+    /// or clears every editable (completed + ongoing) row's Type/Start-End/
+    /// Duration cells so a toggle back to the original value un-highlights,
+    /// unlike the old handler-local "always highlight, never clear" rule.
+    void applyDirtyHighlight(uint idx);
     void showContextMenu(const QPoint& pos);
     QString buildLoadReconciliationMessage() const;
     /// Presets a SplitDialog's first segment type from the source row before it is shown.
     void presetSplitDialog(SplitDialog& dlg, const TimeDuration& duration) const;
+    /// Shared tail of onSplitRow() and applySplit_dbg(): applies session_.splitRow()
+    /// and, on success, rerenders via updateTable(idx). D9 review (finding 2):
+    /// having both callers go through this means a debug-only test path
+    /// cannot silently diverge from what a real split renders.
+    HistoryEditSession::SplitOutcome applySplitAt(uint idx, int row, const QDateTime& at,
+                                                   DurationType firstType, DurationType secondType);
 
 private slots:
     void onOlder();
@@ -102,6 +117,9 @@ public:
     void onSplitRow_dbg() { onSplitRow(); }
     /// Updates the page totals label for the given page index.
     void updateTotalsLabel_dbg(uint idx) { updateTotalsLabel(idx); }
+    /// Navigation wrappers for tests (onOlder()/onNewer() are private slots).
+    void onOlder_dbg() { onOlder(); }
+    void onNewer_dbg() { onNewer(); }
 
     /// Applies a split without showing SplitDialog (avoids offscreen QPA warnings in tests).
     /// Splits row `row` on page `page` into `firstType` / `secondType` at the midpoint.
@@ -124,6 +142,17 @@ public:
     /// regardless of debugSkipCritical_ -- lets a test observe whether this
     /// dialog would have been shown without exec()-ing a real QMessageBox.
     int debugCriticalShownCount_ = 0;
+
+    /// D9 review (finding 1, round 3): if true, onSplitRow() skips its
+    /// QMessageBox::information()/warning() calls for a rejected split
+    /// (still logs and returns normally) -- lets a test exercise the
+    /// rejection path without exec()-ing a real QMessageBox under the
+    /// offscreen QPA plugin.
+    bool debugSkipSplitMessages_ = false;
+    /// Incremented immediately before onSplitRow() constructs a real
+    /// SplitDialog. A too-short row must return before this point, so a test
+    /// can prove the modal was never opened without needing to exec() it.
+    int debugSplitDialogConstructedCount_ = 0;
 #endif
 
     /**
