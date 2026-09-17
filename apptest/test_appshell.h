@@ -73,6 +73,12 @@ private slots:
     // WM_ENDSESSION delivery itself is Windows-only.
     void test_D5_translateWindowsShutdownMessage_data();
     void test_D5_translateWindowsShutdownMessage();
+
+    // D10 (requirement 4): ContentWidget reduces the single
+    // TimeTracker::transitioned() event, wired up through MainWin. Exercised
+    // here (not in qtest) because qtest's aggregate never links
+    // contentwidget.cpp/mainwin.cpp.
+    void test_D10_lock_resume_updates_button_exactly_once();
 };
 
 #endif // TEST_APPSHELL_H

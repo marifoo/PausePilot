@@ -3,8 +3,8 @@
  *
  * Owns the UI elements (buttons, labels) and handles user interactions:
  * button presses write settings, launch HistoryDialog, and build tooltips.
- * TimeTracker state changes propagate here via signal connections
- * (started/stopped/paused/modeChanged) to update the visual state.
+ * TimeTracker state changes propagate here via one transitioned() signal
+ * connection, reduced by onTransitioned() to update the visual state.
  * updateTimes() is called by the main loop (MainWin::onTick) to refresh the
  * time display labels by polling TimeTracker.
  */
@@ -46,17 +46,13 @@ ContentWidget::ContentWidget(Settings & settings, TimeTracker &timetracker, QWid
 	QObject::connect(autopause_button_, SIGNAL(clicked()), this, SLOT(pressedAutoPauseButton()));
 	QObject::connect(show_history_button_, SIGNAL(clicked()), this, SLOT(pressedShowHistoryButton()));
 
-	connect(&timetracker_, &TimeTracker::stopped,
-	        this, [this](TimeTracker::StopReason) { setGUItoStop(); });
-	connect(&timetracker_, &TimeTracker::started,
-	        this, [this](bool fromPause) { setGUItoActivity(fromPause); });
-	connect(&timetracker_, &TimeTracker::paused,
-	        this, [this]() { setGUItoPause(); });
-	connect(&timetracker_, &TimeTracker::modeChanged,
-	        this, [this](TimeTracker::PauseCause cause) {
-		if (cause == TimeTracker::PauseCause::LockAutopause)
-			setGUItoPause();
-	});
+	// D10 (R10-002/requirement 4): one connection to the one cause-carrying
+	// transition event, reduced below by onTransitioned(). Previously this
+	// required four connections to started()/paused()/stopped()/modeChanged()
+	// and a comment warning that lock resume's two signals must not both be
+	// acted on; a single event makes double-acting structurally impossible.
+	connect(&timetracker_, &TimeTracker::transitioned,
+	        this, &ContentWidget::onTransitioned);
 }
 
 void ContentWidget::setupGUI()
@@ -117,6 +113,7 @@ void ContentWidget::setupButtonRows()
 
 	timerbutton_row_ = new QHBoxLayout();
 	startpause_button_ = new QPushButton("START");
+	startpause_button_->setObjectName("startPauseButton");
 	startpause_button_->setFont(button_font);
 	startpause_button_->setToolTip("Start/Pause Activity Time");
 	startpause_button_->setFixedSize(100,25);
@@ -225,6 +222,16 @@ void ContentWidget::manageTooltipsForActivity(bool wasPaused)
 	} else {
 		setPauseTimeTooltip();
 	}
+}
+
+void ContentWidget::onTransitioned(TimeTracker::Transition t)
+{
+	if (t.to == TimeTracker::Mode::Activity)
+		setGUItoActivity(t.from == TimeTracker::Mode::Pause);
+	else if (t.to == TimeTracker::Mode::Pause)
+		setGUItoPause();
+	else
+		setGUItoStop();
 }
 
 void ContentWidget::setGUItoActivity(bool wasPaused)

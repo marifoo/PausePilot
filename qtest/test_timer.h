@@ -153,6 +153,7 @@ private slots:
     void test_commit_ongoing_type_edit_changes_mode();
     // commitEditedTimeline returns success and aligns mode_ with edited ongoing type
     void test_commitEditedTimeline_mode_aligns_with_edited_ongoing_type();
+    void test_D10_editApplied_pause_to_activity_emits_transitioned();
 
     // Disabled history is a no-op, not a save/checkpoint failure
     void test_disabled_history_stop_keeps_clean_state_no_warning();
@@ -166,11 +167,14 @@ private slots:
     // while mode_ == None (engine already stopped).
     void test_commitEditedTimeline_ignores_ongoing_when_already_stopped();
 
-    // QF1: signal contract — started/paused/modeChanged emit counts
-    void test_QF1_explicit_pause_emits_paused_not_modeChanged();
-    void test_QF1_explicit_resume_emits_started_not_modeChanged();
-    void test_QF1_lock_autopause_emits_modeChanged_not_paused();
-    void test_QF1_lock_resume_emits_started_and_modeChanged_once_each();
+    // QF1: signal contract — cause distinguishes button vs. lock-driven
+    // transitions. Originally pinned via which of started/paused/modeChanged
+    // fired; migrated by D10 to assert TransitionCause on transitioned()
+    // instead, since those three signals no longer exist (D10 finding 2).
+    void test_QF1_explicit_pause_is_ButtonPause_cause();
+    void test_QF1_explicit_resume_is_ButtonStart_cause();
+    void test_QF1_lock_autopause_is_LockAutopause_cause();
+    void test_QF1_lock_resume_is_LockResume_cause_emitted_once();
 
     // Phase 2 clock seam: fake clock drives the ongoing duration with no sleep.
     void test_seam_fake_clock_drives_ongoing_duration();
@@ -423,6 +427,72 @@ private slots:
     // A pending commit payload retained from a failed Stop survives
     // cancellation unchanged -- A2/A3 still own its retry, at the next Start.
     void test_D5_cancelShutdown_retains_pending_commit_for_next_start();
+
+    // ========================================================================
+    // D10 (R10-001/R10-002): one typed input dispatcher, one cause-carrying
+    // transition event sufficient for a UI reducer, and one typed owner of
+    // deferred-event replay priority.
+    // ========================================================================
+
+    // Every valid mode/input/cause pair emits exactly one transitioned()
+    // event with the expected (from, to, cause).
+    void test_D10_transitioned_emits_one_event_per_real_transition_data();
+    void test_D10_transitioned_emits_one_event_per_real_transition();
+
+    // Invalid/no-op inputs (Pause from None/Pause, Start from Activity,
+    // Stop from None) must not emit transitioned() at all.
+    void test_D10_noop_inputs_emit_no_transitioned_data();
+    void test_D10_noop_inputs_emit_no_transitioned();
+
+    // R10-001: onStartPausePressed() is a pure toggle translation onto the
+    // one production/test button dispatcher -- it must produce exactly the
+    // same transition (and the same cross-midnight-discard behavior) as the
+    // equivalent useTimerViaButton() call, not a second implementation of
+    // the boundary guard/switch.
+    void test_D10_onStartPausePressed_delegates_to_button_dispatch_data();
+    void test_D10_onStartPausePressed_delegates_to_button_dispatch();
+
+    // R10-002: lock resume is exactly one transitioned() emission, not two
+    // independent notifications a caller must know not to double-act on.
+    // Pinned by test_QF1_lock_resume_is_LockResume_cause_emitted_once() above.
+
+    // D10/plan4 B4: a deferred midnight event and a deferred lock correction
+    // pending together still replay chronologically through the new
+    // DeferredEditEvents owner -- guards the consolidation against silently
+    // dropping the A1 priority rule.
+    void test_D10_deferred_events_replay_chronologically_lock_first();
+    void test_D10_deferred_events_replay_chronologically_midnight_first();
+
+    // Regression guard for a real ordering bug caught while restructuring
+    // useTimerViaLockEvent (plan4 B16): when autopause is disabled, a
+    // LongOngoingLock arriving while the History dialog is open must be
+    // dropped outright, exactly as when the dialog is not open -- NOT
+    // deferred and replayed once autopause is re-enabled.
+    void test_D10_longlock_disabled_autopause_dialog_open_is_dropped_not_deferred();
+
+    // Round-2 review (finding 1): every source of a transitioned() event
+    // driven through its REAL live path (not dbg-injected), not just the
+    // deferred-replay path exercised above.
+    // A live scheduled midnight stop.
+    void test_D10_midnight_scheduled_live_emits_transitioned();
+    // A live watchdog cross-midnight discard, driven through the real
+    // onTick() -> DayBoundaryWatcher::tick() path.
+    void test_D10_midnight_watchdog_live_emits_transitioned();
+    // shutdown()/drainForShutdown() emits transitioned(..., Shutdown), not
+    // mis-mapped to ButtonStop by either the cause or the legacy stopped()
+    // StopReason translation.
+    void test_D10_shutdown_emits_transitioned();
+    // A Fatal commit failure during a Button::Stop press must NOT relabel
+    // the transition's cause as FatalStoreError -- stopTimer() never nests
+    // through stopIfLatched(); the button's own reason (ButtonStop) is what
+    // actually happened, while the latch still takes effect for the next Start.
+    void test_D10_fatal_commit_on_stop_keeps_buttonstop_cause();
+
+    // Round-2 review (finding 1, M8b): the delegation test must also cover
+    // the cross-midnight-discard guard, not only the three ordinary modes --
+    // a hand-rolled toggle body that dropped the guard would still pass the
+    // three mode rows above.
+    void test_D10_onStartPausePressed_cross_midnight_discard_matches_button_dispatch();
 };
 
 #endif // TEST_TIMER_H

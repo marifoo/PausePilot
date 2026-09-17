@@ -1,5 +1,6 @@
 #include "test_appshell.h"
 #include "fakesessionstore.h"
+#include "fakeclock.h"
 #include "mainwin.h"
 #include "shutdowncoordinator.h"
 #include "timetracker.h"
@@ -1124,4 +1125,62 @@ void AppShellTest::test_D5_translateWindowsShutdownMessage()
 
     // Assert
     QCOMPARE(static_cast<int>(result), expected);
+}
+
+// ============================================================================
+// D10 (requirement 4): MainWin/ContentWidget wiring consumes the single
+// TimeTracker::transitioned() event without double-acting on lock resume.
+// ============================================================================
+
+void AppShellTest::test_D10_lock_resume_updates_button_exactly_once()
+{
+    // Arrange: a real MainWin/ContentWidget wired to a real TimeTracker with
+    // autopause enabled, Activity running and then long-locked into Pause.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/autopause_enabled", true);
+    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+    MainWin mainWin(settings, tracker, fakeDb, coordinator);
+
+    QPushButton* startPauseButton = mainWin.findChild<QPushButton*>("startPauseButton");
+    QVERIFY2(startPauseButton, "ContentWidget's start/pause button must be reachable via objectName");
+
+    tracker.useTimerViaButton(Button::Start);
+    QCOMPARE(startPauseButton->text(), QString("PAUSE"));
+
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, clock.now());
+    QVERIFY(tracker.isPaused());
+    QCOMPARE(startPauseButton->text(), QString("CONTINUE"));
+
+    // Count the ONE real transition ContentWidget reduces, so "exactly once"
+    // is backed by an emission count rather than only an idempotent label
+    // (a double emission would still leave the same final text).
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
+
+    // Act: desktop unlocks -- one transitioned(LockResume) event.
+    tracker.useTimerViaLockEvent(LockEvent::Unlock);
+
+    // Assert: the button reflects Activity again, from exactly one emission.
+    // Before D10, this relied on ContentWidget separately ignoring
+    // modeChanged(LockResume) after acting on started(true); now there is
+    // structurally only one event to act on.
+    QCOMPARE(transitionedSpy.count(), 1);
+    QVERIFY(tracker.isActive());
+    QCOMPARE(startPauseButton->text(), QString("PAUSE"));
+
+    // Round-2 review (finding 1, M7b): ContentWidget's reducer must also
+    // handle Mode::None -- an untested branch would leave the button
+    // reading PAUSE forever after any stop, midnight cutoff, watchdog
+    // discard, shutdown, or fatal latch.
+    tracker.useTimerViaButton(Button::Stop);
+    QCOMPARE(startPauseButton->text(), QString("START"));
 }

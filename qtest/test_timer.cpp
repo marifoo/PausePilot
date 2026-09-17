@@ -2022,46 +2022,53 @@ void TimerTest::test_S12_marker_error_skips_reconciliation()
     QVERIFY(fakeDb.callLog.contains("recoverStartupCheckpoints"));
 }
 
-void TimerTest::test_QF1_explicit_pause_emits_paused_not_modeChanged()
+// QF1 (pre-D10): pinned that an explicit user pause is distinguishable from
+// lock-driven autopause even though both used to land in different signals
+// (paused() vs modeChanged()). D10 replaced that two-signal protocol with one
+// cause-carrying transitioned() event; the same distinction is now pinned via
+// t.cause rather than "which signal fired".
+void TimerTest::test_QF1_explicit_pause_is_ButtonPause_cause()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
+    tracker.useTimerViaButton(Button::Start);
 
-    QSignalSpy pausedSpy(&tracker, &TimeTracker::paused);
-    QSignalSpy modeSpy(&tracker, &TimeTracker::modeChanged);
+    QSignalSpy spy(&tracker, &TimeTracker::transitioned);
+
+    tracker.useTimerViaButton(Button::Pause);
+
+    QCOMPARE(spy.count(), 1);
+    const auto t = spy.first().first().value<TimeTracker::Transition>();
+    QCOMPARE(t.to, TimeTracker::Mode::Pause);
+    QCOMPARE(t.cause, TimeTracker::TransitionCause::ButtonPause);
+}
+
+void TimerTest::test_QF1_explicit_resume_is_ButtonStart_cause()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore db(settings);
+    TimeTracker tracker(settings, db);
 
     tracker.useTimerViaButton(Button::Start);
     tracker.useTimerViaButton(Button::Pause);
 
-    QCOMPARE(pausedSpy.count(), 1);
-    QCOMPARE(modeSpy.count(), 0);
-}
-
-void TimerTest::test_QF1_explicit_resume_emits_started_not_modeChanged()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    SqliteSessionStore db(settings);
-    TimeTracker tracker(settings, db);
-
-    tracker.useTimerViaButton(Button::Start);
-    tracker.useTimerViaButton(Button::Pause);
-
-    QSignalSpy startedSpy(&tracker, &TimeTracker::started);
-    QSignalSpy modeSpy(&tracker, &TimeTracker::modeChanged);
+    QSignalSpy spy(&tracker, &TimeTracker::transitioned);
 
     tracker.useTimerViaButton(Button::Start);
 
-    QCOMPARE(startedSpy.count(), 1);
-    QVERIFY(startedSpy.first().first().toBool()); // fromPause == true
-    QCOMPARE(modeSpy.count(), 0);
+    QCOMPARE(spy.count(), 1);
+    const auto t = spy.first().first().value<TimeTracker::Transition>();
+    QCOMPARE(t.from, TimeTracker::Mode::Pause);
+    QCOMPARE(t.to, TimeTracker::Mode::Activity);
+    QCOMPARE(t.cause, TimeTracker::TransitionCause::ButtonStart);
 }
 
-void TimerTest::test_QF1_lock_autopause_emits_modeChanged_not_paused()
+void TimerTest::test_QF1_lock_autopause_is_LockAutopause_cause()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -2071,18 +2078,17 @@ void TimerTest::test_QF1_lock_autopause_emits_modeChanged_not_paused()
 
     tracker.useTimerViaButton(Button::Start);
 
-    QSignalSpy pausedSpy(&tracker, &TimeTracker::paused);
-    QSignalSpy modeSpy(&tracker, &TimeTracker::modeChanged);
+    QSignalSpy spy(&tracker, &TimeTracker::transitioned);
 
     tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock);
 
-    QCOMPARE(pausedSpy.count(), 0);
-    QCOMPARE(modeSpy.count(), 1);
-    QCOMPARE(modeSpy.first().first().value<TimeTracker::PauseCause>(),
-             TimeTracker::PauseCause::LockAutopause);
+    QCOMPARE(spy.count(), 1);
+    const auto t = spy.first().first().value<TimeTracker::Transition>();
+    QCOMPARE(t.to, TimeTracker::Mode::Pause);
+    QCOMPARE(t.cause, TimeTracker::TransitionCause::LockAutopause);
 }
 
-void TimerTest::test_QF1_lock_resume_emits_started_and_modeChanged_once_each()
+void TimerTest::test_QF1_lock_resume_is_LockResume_cause_emitted_once()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -2094,18 +2100,17 @@ void TimerTest::test_QF1_lock_resume_emits_started_and_modeChanged_once_each()
     tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock);
     QVERIFY(tracker.isPaused());
 
-    QSignalSpy startedSpy(&tracker, &TimeTracker::started);
-    QSignalSpy pausedSpy(&tracker, &TimeTracker::paused);
-    QSignalSpy modeSpy(&tracker, &TimeTracker::modeChanged);
+    QSignalSpy spy(&tracker, &TimeTracker::transitioned);
 
     tracker.useTimerViaLockEvent(LockEvent::Unlock);
 
-    QCOMPARE(startedSpy.count(), 1);
-    QVERIFY(startedSpy.first().first().toBool()); // fromPause == true
-    QCOMPARE(pausedSpy.count(), 0);
-    QCOMPARE(modeSpy.count(), 1);
-    QCOMPARE(modeSpy.first().first().value<TimeTracker::PauseCause>(),
-             TimeTracker::PauseCause::LockResume);
+    // Exactly one emission for one real transition (R10-002's original
+    // point: lock resume used to require two signals from two call sites).
+    QCOMPARE(spy.count(), 1);
+    const auto t = spy.first().first().value<TimeTracker::Transition>();
+    QCOMPARE(t.from, TimeTracker::Mode::Pause);
+    QCOMPARE(t.to, TimeTracker::Mode::Activity);
+    QCOMPARE(t.cause, TimeTracker::TransitionCause::LockResume);
 }
 
 // Issue #1: committing an ongoing segment with a different type must align mode_.
@@ -2183,6 +2188,8 @@ void TimerTest::test_commitEditedTimeline_mode_aligns_with_edited_ongoing_type()
         QDateTime::currentDateTime(),
         liveOngoing->segment_id);
 
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
+
     // commitEditedTimeline must return success and switch mode_ to Pause.
     const auto result = tracker.commitEditedTimeline(Timeline({}, editedOngoing));
     QVERIFY(result.ok);
@@ -2192,6 +2199,52 @@ void TimerTest::test_commitEditedTimeline_mode_aligns_with_edited_ongoing_type()
     auto postCommit = tracker.getOngoingDuration();
     QVERIFY(postCommit.has_value());
     QCOMPARE(postCommit->type, DurationType::Pause);
+
+    // D10: exactly one transitioned(Activity->Pause, EditApplied) event --
+    // a History edit flipping the ongoing type must not leave the UI stale.
+    QCOMPARE(transitionedSpy.count(), 1);
+    const auto t = transitionedSpy.first().first().value<TimeTracker::Transition>();
+    QCOMPARE(t.from, TimeTracker::Mode::Activity);
+    QCOMPARE(t.to, TimeTracker::Mode::Pause);
+    QCOMPARE(t.cause, TimeTracker::TransitionCause::EditApplied);
+}
+
+// D10: the mirror direction -- an edited ongoing segment flipped from Pause
+// to Activity must align mode_ AND emit exactly one transitioned(Pause->
+// Activity, EditApplied), not silently leave the button reading CONTINUE.
+void TimerTest::test_D10_editApplied_pause_to_activity_emits_transitioned()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(10);
+    tracker.useTimerViaButton(Button::Pause);
+    QVERIFY(tracker.isPaused());
+
+    auto liveOngoing = tracker.getOngoingDuration();
+    QVERIFY(liveOngoing.has_value());
+    QCOMPARE(liveOngoing->type, DurationType::Pause);
+    TimeDuration editedOngoing = TimeDuration::fromLiveSession(
+        DurationType::Activity,
+        liveOngoing->startTime,
+        QDateTime::currentDateTime(),
+        liveOngoing->segment_id);
+
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
+
+    const auto result = tracker.commitEditedTimeline(Timeline({}, editedOngoing));
+
+    QVERIFY(result.ok);
+    QVERIFY(tracker.isActive());
+    QCOMPARE(transitionedSpy.count(), 1);
+    const auto t = transitionedSpy.first().first().value<TimeTracker::Transition>();
+    QCOMPARE(t.from, TimeTracker::Mode::Pause);
+    QCOMPARE(t.to, TimeTracker::Mode::Activity);
+    QCOMPARE(t.cause, TimeTracker::TransitionCause::EditApplied);
 }
 
 // Disabled history: the store returns Disabled (a no-op) for commitSession.
@@ -2278,10 +2331,9 @@ void TimerTest::test_commitEditedTimeline_clears_anchor_when_no_ongoing()
     completed.push_back(seg.value());
     Timeline editedTimeline(completed, std::nullopt);
 
-    // Set up spies: the clear path must emit only stopped(), never started()/paused().
+    // Set up spies: the clear path must emit exactly one transition, to None.
     QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
-    QSignalSpy startedSpy(&tracker, &TimeTracker::started);
-    QSignalSpy pausedSpy(&tracker, &TimeTracker::paused);
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
 
     // Act: commit a timeline with no ongoing segment while mode_ != None.
     const auto commitResult = tracker.commitEditedTimeline(editedTimeline);
@@ -2307,12 +2359,14 @@ void TimerTest::test_commitEditedTimeline_clears_anchor_when_no_ongoing()
     QVERIFY2(!tracker.getOngoingDuration().has_value(),
              "getOngoingDuration() must return nullopt after anchor is cleared");
 
-    // stopped(EditApplied) was emitted exactly once; no started()/paused().
+    // stopped(EditApplied) was emitted exactly once; transitioned() confirms
+    // it was the ONE real transition for this commit (no other mode change).
     QCOMPARE(stoppedSpy.count(), 1);
     QCOMPARE(stoppedSpy.first().first().value<TimeTracker::StopReason>(),
              TimeTracker::StopReason::EditApplied);
-    QCOMPARE(startedSpy.count(), 0);
-    QCOMPARE(pausedSpy.count(), 0);
+    QCOMPARE(transitionedSpy.count(), 1);
+    QCOMPARE(transitionedSpy.first().first().value<TimeTracker::Transition>().to,
+             TimeTracker::Mode::None);
 }
 
 // Item B: same clear-on-no-ongoing behavior when the engine is in Pause mode.
@@ -2340,8 +2394,7 @@ void TimerTest::test_commitEditedTimeline_clears_anchor_when_no_ongoing_from_pau
     Timeline editedTimeline(completed, std::nullopt);
 
     QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
-    QSignalSpy startedSpy(&tracker, &TimeTracker::started);
-    QSignalSpy pausedSpy(&tracker, &TimeTracker::paused);
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
 
     // Act: commit a timeline with no ongoing segment while mode_ == Pause.
     const auto commitResult = tracker.commitEditedTimeline(editedTimeline);
@@ -2359,12 +2412,15 @@ void TimerTest::test_commitEditedTimeline_clears_anchor_when_no_ongoing_from_pau
     QVERIFY2(!tracker.getOngoingDuration().has_value(),
              "getOngoingDuration() must return nullopt after anchor is cleared");
 
-    // stopped(EditApplied) was emitted exactly once; no started()/paused().
+    // stopped(EditApplied) was emitted exactly once; transitioned() confirms
+    // it was the ONE real transition, correctly from Pause to None.
     QCOMPARE(stoppedSpy.count(), 1);
     QCOMPARE(stoppedSpy.first().first().value<TimeTracker::StopReason>(),
              TimeTracker::StopReason::EditApplied);
-    QCOMPARE(startedSpy.count(), 0);
-    QCOMPARE(pausedSpy.count(), 0);
+    QCOMPARE(transitionedSpy.count(), 1);
+    const auto t = transitionedSpy.first().first().value<TimeTracker::Transition>();
+    QCOMPARE(t.from, TimeTracker::Mode::Pause);
+    QCOMPARE(t.to, TimeTracker::Mode::None);
 }
 
 // A14: commitEditedTimeline must not half-adopt an ongoing segment while the
@@ -2394,8 +2450,7 @@ void TimerTest::test_commitEditedTimeline_ignores_ongoing_when_already_stopped()
         DurationType::Activity, start, start.addSecs(600));
 
     QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
-    QSignalSpy startedSpy(&tracker, &TimeTracker::started);
-    QSignalSpy pausedSpy(&tracker, &TimeTracker::paused);
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
 
     // Act: commit while mode_ == None.
     const auto result = tracker.commitEditedTimeline(Timeline({}, editedOngoing));
@@ -2410,10 +2465,9 @@ void TimerTest::test_commitEditedTimeline_ignores_ongoing_when_already_stopped()
     QVERIFY2(!tracker.getOngoingDuration().has_value(),
              "getOngoingDuration() must return nullopt: mode_ == None");
 
-    // No mode-transition signal fires: the engine state did not change.
+    // No mode-transition signal fires at all: the engine state did not change.
     QCOMPARE(stoppedSpy.count(), 0);
-    QCOMPARE(startedSpy.count(), 0);
-    QCOMPARE(pausedSpy.count(), 0);
+    QCOMPARE(transitionedSpy.count(), 0);
 }
 
 // Phase 2 clock-seam enabler: prove the injected now-provider fully controls the
@@ -4081,8 +4135,8 @@ void TimerTest::test_C4_fatal_pauseresume_commit_stops_without_started_after_sto
     tracker.useTimerViaButton(Button::Pause);
     QVERIFY(tracker.isPaused());
 
-    QSignalSpy startedSpy(&tracker, &TimeTracker::started);
     QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
 
     // Act: resume from Pause; committing the just-completed Pause segment fails Fatal.
     fakeDb.commitSessionResult = SessionStoreResult::fatal("injected fatal commit on resume");
@@ -4095,8 +4149,17 @@ void TimerTest::test_C4_fatal_pauseresume_commit_stops_without_started_after_sto
     QCOMPARE(stoppedSpy.count(), 1);
     QCOMPARE(stoppedSpy.last().first().value<TimeTracker::StopReason>(),
              TimeTracker::StopReason::FatalStoreError);
-    // The stuck-UI bug: started() must never follow stopped().
-    QCOMPARE(startedSpy.count(), 0);
+    // The stuck-UI bug: no second (started-like) transition must follow the
+    // stop -- exactly one transitioned() event for this whole operation.
+    QCOMPARE(transitionedSpy.count(), 1);
+    // D10 finding 3: mode_ was internally mutated to Activity before the
+    // nested fatal stop fired, but observers never saw that Activity
+    // transition announced -- the emitted `from` must be the mode they
+    // actually last saw (Pause), not the impossible Activity->None.
+    const auto t = transitionedSpy.first().first().value<TimeTracker::Transition>();
+    QCOMPARE(t.from, TimeTracker::Mode::Pause);
+    QCOMPARE(t.to, TimeTracker::Mode::None);
+    QCOMPARE(t.cause, TimeTracker::TransitionCause::FatalStoreError);
 
     // Cleanup: latched, so no further Start; resolve the retained payload
     // so the destructor doesn't find an unresolved commit.
@@ -4126,8 +4189,8 @@ void TimerTest::test_C4_fatal_pause_transition_ends_stopped_not_impossible_state
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
 
-    QSignalSpy pausedSpy(&tracker, &TimeTracker::paused);
     QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
 
     // Act: pause; committing the just-completed Activity segment fails Fatal.
     fakeDb.commitSessionResult = SessionStoreResult::fatal("injected fatal commit on pause");
@@ -4136,15 +4199,22 @@ void TimerTest::test_C4_fatal_pause_transition_ends_stopped_not_impossible_state
 
     // Assert: latched and cleanly stopped -- never the impossible state of
     // segment_id/segment_start_time set while mode_ == None -- and no
-    // paused() signal for a transition that never actually landed in Pause.
+    // separate pause-like transition for a mode that never actually landed.
     QVERIFY(tracker.isFatalLatched());
     QVERIFY(tracker.isStopped());
     QVERIFY(tracker.sessionState_dbg().segment_id.isEmpty());
     QVERIFY(!tracker.sessionState_dbg().segment_start_time.isValid());
-    QCOMPARE(pausedSpy.count(), 0);
     QCOMPARE(stoppedSpy.count(), 1);
     QCOMPARE(stoppedSpy.last().first().value<TimeTracker::StopReason>(),
              TimeTracker::StopReason::FatalStoreError);
+    QCOMPARE(transitionedSpy.count(), 1);
+    // D10 finding 3: mode_ was internally mutated to Pause before the nested
+    // fatal stop fired, but that Pause was never announced -- `from` must be
+    // Activity (what observers actually last saw), not the impossible Pause->None.
+    const auto t = transitionedSpy.first().first().value<TimeTracker::Transition>();
+    QCOMPARE(t.from, TimeTracker::Mode::Activity);
+    QCOMPARE(t.to, TimeTracker::Mode::None);
+    QCOMPARE(t.cause, TimeTracker::TransitionCause::FatalStoreError);
 
     // Cleanup: latched, so no further Start; resolve the retained payload
     // so the destructor doesn't find an unresolved commit.
@@ -4372,7 +4442,7 @@ void TimerTest::test_C4_start_refused_when_discard_retry_latches_with_no_pending
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
-    QSignalSpy startedSpy(&tracker, &TimeTracker::started);
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
 
     // Arrange: a pending discard intent, no pending commit payload, and the
     // tracker not latched yet.
@@ -4384,11 +4454,13 @@ void TimerTest::test_C4_start_refused_when_discard_retry_latches_with_no_pending
     // Act
     tracker.useTimerViaButton(Button::Start);
 
-    // Assert: latch is now set, but tracking must NOT have started.
+    // Assert: latch is now set, but tracking must NOT have started -- mode_
+    // stayed None throughout (the latch happens before any mode mutation),
+    // so no transition of any kind was ever emitted.
     QVERIFY(tracker.isFatalLatched());
     QVERIFY(tracker.isStopped());
     QVERIFY(!tracker.isActive());
-    QCOMPARE(startedSpy.count(), 0);
+    QCOMPARE(transitionedSpy.count(), 0);
 
     // Cleanup so destruction does not find an unresolved intent.
     fakeDb.discardCheckpointResult = SessionStoreResult::success();
@@ -4426,6 +4498,7 @@ void TimerTest::test_D2_stop_backward_clock_step_zero_mutation_drain_still_clean
 
     fakeDb.callLog.clear();
     clock.setNow(t0.addSecs(-600)); // backward step: now precedes segment start
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
 
     // Act
     tracker.useTimerViaButton(Button::Stop);
@@ -4438,6 +4511,14 @@ void TimerTest::test_D2_stop_backward_clock_step_zero_mutation_drain_still_clean
     QVERIFY(!tracker.hasPendingDiscards_dbg());
     QVERIFY(!fakeDb.callLog.contains("setLastCleanShutdownMarker"));
     QVERIFY(tracker.drainForShutdown().clean());
+
+    // D10: the backward clock step drops only the closing interval -- Stop
+    // itself is still one ordinary transition, correctly ButtonStop.
+    QCOMPARE(transitionedSpy.count(), 1);
+    const auto t = transitionedSpy.first().first().value<TimeTracker::Transition>();
+    QCOMPARE(t.from, TimeTracker::Mode::Activity);
+    QCOMPARE(t.to, TimeTracker::Mode::None);
+    QCOMPARE(t.cause, TimeTracker::TransitionCause::ButtonStop);
 }
 
 // D2/HIGH-A (round-2 review): a backward-clock Stop must never register a
@@ -4901,4 +4982,557 @@ void TimerTest::test_D5_cancelShutdown_retains_pending_commit_for_next_start()
     // Cleanup: resolve the payload so destruction finds no unresolved commit.
     fakeDb.commitSessionResult = SessionStoreResult::success();
     QVERIFY(tracker.drainForShutdown().clean());
+}
+
+// ============================================================================
+// D10 (R10-001/R10-002): one typed input dispatcher, one cause-carrying
+// transition event sufficient for a UI reducer, and one typed owner of
+// deferred-event replay priority.
+// ============================================================================
+
+void TimerTest::test_D10_transitioned_emits_one_event_per_real_transition_data()
+{
+    QTest::addColumn<int>("scenario");
+    QTest::addColumn<TimeTracker::Mode>("expectedFrom");
+    QTest::addColumn<TimeTracker::Mode>("expectedTo");
+    QTest::addColumn<TimeTracker::TransitionCause>("expectedCause");
+
+    QTest::newRow("button_start_from_none")
+        << 0 << TimeTracker::Mode::None << TimeTracker::Mode::Activity << TimeTracker::TransitionCause::ButtonStart;
+    QTest::newRow("button_pause_from_activity")
+        << 1 << TimeTracker::Mode::Activity << TimeTracker::Mode::Pause << TimeTracker::TransitionCause::ButtonPause;
+    QTest::newRow("button_resume_from_pause")
+        << 2 << TimeTracker::Mode::Pause << TimeTracker::Mode::Activity << TimeTracker::TransitionCause::ButtonStart;
+    QTest::newRow("button_stop_from_activity")
+        << 3 << TimeTracker::Mode::Activity << TimeTracker::Mode::None << TimeTracker::TransitionCause::ButtonStop;
+    QTest::newRow("button_stop_from_pause")
+        << 4 << TimeTracker::Mode::Pause << TimeTracker::Mode::None << TimeTracker::TransitionCause::ButtonStop;
+    QTest::newRow("lock_autopause_from_activity")
+        << 5 << TimeTracker::Mode::Activity << TimeTracker::Mode::Pause << TimeTracker::TransitionCause::LockAutopause;
+    QTest::newRow("lock_resume_from_pause")
+        << 6 << TimeTracker::Mode::Pause << TimeTracker::Mode::Activity << TimeTracker::TransitionCause::LockResume;
+}
+
+void TimerTest::test_D10_transitioned_emits_one_event_per_real_transition()
+{
+    QFETCH(int, scenario);
+    QFETCH(TimeTracker::Mode, expectedFrom);
+    QFETCH(TimeTracker::Mode, expectedTo);
+    QFETCH(TimeTracker::TransitionCause, expectedCause);
+
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    if (scenario == 5 || scenario == 6) {
+        QSettings writer(settingsPath, QSettings::IniFormat);
+        writer.setValue("uTimer/autopause_enabled", true);
+        writer.setValue("uTimer/autopause_threshold_minutes", 15);
+        writer.sync();
+    }
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    switch (scenario) {
+    case 0: // already None
+    case 3: break;
+    case 1:
+    case 4:
+        tracker.useTimerViaButton(Button::Start);
+        if (scenario == 4) tracker.useTimerViaButton(Button::Pause);
+        break;
+    case 2:
+        tracker.useTimerViaButton(Button::Start);
+        tracker.useTimerViaButton(Button::Pause);
+        break;
+    case 5:
+        tracker.useTimerViaButton(Button::Start);
+        break;
+    case 6:
+        tracker.useTimerViaButton(Button::Start);
+        tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, clock.now());
+        break;
+    }
+    if (scenario == 3) tracker.useTimerViaButton(Button::Start);
+
+    QCOMPARE(tracker.isActive(), expectedFrom == TimeTracker::Mode::Activity);
+    QCOMPARE(tracker.isPaused(), expectedFrom == TimeTracker::Mode::Pause);
+    QCOMPARE(tracker.isStopped(), expectedFrom == TimeTracker::Mode::None);
+
+    QSignalSpy spy(&tracker, &TimeTracker::transitioned);
+
+    // Act
+    switch (scenario) {
+    case 0:
+    case 2: tracker.useTimerViaButton(Button::Start); break;
+    case 1: tracker.useTimerViaButton(Button::Pause); break;
+    case 3:
+    case 4: tracker.useTimerViaButton(Button::Stop); break;
+    case 5: tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, clock.now()); break;
+    case 6: tracker.useTimerViaLockEvent(LockEvent::Unlock); break;
+    }
+
+    // Assert
+    QCOMPARE(spy.count(), 1);
+    const auto t = spy.first().first().value<TimeTracker::Transition>();
+    QCOMPARE(t.from, expectedFrom);
+    QCOMPARE(t.to, expectedTo);
+    QCOMPARE(t.cause, expectedCause);
+}
+
+void TimerTest::test_D10_noop_inputs_emit_no_transitioned_data()
+{
+    QTest::addColumn<int>("scenario");
+    QTest::newRow("pause_from_none") << 0;
+    QTest::newRow("pause_from_pause") << 1;
+    QTest::newRow("start_from_activity") << 2;
+    QTest::newRow("stop_from_none") << 3;
+}
+
+void TimerTest::test_D10_noop_inputs_emit_no_transitioned()
+{
+    QFETCH(int, scenario);
+
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    Button action = Button::Pause;
+    switch (scenario) {
+    case 0: action = Button::Pause; break;
+    case 1:
+        tracker.useTimerViaButton(Button::Start);
+        tracker.useTimerViaButton(Button::Pause);
+        action = Button::Pause;
+        break;
+    case 2:
+        tracker.useTimerViaButton(Button::Start);
+        action = Button::Start;
+        break;
+    case 3:
+        action = Button::Stop;
+        break;
+    }
+
+    QSignalSpy spy(&tracker, &TimeTracker::transitioned);
+
+    // Act
+    tracker.useTimerViaButton(action);
+
+    // Assert
+    QCOMPARE(spy.count(), 0);
+}
+
+void TimerTest::test_D10_onStartPausePressed_delegates_to_button_dispatch_data()
+{
+    QTest::addColumn<TimeTracker::Mode>("startMode");
+    QTest::newRow("from_none") << TimeTracker::Mode::None;
+    QTest::newRow("from_pause") << TimeTracker::Mode::Pause;
+    QTest::newRow("from_activity") << TimeTracker::Mode::Activity;
+}
+
+void TimerTest::test_D10_onStartPausePressed_delegates_to_button_dispatch()
+{
+    QFETCH(TimeTracker::Mode, startMode);
+
+    // Arrange: two independently-arranged trackers in the identical
+    // precondition mode, one driven via the production toggle slot, the
+    // other via the direct button dispatcher.
+    QTemporaryDir tempDirA;
+    QTemporaryDir tempDirB;
+    QVERIFY(tempDirA.isValid());
+    QVERIFY(tempDirB.isValid());
+    Settings settingsA(createSettingsFile(tempDirA.path(), 7));
+    Settings settingsB(createSettingsFile(tempDirB.path(), 7));
+    FakeSessionStore dbA;
+    FakeSessionStore dbB;
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clockA(t0);
+    FakeClock clockB(t0);
+
+    TimeTracker trackerToggle(settingsA, dbA);
+    trackerToggle.setNowProvider_dbg([&clockA]() { return clockA.now(); });
+    TimeTracker trackerButton(settingsB, dbB);
+    trackerButton.setNowProvider_dbg([&clockB]() { return clockB.now(); });
+
+    if (startMode != TimeTracker::Mode::None) {
+        trackerToggle.useTimerViaButton(Button::Start);
+        trackerButton.useTimerViaButton(Button::Start);
+    }
+    if (startMode == TimeTracker::Mode::Pause) {
+        trackerToggle.useTimerViaButton(Button::Pause);
+        trackerButton.useTimerViaButton(Button::Pause);
+    }
+
+    QSignalSpy toggleSpy(&trackerToggle, &TimeTracker::transitioned);
+    QSignalSpy buttonSpy(&trackerButton, &TimeTracker::transitioned);
+
+    // Act
+    trackerToggle.onStartPausePressed();
+    const Button equivalent = (startMode == TimeTracker::Mode::Activity) ? Button::Pause : Button::Start;
+    trackerButton.useTimerViaButton(equivalent);
+
+    // Assert: identical transition, identical resulting mode.
+    QCOMPARE(toggleSpy.count(), buttonSpy.count());
+    QCOMPARE(toggleSpy.count(), 1);
+    const auto a = toggleSpy.first().first().value<TimeTracker::Transition>();
+    const auto b = buttonSpy.first().first().value<TimeTracker::Transition>();
+    QCOMPARE(a.from, b.from);
+    QCOMPARE(a.to, b.to);
+    QCOMPARE(a.cause, b.cause);
+    QCOMPARE(trackerToggle.isActive(), trackerButton.isActive());
+    QCOMPARE(trackerToggle.isPaused(), trackerButton.isPaused());
+    QCOMPARE(trackerToggle.isStopped(), trackerButton.isStopped());
+}
+
+void TimerTest::test_D10_deferred_events_replay_chronologically_lock_first()
+{
+    // Arrange: lock (23:20) captured before the midnight cutoff (23:59:59.5),
+    // with a real Unlock (23:40) also arriving before the dialog closes.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/autopause_enabled", true);
+    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    tracker.beginExclusiveEdit();
+
+    const QDateTime lockTime(QDate(2025, 6, 1), QTime(23, 20, 0), Qt::LocalTime);
+    clock.setNow(lockTime);
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
+
+    const QDateTime unlockTime(QDate(2025, 6, 1), QTime(23, 40, 0), Qt::LocalTime);
+    clock.setNow(unlockTime);
+    tracker.useTimerViaLockEvent(LockEvent::Unlock);
+
+    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
+    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightScheduled, cutoff);
+
+    QSignalSpy spy(&tracker, &TimeTracker::transitioned);
+
+    // Act
+    const QDateTime afterMidnight(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime);
+    clock.setNow(afterMidnight);
+    tracker.endExclusiveEdit();
+
+    // Assert: lock correction (autopause then resume) replays first, THEN
+    // the midnight cutoff stops the fresh post-unlock Activity segment.
+    QCOMPARE(spy.count(), 3);
+    QCOMPARE(spy.at(0).first().value<TimeTracker::Transition>().cause, TimeTracker::TransitionCause::LockAutopause);
+    QCOMPARE(spy.at(1).first().value<TimeTracker::Transition>().cause, TimeTracker::TransitionCause::LockResume);
+    const auto stopEvent = spy.at(2).first().value<TimeTracker::Transition>();
+    QCOMPARE(stopEvent.cause, TimeTracker::TransitionCause::MidnightScheduled);
+    QCOMPARE(stopEvent.to, TimeTracker::Mode::None);
+    QVERIFY(tracker.isStopped());
+}
+
+void TimerTest::test_D10_deferred_events_replay_chronologically_midnight_first()
+{
+    // Arrange: the scheduled midnight cutoff (23:59:59.5) is captured first;
+    // a LongOngoingLock arrives later (23:59:59.9), still while the dialog
+    // is open, and is never unlocked before the dialog closes.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/autopause_enabled", true);
+    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    tracker.beginExclusiveEdit();
+
+    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
+    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightScheduled, cutoff);
+
+    const QDateTime lockTime(QDate(2025, 6, 1), QTime(23, 59, 59, 900), Qt::LocalTime);
+    clock.setNow(lockTime);
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
+    QVERIFY(tracker.pendingLockCorrection_dbg().has_value());
+
+    QSignalSpy spy(&tracker, &TimeTracker::transitioned);
+
+    // Act
+    const QDateTime afterMidnight(QDate(2025, 6, 2), QTime(1, 0, 0), Qt::LocalTime);
+    clock.setNow(afterMidnight);
+    tracker.endExclusiveEdit();
+
+    // Assert: the midnight stop is the only real transition; the
+    // later-captured lock correction sees an already-stopped engine and
+    // contributes nothing (its own Activity-only gate no-ops).
+    QCOMPARE(spy.count(), 1);
+    const auto stopEvent = spy.first().first().value<TimeTracker::Transition>();
+    QCOMPARE(stopEvent.cause, TimeTracker::TransitionCause::MidnightScheduled);
+    QCOMPARE(stopEvent.to, TimeTracker::Mode::None);
+    QVERIFY(tracker.isStopped());
+    QVERIFY(!tracker.pendingMidnightEvent_dbg().has_value());
+    QVERIFY(!tracker.pendingLockCorrection_dbg().has_value());
+}
+
+void TimerTest::test_D10_longlock_disabled_autopause_dialog_open_is_dropped_not_deferred()
+{
+    // Arrange: autopause explicitly disabled, Activity running, History
+    // dialog open.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/autopause_enabled", false);
+    writer.sync();
+    Settings settings(settingsPath);
+    QVERIFY(!settings.isAutopauseEnabled());
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    tracker.beginExclusiveEdit();
+
+    // Act: a LongOngoingLock arrives while the dialog is open, autopause off.
+    const QDateTime lockTime(QDate(2025, 6, 1), QTime(9, 30, 0), Qt::LocalTime);
+    clock.setNow(lockTime);
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
+
+    // Assert: dropped outright -- exactly the non-dialog-open behavior --
+    // not captured for a later replay that would resurrect it if autopause
+    // is subsequently re-enabled.
+    QVERIFY(!tracker.pendingLockCorrection_dbg().has_value());
+
+    tracker.endExclusiveEdit();
+    QVERIFY(tracker.isActive());
+}
+
+// Round-2 review (finding 1): a live scheduled midnight stop, driven through
+// the real onMidnightTimerFired() callback (via the documented fireMidnightTimer_dbg()
+// seam that invokes it directly instead of waiting for the real QTimer -- see
+// DayBoundaryWatcher's own doc comment), must emit transitioned(..., MidnightScheduled)
+// exactly once -- not mis-mapped to MidnightWatchdog or dropped entirely.
+void TimerTest::test_D10_midnight_scheduled_live_emits_transitioned()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    tracker.dayBoundaryWatcher_dbg().armScheduledStop(t0);
+
+    const QDateTime boundary(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
+    clock.setNow(boundary);
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+
+    // Act: the real scheduled-stop callback fires at the boundary.
+    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+
+    // Assert
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(transitionedSpy.count(), 1);
+    const auto t = transitionedSpy.first().first().value<TimeTracker::Transition>();
+    QCOMPARE(t.from, TimeTracker::Mode::Activity);
+    QCOMPARE(t.to, TimeTracker::Mode::None);
+    QCOMPARE(t.cause, TimeTracker::TransitionCause::MidnightScheduled);
+    QCOMPARE(stoppedSpy.count(), 1);
+    QCOMPARE(stoppedSpy.first().first().value<TimeTracker::StopReason>(),
+             TimeTracker::StopReason::MidnightScheduled);
+}
+
+// Round-2 review (finding 1): a live watchdog cross-midnight discard, driven
+// through the REAL production onTick() slot (not the discardCrossMidnightOngoingAndStop_dbg
+// bypass other watchdog tests use), must emit transitioned(..., MidnightWatchdog)
+// exactly once -- not mis-mapped to MidnightScheduled.
+void TimerTest::test_D10_midnight_watchdog_live_emits_transitioned()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(preMidnight);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+
+    const QDateTime postMidnight(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime);
+    clock.setNow(postMidnight);
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+
+    // Act: the real 100ms heartbeat slot detects the missed boundary.
+    tracker.onTick(postMidnight);
+
+    // Assert
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(transitionedSpy.count(), 1);
+    const auto t = transitionedSpy.first().first().value<TimeTracker::Transition>();
+    QCOMPARE(t.from, TimeTracker::Mode::Activity);
+    QCOMPARE(t.to, TimeTracker::Mode::None);
+    QCOMPARE(t.cause, TimeTracker::TransitionCause::MidnightWatchdog);
+    QCOMPARE(stoppedSpy.count(), 1);
+    QCOMPARE(stoppedSpy.first().first().value<TimeTracker::StopReason>(),
+             TimeTracker::StopReason::MidnightWatchdog);
+}
+
+// Round-2 review (finding 1): shutdown()/drainForShutdown() must emit
+// transitioned(..., Shutdown) -- not mis-mapped to ButtonStop by either the
+// cause derivation or the legacy stopped() StopReason translation.
+void TimerTest::test_D10_shutdown_emits_transitioned()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+
+    // Act
+    tracker.shutdown();
+
+    // Assert
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(transitionedSpy.count(), 1);
+    const auto t = transitionedSpy.first().first().value<TimeTracker::Transition>();
+    QCOMPARE(t.from, TimeTracker::Mode::Activity);
+    QCOMPARE(t.to, TimeTracker::Mode::None);
+    QCOMPARE(t.cause, TimeTracker::TransitionCause::Shutdown);
+    QCOMPARE(stoppedSpy.count(), 1);
+    QCOMPARE(stoppedSpy.first().first().value<TimeTracker::StopReason>(),
+             TimeTracker::StopReason::Shutdown);
+}
+
+// Round-2 review (finding 1): a Fatal commit failure during a Button::Stop
+// press must NOT relabel the transition's cause as FatalStoreError --
+// stopTimer() never nests through stopIfLatched() (unlike startTimer's Pause
+// branch and finalizePauseTransition); the button's own reason is what
+// actually happened, while the latch still takes effect for the NEXT Start.
+void TimerTest::test_D10_fatal_commit_on_stop_keeps_buttonstop_cause()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    clock.advance(60ll * 1000ll); // non-zero duration so commitSession is actually called
+
+    fakeDb.commitSessionResult = SessionStoreResult::fatal("injected fatal commit on stop");
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
+
+    // Act
+    tracker.useTimerViaButton(Button::Stop);
+
+    // Assert: latched for the future, but THIS transition truthfully
+    // reports what the user actually did.
+    QVERIFY(tracker.isFatalLatched());
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(transitionedSpy.count(), 1);
+    const auto t = transitionedSpy.first().first().value<TimeTracker::Transition>();
+    QCOMPARE(t.from, TimeTracker::Mode::Activity);
+    QCOMPARE(t.to, TimeTracker::Mode::None);
+    QCOMPARE(t.cause, TimeTracker::TransitionCause::ButtonStop);
+
+    // Cleanup: latched, so no further Start; resolve the retained payload.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    tracker.drainForShutdown();
+}
+
+// Round-2 review (finding 1, M8b): the delegation test above only exercises
+// the three ordinary mode rows -- a hand-rolled toggle body that dropped
+// useTimerViaButton()'s cross-midnight-discard guard would still pass all
+// three. Cover it explicitly: an ongoing segment that has crossed midnight
+// must be force-stopped by onStartPausePressed() exactly as by
+// useTimerViaButton(), regardless of which button the toggle would have
+// picked.
+void TimerTest::test_D10_onStartPausePressed_cross_midnight_discard_matches_button_dispatch()
+{
+    // Arrange: two trackers, each with an Activity segment that has silently
+    // crossed midnight (started yesterday, "now" is today).
+    QTemporaryDir tempDirA;
+    QTemporaryDir tempDirB;
+    QVERIFY(tempDirA.isValid());
+    QVERIFY(tempDirB.isValid());
+    Settings settingsA(createSettingsFile(tempDirA.path(), 7));
+    Settings settingsB(createSettingsFile(tempDirB.path(), 7));
+    FakeSessionStore dbA;
+    FakeSessionStore dbB;
+    const QDateTime yesterday(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
+    const QDateTime today(QDate(2025, 6, 2), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clockA(yesterday);
+    FakeClock clockB(yesterday);
+
+    TimeTracker trackerToggle(settingsA, dbA);
+    trackerToggle.setNowProvider_dbg([&clockA]() { return clockA.now(); });
+    TimeTracker trackerButton(settingsB, dbB);
+    trackerButton.setNowProvider_dbg([&clockB]() { return clockB.now(); });
+
+    trackerToggle.useTimerViaButton(Button::Start);
+    trackerButton.useTimerViaButton(Button::Start);
+    clockA.setNow(today);
+    clockB.setNow(today);
+
+    QSignalSpy toggleSpy(&trackerToggle, &TimeTracker::transitioned);
+    QSignalSpy buttonSpy(&trackerButton, &TimeTracker::transitioned);
+
+    // Act: toggle would have picked Pause (mode_ is Activity), but the
+    // cross-midnight guard must force a stop instead, exactly like Button::Pause
+    // routed through useTimerViaButton() would.
+    trackerToggle.onStartPausePressed();
+    trackerButton.useTimerViaButton(Button::Pause);
+
+    // Assert: both forced to None via the discard path, not Pause.
+    QVERIFY(trackerToggle.isStopped());
+    QVERIFY(trackerButton.isStopped());
+    QCOMPARE(toggleSpy.count(), buttonSpy.count());
+    QCOMPARE(toggleSpy.count(), 1);
+    const auto a = toggleSpy.first().first().value<TimeTracker::Transition>();
+    const auto b = buttonSpy.first().first().value<TimeTracker::Transition>();
+    QCOMPARE(a.to, TimeTracker::Mode::None);
+    QCOMPARE(a.cause, TimeTracker::TransitionCause::MidnightWatchdog);
+    QCOMPARE(a.cause, b.cause);
+    QCOMPARE(a.to, b.to);
 }

@@ -37,6 +37,52 @@
 #include "logger.h"
 #include "dayvalidity.h"
 
+namespace {
+// D10: the only translation needed between the pre-existing StopReason
+// vocabulary (still used wherever a stop's own reason is threaded through --
+// stopTimer's parameter, DrainResult, ShutdownCoordinator) and the newer,
+// broader TransitionCause used by transitioned(). Every StopReason maps to
+// exactly one to-None cause.
+TimeTracker::TransitionCause causeFromStopReason(TimeTracker::StopReason reason)
+{
+    switch (reason) {
+    case TimeTracker::StopReason::ButtonStop:         return TimeTracker::TransitionCause::ButtonStop;
+    case TimeTracker::StopReason::MidnightScheduled:  return TimeTracker::TransitionCause::MidnightScheduled;
+    case TimeTracker::StopReason::MidnightWatchdog:   return TimeTracker::TransitionCause::MidnightWatchdog;
+    case TimeTracker::StopReason::Shutdown:           return TimeTracker::TransitionCause::Shutdown;
+    case TimeTracker::StopReason::EditApplied:        return TimeTracker::TransitionCause::EditApplied;
+    case TimeTracker::StopReason::FatalStoreError:    return TimeTracker::TransitionCause::FatalStoreError;
+    }
+    Q_UNREACHABLE();
+}
+
+// The inverse, for deriving stopped() from a transitioned() event whose
+// `to` is Mode::None. Only ever called for the six causes that can reach
+// None -- every other TransitionCause never produces a to-None transition.
+// Every enumerator is listed explicitly (no `default:`) so that adding a
+// new TransitionCause without updating this function is a -Wswitch build
+// warning, matching causeFromStopReason() above -- a `default:` here would
+// silently swallow that warning and defer the mistake to a release-build
+// Q_UNREACHABLE() (undefined behaviour) instead.
+TimeTracker::StopReason stopReasonFromCause(TimeTracker::TransitionCause cause)
+{
+    switch (cause) {
+    case TimeTracker::TransitionCause::ButtonStop:        return TimeTracker::StopReason::ButtonStop;
+    case TimeTracker::TransitionCause::MidnightScheduled: return TimeTracker::StopReason::MidnightScheduled;
+    case TimeTracker::TransitionCause::MidnightWatchdog:  return TimeTracker::StopReason::MidnightWatchdog;
+    case TimeTracker::TransitionCause::Shutdown:          return TimeTracker::StopReason::Shutdown;
+    case TimeTracker::TransitionCause::EditApplied:       return TimeTracker::StopReason::EditApplied;
+    case TimeTracker::TransitionCause::FatalStoreError:   return TimeTracker::StopReason::FatalStoreError;
+    case TimeTracker::TransitionCause::ButtonStart:
+    case TimeTracker::TransitionCause::ButtonPause:
+    case TimeTracker::TransitionCause::LockAutopause:
+    case TimeTracker::TransitionCause::LockResume:
+        Q_UNREACHABLE();
+    }
+    Q_UNREACHABLE();
+}
+} // namespace
+
 // ============================================================================
 // DayBoundaryWatcher implementation
 // ============================================================================
@@ -57,11 +103,11 @@ void TimeTracker::DayBoundaryWatcher::tick(const QDateTime& now)
         // can discard the whole ongoing segment at replay, exactly as this
         // watchdog would have done had the dialog not suspended it. The
         // engine itself is not touched while the dialog remains open.
-        if (!owner_.pending_midnight_event_.has_value()
+        if (!owner_.deferred_edit_events_.hasMidnight()
             && owner_.mode_ != Mode::None
             && owner_.session_.segment_start_time.isValid()
             && isCrossMidnight(owner_.session_.segment_start_time, now)) {
-            owner_.pending_midnight_event_ = PendingMidnightEvent{StopReason::MidnightWatchdog, now};
+            owner_.deferred_edit_events_.deferMidnightIfAbsent(StopReason::MidnightWatchdog, now);
             Logger::Log("[MIDNIGHT] watchdog cross-midnight detected during history edit - deferred");
         }
         return;
@@ -167,8 +213,8 @@ void TimeTracker::DayBoundaryWatcher::onMidnightTimerFired()
     // happens to be current when the dialog eventually closes.
     const QDateTime cutoff = intended_boundary_.isValid() ? intended_boundary_ : now;
     if (owner_.dialog_open_) {
-        if (!owner_.pending_midnight_event_.has_value()) {
-            owner_.pending_midnight_event_ = PendingMidnightEvent{StopReason::MidnightScheduled, cutoff};
+        if (!owner_.deferred_edit_events_.hasMidnight()) {
+            owner_.deferred_edit_events_.deferMidnightIfAbsent(StopReason::MidnightScheduled, cutoff);
             Logger::Log("[MIDNIGHT] suspended during history edit");
         }
         return;
@@ -514,7 +560,7 @@ bool TimeTracker::retryUnsavedDurations()
  *             clock skew between successive QDateTime::currentDateTime()
  *             calls.
  */
-void TimeTracker::startTimer(const QDateTime& now)
+void TimeTracker::startTimer(const QDateTime& now, TransitionCause cause)
 {
     // Clear autopause flag at the top of startTimer so both Pause→Activity
     // and None→Activity paths start with a clean state.
@@ -545,10 +591,14 @@ void TimeTracker::startTimer(const QDateTime& now)
         // NOT stop it (enterFatalState() only latches) -- stop here, at the
         // first safe point after this transition's own state changes are
         // done, using the already-captured `now`. Without this, control
-        // would fall through to `emit started(true)` below while mode_ has
-        // already been forced to None by a stop happening mid-transition,
-        // desyncing the UI (started() with nothing actually running).
-        if (stopIfLatched(now)) {
+        // would fall through to the transitioned()/started() emission below
+        // while mode_ has already been forced to None by a stop happening
+        // mid-transition, desyncing the UI (started() with nothing actually
+        // running). mode_ was already mutated to Activity above but that
+        // transition was never announced -- pass Mode::Pause (what observers
+        // actually last saw) so the nested stop's own emitted `from` is
+        // truthful instead of the impossible Activity->None.
+        if (stopIfLatched(now, Mode::Pause)) {
             return;
         }
 
@@ -557,7 +607,7 @@ void TimeTracker::startTimer(const QDateTime& now)
         }
         day_boundary_watcher_.armScheduledStop(now);
         Logger::Log("[TIMER] > TimeTracker unpaused");
-        emit started(true);
+        emitTransition(Mode::Pause, Mode::Activity, cause);
         return;
     }
     if (mode_ == Mode::None) {
@@ -621,7 +671,7 @@ void TimeTracker::startTimer(const QDateTime& now)
         day_boundary_watcher_.armScheduledStop(now);
         Logger::Log("[TIMER] >> TimeTracker started");
         shutdown_called_ = false;
-        emit started(false);
+        emitTransition(Mode::None, Mode::Activity, cause);
         return;
     }
     Logger::Log("[DEBUG] Trying to Start TimeTracker from Mode Activity - D=" + QString::number(session_.durations.size()));
@@ -659,7 +709,7 @@ void TimeTracker::pauseTimer(const QDateTime& now)
     // it actually landed in Pause.
     if (mode_ == Mode::Pause) {
         Logger::Log("[TIMER] TimeTracker paused <");
-        emit paused();
+        emitTransition(Mode::Activity, Mode::Pause, TransitionCause::ButtonPause);
     }
 }
 
@@ -675,8 +725,11 @@ void TimeTracker::finalizePauseTransition(const QDateTime& now)
     // pause transition has reached a fully consistent state (mode_/segment_
     // set together), rather than mid-transition where a nested stop would
     // leave segment_id/segment_start_time set while mode_ == None -- the
-    // state SessionState documents as impossible.
-    stopIfLatched(now);
+    // state SessionState documents as impossible. mode_ was already mutated
+    // to Pause above but that transition was never announced -- both callers
+    // (pauseTimer, backpauseTimer) guarantee the pre-transition mode was
+    // Activity, so pass that as the nested stop's truthful `from`.
+    stopIfLatched(now, Mode::Activity);
 }
 
 /**
@@ -762,6 +815,7 @@ void TimeTracker::backpauseTimer(const QDateTime& now, const QDateTime& lockTime
     // itself (a Fatal commit during the transition).
     if (mode_ == Mode::Pause) {
         Logger::Log("[TIMER] TimeTracker retroactively paused <");
+        emitTransition(Mode::Activity, Mode::Pause, TransitionCause::LockAutopause);
     }
 }
 
@@ -776,12 +830,20 @@ void TimeTracker::backpauseTimer(const QDateTime& now, const QDateTime& lockTime
  * 4. Persists the Session to the Database using updateDurationsInDB().
  *    (This updates the existing rows rather than creating new ones, preserving IDs).
  */
-void TimeTracker::stopTimer(const QDateTime& now, StopReason reason)
+void TimeTracker::stopTimer(const QDateTime& now, StopReason reason, std::optional<Mode> observedFromOverride)
 {
     if (mode_ == Mode::None) {
         Logger::Log("[DEBUG] Stop ignored; already stopped");
         return;
     }
+    // Normally the live mode_ IS what observers last saw. The override
+    // exists only for the nested fatal-latch stop fired from inside a
+    // transition that already mutated mode_ to the new value before
+    // persisting/checking the latch (startTimer's Pause branch,
+    // finalizePauseTransition) -- there, mode_ is already the not-yet-
+    // announced new mode, so the caller supplies the mode it actually
+    // announced last.
+    const Mode fromMode = observedFromOverride.value_or(mode_);
 
     // A cross-midnight ongoing segment cannot be safely closed -- its
     // closing interval is discarded by addDuration() below (TimeDuration::
@@ -850,16 +912,28 @@ void TimeTracker::stopTimer(const QDateTime& now, StopReason reason)
     // any pending discard intent) resolved -- see sessionstore.h's
     // markCleanShutdown().
 
-    emit stopped(reason);
+    emitTransition(fromMode, Mode::None, causeFromStopReason(reason));
 }
 
-bool TimeTracker::stopIfLatched(const QDateTime& now)
+bool TimeTracker::stopIfLatched(const QDateTime& now, std::optional<Mode> observedFromOverride)
 {
     if (fatal_state_latched_) {
-        stopTimer(now, StopReason::FatalStoreError);
+        stopTimer(now, StopReason::FatalStoreError, observedFromOverride);
         return true;
     }
     return false;
+}
+
+void TimeTracker::emitTransition(Mode from, Mode to, TransitionCause cause)
+{
+    emit transitioned(Transition{from, to, cause});
+
+    // stopped() is kept as the one explicitly separate terminal event
+    // (R10-002): every cause that reaches None derives it here, from this
+    // same one emission point, rather than from a second call site.
+    if (to == Mode::None) {
+        emit stopped(stopReasonFromCause(cause));
+    }
 }
 
 void TimeTracker::useTimerViaButton(Button button)
@@ -890,28 +964,18 @@ void TimeTracker::useTimerViaButton(Button button)
 #endif
 }
 
+// D10 (R10-001): production's toggle entry point no longer repeats
+// useTimerViaButton()'s boundary guard/switch -- it just translates the
+// toggle to the one typed input (Button) and dispatches through the single
+// production/test button surface. mutex_ is a QRecursiveMutex so re-entering
+// useTimerViaButton()'s own lock from the same thread is safe; the nested
+// StateGuard there covers this call too (the same pattern onStopPressed()
+// already relied on).
 void TimeTracker::onStartPausePressed()
 {
     QMutexLocker locker(&mutex_);
-#ifndef QT_NO_DEBUG
-    StateGuard guard(*this, "onStartPausePressed");
-    guard.markTransitioned();
-#endif
-    const QDateTime now = now_provider_();
-    if (discardCrossMidnightOngoingAndStop(now)) {
-#ifndef QT_NO_DEBUG
-        checkDurationInvariants();
-#endif
-        return;
-    }
-    switch (mode_) {
-        case Mode::Activity: pauseTimer(now); break;
-        case Mode::Pause:    startTimer(now); break;
-        case Mode::None:     startTimer(now); break;
-    }
-#ifndef QT_NO_DEBUG
-    checkDurationInvariants();
-#endif
+    const Button button = (mode_ == Mode::Activity) ? Button::Pause : Button::Start;
+    useTimerViaButton(button);
 }
 
 void TimeTracker::onStopPressed()
@@ -947,64 +1011,77 @@ void TimeTracker::useTimerViaLockEvent(LockEvent event, const QDateTime& lockTim
 #endif
         return;
     }
-    if (event == LockEvent::Lock) {
-        is_locked_ = true;
-        if (dialog_open_) {
-            Logger::Log("[LOCK] suspended during history edit (Lock)");
-            return;
-        }
-        // Save a checkpoint when lock is detected (only if actively tracking time)
-        if (mode_ == Mode::Activity) {
-            saveCheckpoint_locked(now);
-            Logger::Log("[LOCK] Desktop locked - checkpoint saved, further checkpoints suspended");
-        } else {
-            Logger::Log("[LOCK] Desktop locked - no checkpoint (timer not in Activity mode)");
-        }
-        return;
-    }
-    if (event == LockEvent::Unlock) {
-        is_locked_ = false;
-        if (dialog_open_) {
-            // The locked interval still happened and must become Pause, so an
-            // Unlock stamps the pending correction's unlock time instead of
-            // cancelling it (only if a LongOngoingLock is actually pending).
-            if (pending_lock_correction_.has_value()) {
-                pending_lock_correction_->unlock_time = now;
-            }
-            Logger::Log("[LOCK] suspended during history edit (Unlock)");
-            return;
-        }
-        Logger::Log("[LOCK] Desktop unlocked - checkpoint saving resumed");
-    }
-    if (!settings_.isAutopauseEnabled()) {
-        Logger::Log("[DEBUG] Autopause disabled; lock event ignored");
-        return;
-    }
-    if (event == LockEvent::LongOngoingLock) {
-        if (dialog_open_) {
-            if (pending_lock_correction_.has_value()) {
-                Logger::Log("[LOCK] a LongOngoingLock was already pending during this "
-                             "history edit - dropping it in favor of the new one");
-            }
-            pending_lock_correction_ = PendingLockCorrection{lockTime, QDateTime()};
-            Logger::Log("[LOCK] suspended during history edit (LongOngoingLock)");
-            return;
-        }
-        autopause_pending_resume_ = (mode_ == Mode::Activity);
-        if (autopause_pending_resume_) {
-            backpauseTimer(now, lockTime);
-            emit modeChanged(PauseCause::LockAutopause);
-        }
-    } else if (event == LockEvent::Unlock) {
-        if (autopause_pending_resume_) {
-            startTimer(now);
-            emit modeChanged(PauseCause::LockResume);
-        }
-        autopause_pending_resume_ = false;
+    // D10/plan4 B16: each event kind owns its complete behavior, including
+    // the dialog/autopause gates, instead of a shared block two of the three
+    // cases fall through into.
+    switch (event) {
+    case LockEvent::Lock:            onLockDetected(now); break;
+    case LockEvent::Unlock:          onUnlockDetected(now); break;
+    case LockEvent::LongOngoingLock: onLongOngoingLockDetected(now, lockTime); break;
+    case LockEvent::None:            break;
     }
 #ifndef QT_NO_DEBUG
     checkDurationInvariants();
 #endif
+}
+
+void TimeTracker::onLockDetected(const QDateTime& now)
+{
+    is_locked_ = true;
+    if (dialog_open_) {
+        Logger::Log("[LOCK] suspended during history edit (Lock)");
+        return;
+    }
+    // Save a checkpoint when lock is detected (only if actively tracking time)
+    if (mode_ == Mode::Activity) {
+        saveCheckpoint_locked(now);
+        Logger::Log("[LOCK] Desktop locked - checkpoint saved, further checkpoints suspended");
+    } else {
+        Logger::Log("[LOCK] Desktop locked - no checkpoint (timer not in Activity mode)");
+    }
+}
+
+void TimeTracker::onUnlockDetected(const QDateTime& now)
+{
+    is_locked_ = false;
+    if (dialog_open_) {
+        // The locked interval still happened and must become Pause, so an
+        // Unlock stamps the pending correction's unlock time instead of
+        // cancelling it (only if a LongOngoingLock is actually pending).
+        deferred_edit_events_.stampLockUnlock(now);
+        Logger::Log("[LOCK] suspended during history edit (Unlock)");
+        return;
+    }
+    Logger::Log("[LOCK] Desktop unlocked - checkpoint saving resumed");
+    if (!settings_.isAutopauseEnabled()) {
+        Logger::Log("[DEBUG] Autopause disabled; lock event ignored");
+        return;
+    }
+    if (autopause_pending_resume_) {
+        startTimer(now, TransitionCause::LockResume);
+    }
+    autopause_pending_resume_ = false;
+}
+
+void TimeTracker::onLongOngoingLockDetected(const QDateTime& now, const QDateTime& lockTime)
+{
+    if (!settings_.isAutopauseEnabled()) {
+        Logger::Log("[DEBUG] Autopause disabled; lock event ignored");
+        return;
+    }
+    if (dialog_open_) {
+        if (deferred_edit_events_.hasLock()) {
+            Logger::Log("[LOCK] a LongOngoingLock was already pending during this "
+                         "history edit - dropping it in favor of the new one");
+        }
+        deferred_edit_events_.beginLock(lockTime);
+        Logger::Log("[LOCK] suspended during history edit (LongOngoingLock)");
+        return;
+    }
+    autopause_pending_resume_ = (mode_ == Mode::Activity);
+    if (autopause_pending_resume_) {
+        backpauseTimer(now, lockTime);
+    }
 }
 
 void TimeTracker::onTick(const QDateTime& now)
@@ -1145,14 +1222,14 @@ TimeTracker::EditCommitResult TimeTracker::commitEditedTimeline(const Timeline& 
         // pre-edit mode. (adoptOngoingSegment intentionally ignores type.)
         const Mode desired = (seg.type == DurationType::Activity) ? Mode::Activity : Mode::Pause;
         if (mode_ != desired) {
+            const Mode from = mode_;
             mode_ = desired;
             if (desired == Mode::Activity) {
                 checkpointTimer_.start();   // checkpoints run only in Activity
-                emit started(true);
             } else {
                 checkpointTimer_.stop();
-                emit paused();
             }
+            emitTransition(from, desired, TransitionCause::EditApplied);
         }
 
         checkpointOk = maybeReanchorCheckpoint(seg);
@@ -1172,10 +1249,11 @@ TimeTracker::EditCommitResult TimeTracker::commitEditedTimeline(const Timeline& 
     } else if (mode_ != Mode::None) {
         // The edited timeline has no ongoing segment: the engine must stop.
         // Clear the anchor so no stale segment_id remains after the commit.
+        const Mode from = mode_;
         session_.clearSegment();
         checkpointTimer_.stop();
         mode_ = Mode::None;
-        emit stopped(StopReason::EditApplied);
+        emitTransition(from, Mode::None, TransitionCause::EditApplied);
     }
 
 #ifndef QT_NO_DEBUG
@@ -1662,34 +1740,14 @@ void TimeTracker::endExclusiveEdit()
     // decision (replayDeferredMidnightEvent's watchdog branch).
     const QDateTime now = now_provider_();
 
-    // Snapshot and clear both possible deferred events up front so a
-    // re-entrant/duplicate endExclusiveEdit() call cannot replay either one
-    // twice.
-    const std::optional<PendingMidnightEvent> midnightEvent = pending_midnight_event_;
-    pending_midnight_event_.reset();
-    const std::optional<PendingLockCorrection> lockCorrection = pending_lock_correction_;
-    pending_lock_correction_.reset();
-
-    // Replay chronologically by captured event timestamp, earliest first, so
-    // the outcome matches exactly what would have happened had the dialog
-    // never been open. A lock correction's event instant is when the
-    // LongOngoingLock fired (lock_time).
-    if (midnightEvent.has_value() && lockCorrection.has_value()
-        && lockCorrection->lock_time < midnightEvent->timestamp) {
-        replayDeferredLockCorrection(*lockCorrection, now);
-        replayDeferredMidnightEvent(*midnightEvent, now);
-    } else if (midnightEvent.has_value()) {
-        replayDeferredMidnightEvent(*midnightEvent, now);
-        if (lockCorrection.has_value()) {
-            // Midnight happened first (or at the same instant): a real
-            // (non-deferred) LongOngoingLock arriving this late would see the
-            // engine already stopped and no-op, so replay through the same
-            // Activity-only gate below.
-            replayDeferredLockCorrection(*lockCorrection, now);
-        }
-    } else if (lockCorrection.has_value()) {
-        replayDeferredLockCorrection(*lockCorrection, now);
-    }
+    // D10/plan4 B4: the chronological-replay ordering rule (A1/R11-002) now
+    // lives in DeferredEditEvents::replay() -- earliest captured instant
+    // first, so the outcome matches exactly what would have happened had the
+    // dialog never been open. A lock correction's event instant is when the
+    // LongOngoingLock fired.
+    deferred_edit_events_.replay(
+        [this, now](const PendingMidnightEvent& event) { replayDeferredMidnightEvent(event, now); },
+        [this, now](const PendingLockCorrection& corr) { replayDeferredLockCorrection(corr, now); });
 
     // Restart checkpoint timer only after deferred events are replayed, so
     // stopTimer/backpauseTimer can set mode_ before we decide whether to arm.
@@ -1731,7 +1789,7 @@ void TimeTracker::replayDeferredLockCorrection(const PendingLockCorrection& corr
         // post-unlock work stays Activity.
         Logger::Log("[LOCK] Replaying deferred lock interval as Pause after dialog close");
         backpauseTimer(corr.unlock_time, corr.lock_time);
-        startTimer(corr.unlock_time);
+        startTimer(corr.unlock_time, TransitionCause::LockResume);
         // startTimer() just re-armed the scheduled midnight stop using
         // corr.unlock_time as "now" (needed so the Pause->Activity
         // duration math is correct) — but the underlying QTimer counts

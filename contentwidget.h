@@ -81,6 +81,8 @@ private slots:
 	void setGUItoActivity(bool wasPaused = false);
 	void setGUItoStop();
 	void setGUItoPause();
+	/// D10: reduces the single TimeTracker::transitioned() event to a GUI update.
+	void onTransitioned(TimeTracker::Transition t);
 };
 
 #endif // CONTENTWIDGET_H
