@@ -46,11 +46,12 @@ void IntegrationTest::test_integration_checkpoint_recovery_on_restart()
         // First session: Start timer and save checkpoint
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        TimeTracker tracker(settings, db);
 
         // Drive the clock via the seam: no real sleep needed to age the checkpoint
         // past the 1 s minimum-recoverable-orphan threshold.
+        // FakeClock declared before TimeTracker: see outlives-tracker note above
         FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        TimeTracker tracker(settings, db);
         tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
         tracker.useTimerViaButton(Button::Start);
@@ -115,8 +116,9 @@ void IntegrationTest::test_integration_orphan_reconciliation_is_idempotent()
     {
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        TimeTracker tracker(settings, db);
+        // FakeClock declared before TimeTracker: see outlives-tracker note above
         FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        TimeTracker tracker(settings, db);
         tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.useTimerViaButton(Button::Start);
         clock.advance(1200);  // seam-driven aging, no real sleep
@@ -219,8 +221,9 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_present_is_s
     {
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        TimeTracker tracker(settings, db);
+        // FakeClock declared before TimeTracker: see outlives-tracker note above
         FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        TimeTracker tracker(settings, db);
         tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.useTimerViaButton(Button::Start);
         clock.advance(1200);  // seam-driven aging, no real sleep
@@ -263,8 +266,9 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_absent_shows
     {
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        TimeTracker tracker(settings, db);
+        // FakeClock declared before TimeTracker: see outlives-tracker note above
         FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        TimeTracker tracker(settings, db);
         tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.useTimerViaButton(Button::Start);
         clock.advance(1200);  // seam-driven aging, no real sleep
@@ -707,12 +711,13 @@ void IntegrationTest::test_Y_engine_scheduled_stop_emits_MidnightScheduled()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     // Pin the engine clock to mid-day so Start's auto-armed 23:59:59.500
     // timer is hours away and does not interfere before we explicitly
     // re-arm and fire below.
+    // FakeClock declared before TimeTracker: see outlives-tracker note above
     FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     // Start the engine (Activity mode).
@@ -806,11 +811,12 @@ void IntegrationTest::test_AA_no_duplicate_stop_signal()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     // Pin the engine clock to mid-day so Start's auto-armed 23:59:59.500 timer is
     // hours away and cannot fire during the qWait() below.
+    // FakeClock declared before TimeTracker: see outlives-tracker note above
     FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -1259,10 +1265,11 @@ void IntegrationTest::test_A_toggle_ongoing_to_pause_crash_recovery_uses_refresh
         // Session 1: start timer, open "dialog", toggle type, commit, crash.
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        TimeTracker tracker(settings, db);
 
         // Seam-driven clock: advance instead of sleeping through the flow.
+        // FakeClock declared before TimeTracker: see outlives-tracker note above
         FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        TimeTracker tracker(settings, db);
         tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
         tracker.useTimerViaButton(Button::Start);
@@ -1377,8 +1384,9 @@ void IntegrationTest::test_A3_exit_anyway_leaves_checkpoint_untouched_for_recove
         // process terminates.
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        TimeTracker tracker(settings, db);
+        // FakeClock declared before TimeTracker: see outlives-tracker note above
         FakeClock clock(QDateTime::currentDateTime().addSecs(-30));
+        TimeTracker tracker(settings, db);
         tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
         tracker.useTimerViaButton(Button::Start);
@@ -1453,9 +1461,10 @@ void IntegrationTest::test_A4_watchdog_discard_failure_survives_reopen_never_cre
         // further retry, process terminates.
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        TimeTracker tracker(settings, db);
         const QDateTime preMidnight(QDate::currentDate(), QTime(23, 50, 0), Qt::LocalTime);
+        // FakeClock declared before TimeTracker: see outlives-tracker note above
         FakeClock clock(preMidnight);
+        TimeTracker tracker(settings, db);
         tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
         tracker.useTimerViaButton(Button::Start);
@@ -1519,9 +1528,10 @@ void IntegrationTest::test_D2_real_sqlite_backward_clock_stop_preserves_checkpoi
     {
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        TimeTracker tracker(settings, db);
 
+        // FakeClock declared before TimeTracker: see outlives-tracker note above
         FakeClock clock(t0);
+        TimeTracker tracker(settings, db);
         tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.useTimerViaButton(Button::Start);
         QVERIFY(tracker.isActive());
@@ -1561,6 +1571,7 @@ void IntegrationTest::test_D2_real_sqlite_backward_clock_stop_preserves_checkpoi
     Settings settings(settingsPath);
     SqliteSessionStore db2(settings);
     TimeTracker reopened(settings, db2);
+    // reopened never transitions (mode_ stays None), so ~TimeTracker never reads now_provider_(): reopenClock may follow it.
     FakeClock reopenClock(checkpointEnd.addSecs(60));
     reopened.setNowProvider_dbg([&reopenClock]() { return reopenClock.now(); });
     reopened.initializeFromStore();
@@ -1596,10 +1607,12 @@ void IntegrationTest::test_D6_real_sqlite_shutdown_marker_uses_injected_clock_an
     {
         SqliteSessionStore db(settings);
         db.setNowProvider_dbg([&shutdownTime]() { return shutdownTime; });
+
+        // FakeClock declared before TimeTracker: see outlives-tracker note above
+        FakeClock clock(t0);
         TimeTracker tracker(settings, db);
         ShutdownCoordinator coordinator(tracker, db);
 
-        FakeClock clock(t0);
         tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.useTimerViaButton(Button::Start);
         clock.setNow(shutdownTime);
