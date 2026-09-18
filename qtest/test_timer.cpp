@@ -1070,9 +1070,6 @@ void TimerTest::test_D_timetracker_public_surface_regression()
     bool showNotification = tracker.shouldShowStartupRecoveryNotification();
     (void)showNotification;
 
-    bool canMark = tracker.canMarkCleanShutdown();
-    QVERIFY(!canMark); // timer is running
-
     // Mutators
     tracker.beginExclusiveEdit();
     tracker.endExclusiveEdit();
@@ -1102,9 +1099,6 @@ void TimerTest::test_D_timetracker_public_surface_regression()
     // loadHistoryFromStore
     auto history = tracker.loadHistoryFromStore();
     (void)history;
-
-    // Confirm the engine predicate is still there
-    QVERIFY(tracker.canMarkCleanShutdown()); // stopped, no unsaved data
 
     // lock event path
     tracker.useTimerViaLockEvent(LockEvent::Lock);
@@ -3761,7 +3755,7 @@ void TimerTest::test_A4_discard_transient_failure_retains_intent_and_blocks_clea
     QVERIFY(tracker.hasPendingDiscards_dbg());
     const auto pendingIds = tracker.pendingDiscardIds_dbg();
     QVERIFY(std::find(pendingIds.begin(), pendingIds.end(), segId) != pendingIds.end());
-    QVERIFY(!tracker.canMarkCleanShutdown());
+    QVERIFY(!tracker.drainForShutdown().clean());
 
     // Cleanup so destruction does not find an unresolved intent.
     fakeDb.discardCheckpointResult = SessionStoreResult::success();
@@ -3791,7 +3785,7 @@ void TimerTest::test_A4_discard_fatal_failure_retains_intent_and_blocks_clean_ma
     // Assert: retained exactly like Transient (C4 owns latching a fatal
     // tracker-unavailable state; A4 only guarantees retention here).
     QVERIFY(tracker.hasPendingDiscards_dbg());
-    QVERIFY(!tracker.canMarkCleanShutdown());
+    QVERIFY(!tracker.drainForShutdown().clean());
 
     // Cleanup.
     fakeDb.discardCheckpointResult = SessionStoreResult::success();
@@ -3889,7 +3883,6 @@ void TimerTest::test_A4_drain_retries_pending_discard_then_succeeds()
     // Assert
     QVERIFY(result.clean());
     QVERIFY(!tracker.hasPendingDiscards_dbg());
-    QVERIFY(tracker.canMarkCleanShutdown());
 }
 
 void TimerTest::test_A4_drain_incomplete_while_discard_unresolved()
@@ -3916,7 +3909,6 @@ void TimerTest::test_A4_drain_incomplete_while_discard_unresolved()
     // Assert: no clean-marker eligibility, intent still retained.
     QVERIFY(!result.clean());
     QVERIFY(tracker.hasPendingDiscards_dbg());
-    QVERIFY(!tracker.canMarkCleanShutdown());
 
     // Cleanup so destruction does not find an unresolved intent.
     fakeDb.discardCheckpointResult = SessionStoreResult::success();

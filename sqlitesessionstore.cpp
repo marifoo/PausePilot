@@ -1228,6 +1228,7 @@ LoadResult SqliteSessionStore::loadDurations()
     // transactionally after the read transaction below so malformed rows
     // never escape the store to be silently purged later by an unrelated edit.
     std::vector<long long> malformedIds;
+    int skippedCount = 0;
 
     // Parse each row and reconstruct TimeDuration objects
     while (query.next()) {
@@ -1239,7 +1240,7 @@ LoadResult SqliteSessionStore::loadDurations()
         const QString segmentIdStr = query.value(1).toString();
         if (segmentIdStr.isEmpty()) {
             Logger::Log("[DB] Warning: Skipped row with empty segment_id");
-            result.skipped++;
+            skippedCount++;
             malformedIds.push_back(rowId);
             continue;
         }
@@ -1252,7 +1253,7 @@ LoadResult SqliteSessionStore::loadDurations()
         if (typeInt != static_cast<int>(DurationType::Activity) &&
             typeInt != static_cast<int>(DurationType::Pause)) {
             Logger::Log(QString("[DB] Warning: Invalid type value %1, skipping entry").arg(typeInt));
-            result.skipped++;
+            skippedCount++;
             malformedIds.push_back(rowId);
             continue;
         }
@@ -1263,7 +1264,7 @@ LoadResult SqliteSessionStore::loadDurations()
         if (!startDateTime.isValid() || !endDateTime.isValid()) {
             Logger::Log(QString("[DB] Warning: Skipped entry with invalid UTC timestamp(s) - start: %1, end: %2")
                 .arg(query.value(3).toString()).arg(query.value(4).toString()));
-            result.skipped++;
+            skippedCount++;
             malformedIds.push_back(rowId);
             continue;
         }
@@ -1272,7 +1273,7 @@ LoadResult SqliteSessionStore::loadDurations()
         if (startDateTime > endDateTime) {
             Logger::Log(QString("[DB] Warning: Skipped entry with start > end - Start: %1, End: %2")
                 .arg(startDateTime.toString(Qt::ISODate)).arg(endDateTime.toString(Qt::ISODate)));
-            result.skipped++;
+            skippedCount++;
             malformedIds.push_back(rowId);
             continue;
         }
@@ -1283,7 +1284,7 @@ LoadResult SqliteSessionStore::loadDurations()
             Logger::Log(QString("[DB] Dropped zero/negative-duration row at load: %1 → %2")
                 .arg(startDateTime.toString(Qt::ISODateWithMs))
                 .arg(endDateTime.toString(Qt::ISODateWithMs)));
-            result.skipped++;
+            skippedCount++;
             malformedIds.push_back(rowId);
             continue;
         }
@@ -1333,8 +1334,8 @@ LoadResult SqliteSessionStore::loadDurations()
         }
     }
 
-    if (result.skipped > 0) {
-        Logger::Log(QString("[DB] loadDurations reconciliation summary: skipped=%1").arg(result.skipped));
+    if (skippedCount > 0) {
+        Logger::Log(QString("[DB] loadDurations reconciliation summary: skipped=%1").arg(skippedCount));
     }
 
     return result;

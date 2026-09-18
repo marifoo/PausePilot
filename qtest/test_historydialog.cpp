@@ -348,46 +348,6 @@ void HistoryDialogTest::test_historydialog_split_non_today_db_row_survives_save_
     QCOMPARE(loaded[0].endTime, loaded[1].startTime);
 }
 
-void HistoryDialogTest::test_historydialog_shows_load_reconciliation_banner()
-{
-    resetDatabaseFile();
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    SqliteSessionStore db(settings);
-    TimeTracker tracker(settings, db);
-
-    SqliteSessionStore manager(settings);
-    QVERIFY(manager.ensureOpen_dbg());
-    QSqlQuery query(manager.rawDb_dbg());
-    const QDateTime start = QDateTime::currentDateTimeUtc();
-    const QDateTime end = start.addMSecs(1000);
-
-    // Row with invalid type → will be skipped
-    query.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
-                  "VALUES (:segment_id, 99, :start_utc, :end_utc, 1)");
-    query.bindValue(":segment_id", TimeDuration::createSegmentId().toString());
-    query.bindValue(":start_utc", start.toString(Qt::ISODateWithMs));
-    query.bindValue(":end_utc", end.toString(Qt::ISODateWithMs));
-    QVERIFY(query.exec());
-
-    // Row with valid type → loads normally; no stored duration to mismatch
-    query.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
-                  "VALUES (:segment_id, 0, :start_utc, :end_utc, 1)");
-    query.bindValue(":segment_id", TimeDuration::createSegmentId().toString());
-    query.bindValue(":start_utc", start.addSecs(10).toString(Qt::ISODateWithMs));
-    query.bindValue(":end_utc", end.addSecs(10).toString(Qt::ISODateWithMs));
-    QVERIFY(query.exec());
-    manager.closeConnection_dbg();
-
-    HistoryDialog dialog(tracker, settings);
-    const QString msg = dialog.getLoadReconciliationMessage();
-    QCOMPARE(msg, QString("1 rows skipped due to corrupt data, 0 rows auto-repaired."));
-    QVERIFY(dialog.loadReconciliationLabel_dbg() != nullptr);
-    QCOMPARE(dialog.loadReconciliationLabel_dbg()->text(), msg);
-    QVERIFY(!dialog.loadReconciliationLabel_dbg()->isHidden());
-}
-
 void HistoryDialogTest::test_historydialog_save_unrelated_edit_preserves_row_and_creates_new_checkpoint()
 {
     resetDatabaseFile();
@@ -1408,6 +1368,13 @@ void HistoryDialogTest::test_F1_banner_shows_when_history_load_failed()
     HistoryDialog dialog(tracker, settings);
 
     QVERIFY(dialog.getLoadReconciliationMessage().contains("could not be loaded"));
+
+    // MEDIUM-1 (D11 review): also cover the loadReconciliationLabel_dbg()
+    // display wiring -- the pure string builder alone doesn't prove
+    // setupUI() actually wires the message into the visible banner label.
+    QVERIFY(dialog.loadReconciliationLabel_dbg() != nullptr);
+    QVERIFY(dialog.loadReconciliationLabel_dbg()->text().contains("could not be loaded"));
+    QVERIFY(!dialog.loadReconciliationLabel_dbg()->isHidden());
 }
 
 void HistoryDialogTest::test_C3_saveChanges_refuses_when_edit_creates_violation()
@@ -2129,7 +2096,14 @@ void HistoryDialogTest::test_D9_split_too_short_row_does_not_open_modal()
     // D9 review (finding 1, round 3): refused before SplitDialog was ever
     // constructed -- before this fix, the modal always opened here (with a
     // disabled slider but live type radios and OK) and the row was only
-    // rejected after the user pressed OK.
-    QCOMPARE(dialog.debugSplitDialogConstructedCount_, 0);
+    // rejected after the user pressed OK. Asserting TooShortInfo (rather
+    // than just "not DialogOpened") distinguishes this outcome from
+    // SplitDialog having opened.
+    QCOMPARE(dialog.debugLastSplitUi_, HistoryDialog::DebugSplitUi::TooShortInfo);
+    // D11 HIGH-1 fix: debugLastSplitMessage_ is captured from the same local
+    // variable passed to the (suppressed) QMessageBox::information() call,
+    // so this also asserts on the actual message content that would be
+    // shown, not just an opaque branch tag.
+    QVERIFY(dialog.debugLastSplitMessage_.contains("too short to split meaningfully"));
     QCOMPARE(dialog.editSession_dbg().pendingTimelines()[0].completed().size(), static_cast<size_t>(1));
 }

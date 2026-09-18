@@ -26,7 +26,6 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QApplication>
-#include <QFileInfo>
 #include "timeformat.h"
 #include "logger.h"
 #include "dayvalidity.h"
@@ -331,34 +330,9 @@ void HistoryDialog::setupUI()
  */
 QString HistoryDialog::buildLoadReconciliationMessage() const
 {
-    const int skipped = session_.historyLoadSkipped();
-    const int repaired = session_.historyLoadRepaired();
-
-    QString message;
-    if (session_.historyLoadFailed()) {
-        message = "History could not be loaded — showing today only. Saving is disabled.";
-    }
-
-    if (skipped <= 0 && repaired <= 0)
-        return message;
-
-    if (!message.isEmpty())
-        message += "<br>";
-    message += QString("%1 rows skipped due to corrupt data, %2 rows auto-repaired.")
-        .arg(skipped)
-        .arg(repaired);
-
-    // Only show a link to the log file when logging is actually enabled; showing it
-    // when logging is off is misleading (the file may be stale or absent).
-    if (settings_.logToFile()) {
-        const QString logPath = Logger::logFilePath();
-        if (QFileInfo::exists(logPath)) {
-            message += QString("<br><a href=\"file:///%1\">Open log file</a>")
-                .arg(logPath);
-        }
-    }
-
-    return message;
+    if (session_.historyLoadFailed())
+        return "History could not be loaded — showing today only. Saving is disabled.";
+    return QString();
 }
 
 QString HistoryDialog::getLoadReconciliationMessage() const
@@ -683,11 +657,14 @@ void HistoryDialog::onSplitRow()
     if (rejection == HistoryEditSession::SplitError::TooShort) {
         Logger::Log(QString("[HISTORY] Error: onSplitRow: duration too short to split - page: %1, row: %2")
             .arg(idx).arg(row));
+        const QString tooShortText =
+            "This duration is too short to split meaningfully (minimum 3 seconds required).";
 #ifndef QT_NO_DEBUG
+        debugLastSplitUi_ = DebugSplitUi::TooShortInfo;
+        debugLastSplitMessage_ = tooShortText;
         if (!debugSkipSplitMessages_)
 #endif
-        QMessageBox::information(this, "Split Duration",
-            "This duration is too short to split meaningfully (minimum 3 seconds required).");
+        QMessageBox::information(this, "Split Duration", tooShortText);
         return;
     }
     if (rejection == HistoryEditSession::SplitError::OutOfRange) {
@@ -702,7 +679,7 @@ void HistoryDialog::onSplitRow()
     const QDateTime end = duration.endTime;
 
 #ifndef QT_NO_DEBUG
-    ++debugSplitDialogConstructedCount_;
+    debugLastSplitUi_ = DebugSplitUi::DialogOpened;
 #endif
     SplitDialog dlg(start, end, this);
     presetSplitDialog(dlg, duration);
@@ -720,6 +697,7 @@ void HistoryDialog::onSplitRow()
         Logger::Log(QString("[HISTORY] Error: onSplitRow: duration too short to split - page: %1, row: %2")
             .arg(idx).arg(row));
 #ifndef QT_NO_DEBUG
+        debugLastSplitUi_ = DebugSplitUi::TooShortInfo;
         if (!debugSkipSplitMessages_)
 #endif
         QMessageBox::information(this, "Split Duration",

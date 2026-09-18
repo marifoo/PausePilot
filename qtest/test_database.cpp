@@ -323,7 +323,6 @@ void DatabaseTest::test_loadDurations_skipsNegativeDurationRows()
 
     auto loaded = manager.loadDurations();
     QCOMPARE(static_cast<int>(loaded.size()), 1); // reversed row skipped
-    QCOMPARE(loaded.skipped, 1);
 }
 
 void DatabaseTest::test_databasemanager_write_failure()
@@ -783,7 +782,6 @@ void DatabaseTest::test_database_load_invalid_type_increments_skipped_and_omits_
     manager.closeConnection_dbg();
 
     auto loaded = manager.loadDurations();
-    QCOMPARE(loaded.skipped, 1);
     QCOMPARE(loaded.size(), static_cast<size_t>(0));
 
     // C3 (R13-001/R14-001, extends B2's recovery-time half to ordinary load):
@@ -991,7 +989,6 @@ void DatabaseTest::test_database_load_200ms_mismatch_increments_repaired_and_use
     manager.closeConnection_dbg();
 
     auto loaded = manager.loadDurations();
-    QCOMPARE(loaded.repaired, 0);
     QCOMPARE(loaded.size(), static_cast<size_t>(1));
     QCOMPARE(loaded[0].duration(), static_cast<qint64>(1000));
 }
@@ -3741,7 +3738,6 @@ void DatabaseTest::test_loadDurations_skips_empty_segment_id_row()
     // loadDurations() must skip the empty-id finalized row (no assert abort).
     auto loaded = manager.loadDurations();
     QCOMPARE(static_cast<int>(loaded.size()), 1); // only the valid row survives
-    QCOMPARE(loaded.skipped, 1);                  // empty-id row counted as skipped
 
     // Replace the empty-id row with an UNFINALIZED one to exercise the same guard
     // in loadUnfinalizedCheckpoints() (UNIQUE forbids a second empty-id row).
@@ -3808,7 +3804,7 @@ void DatabaseTest::test_ensureSettingsTable_rebuilds_malformed_table()
 
     // The malformed table must have been rebuilt so the marker can be written.
     const QDateTime now = QDateTime::currentDateTimeUtc();
-    QVERIFY(manager.setLastCleanShutdownMarker(now).ok());
+    QVERIFY(manager.setLastCleanShutdownMarker_dbg(now).ok());
 
     QVERIFY(manager.ensureOpen_dbg());
     QSqlQuery colQuery(manager.rawDb_dbg());
@@ -3862,8 +3858,8 @@ void DatabaseTest::test_ensureSettingsTable_rebuilds_constraint_malformed_table(
     // semantics restored, exactly one row should remain for the key.
     const QDateTime first = QDateTime::currentDateTimeUtc().addSecs(-60);
     const QDateTime second = QDateTime::currentDateTimeUtc();
-    QVERIFY(manager.setLastCleanShutdownMarker(first).ok());
-    QVERIFY(manager.setLastCleanShutdownMarker(second).ok());
+    QVERIFY(manager.setLastCleanShutdownMarker_dbg(first).ok());
+    QVERIFY(manager.setLastCleanShutdownMarker_dbg(second).ok());
 
     QVERIFY(manager.ensureOpen_dbg());
     QSqlQuery countQuery(manager.rawDb_dbg());
@@ -3904,7 +3900,7 @@ void DatabaseTest::test_ensureSettingsTable_leaves_healthy_table_untouched()
         SqliteSessionStore seed(settings);
         QCOMPARE(seed.checkSchemaOnStartup(), SchemaStatus::Created);
         now = QDateTime::currentDateTimeUtc();
-        QVERIFY(seed.setLastCleanShutdownMarker(now).ok());
+        QVERIFY(seed.setLastCleanShutdownMarker_dbg(now).ok());
     }
 
     // Simulate the next app start: a fresh instance over the same DB file,

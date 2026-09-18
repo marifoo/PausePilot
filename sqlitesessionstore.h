@@ -49,7 +49,6 @@ public:
     SessionStoreResult discardCheckpoint(const SegmentId& segmentId) override;
     SchemaStatus checkSchemaOnStartup() override;
     SessionStoreResult flushToDisc() override;
-    SessionStoreResult setLastCleanShutdownMarker(const QDateTime& timestamp) override;
     MarkCleanShutdownResult markCleanShutdown() override;
     StartupRecoveryResult recoverStartupCheckpoints(const QDateTime& now) override;
 
@@ -188,6 +187,14 @@ private:
     // because public methods may call each other (e.g. saveDurations →
     // createBackup) and we must not deadlock on re-entry.
     mutable QRecursiveMutex db_mutex_;
+
+    // D11 (D6 debt/R09-002): no longer part of the SessionStore interface --
+    // only markCleanShutdown() may call this, and that rule is now enforced
+    // structurally (private, non-virtual) rather than by comment alone.
+    // Writes the clean-shutdown marker timestamp. Returns Disabled when
+    // history is off (no-op, not an error). Returns TransientError on write
+    // failure. CallerBug is not applicable.
+    SessionStoreResult setLastCleanShutdownMarker(const QDateTime& timestamp);
 
     bool ensureOpen();
     bool ensureSchema();
@@ -331,6 +338,14 @@ public:
         return result;
     }
     QString dbConnectionName_dbg() const { return db.connectionName(); }
+
+    /// Exposes the private marker-write step directly for tests that need to
+    /// exercise ITS OWN Success/Disabled/TransientError contract, without
+    /// going through the full markCleanShutdown() durability barrier.
+    /// Production code must reach this only via markCleanShutdown() (D11).
+    SessionStoreResult setLastCleanShutdownMarker_dbg(const QDateTime& timestamp) {
+        return setLastCleanShutdownMarker(timestamp);
+    }
 
     /// D2/MEDIUM-7: overrides now_provider_ for deterministic tests of
     /// retention cutoff / flush timestamp without waiting on real time.

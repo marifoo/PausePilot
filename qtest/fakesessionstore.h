@@ -45,7 +45,9 @@ public:
     SessionStoreResult discardCheckpoint(const SegmentId& segmentId) override;
     SchemaStatus checkSchemaOnStartup() override;
     SessionStoreResult flushToDisc() override;
-    SessionStoreResult setLastCleanShutdownMarker(const QDateTime& timestamp) override;
+    // D11: no longer part of the SessionStore interface (see sqlitesessionstore.h) --
+    // kept here as an ordinary public method since FakeSessionStore is a test double.
+    SessionStoreResult setLastCleanShutdownMarker(const QDateTime& timestamp);
     MarkCleanShutdownResult markCleanShutdown() override;
     StartupRecoveryResult recoverStartupCheckpoints(const QDateTime& now) override;
 

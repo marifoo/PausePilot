@@ -27,7 +27,7 @@ using TestCommon::createSettingsFile;
 // Operation enumerator AND a matching section here, then update this count --
 // otherwise this fails to compile as a reminder instead of silently shipping
 // an unverified operation.
-static_assert(static_cast<int>(Operation::Count) == 11,
+static_assert(static_cast<int>(Operation::Count) == 10,
     "SessionStore::Operation changed size -- add a matrix section to "
     "test_contract_matrix.cpp for the new/removed operation, then update "
     "this static_assert's count.");
@@ -253,7 +253,6 @@ void ContractMatrixTest::test_loadDurations_disabled_returns_Disabled_and_empty(
     const LoadResult r = db.loadDurations();
     QCOMPARE(r.status, SessionStoreResult::Disabled);
     QVERIFY(r.empty());
-    QCOMPARE(r.skipped, 0);
 }
 
 // ── hasEntriesForDate ────────────────────────────────────────────────────────
@@ -551,7 +550,7 @@ void ContractMatrixTest::test_setLastCleanShutdownMarker_success()
     SqliteSessionStore db(Settings(enabledSettings(dir)));
     db.checkSchemaOnStartup();
 
-    const SessionStoreResult r = db.setLastCleanShutdownMarker(QDateTime::currentDateTime());
+    const SessionStoreResult r = db.setLastCleanShutdownMarker_dbg(QDateTime::currentDateTime());
     QCOMPARE(r.category, SessionStoreResult::Success);
     QVERIFY(r.ok());
     // CallerBug: N/A — no caller-supplied unique keys that can violate constraints
@@ -566,7 +565,7 @@ void ContractMatrixTest::test_setLastCleanShutdownMarker_disabled_returns_Disabl
     QTemporaryDir dir; QVERIFY(dir.isValid());
     SqliteSessionStore db(Settings(disabledSettings(dir)));
 
-    const SessionStoreResult r = db.setLastCleanShutdownMarker(QDateTime::currentDateTime());
+    const SessionStoreResult r = db.setLastCleanShutdownMarker_dbg(QDateTime::currentDateTime());
     QCOMPARE(r.category, SessionStoreResult::Disabled);
     QVERIFY(!r.ok());
 }
@@ -695,7 +694,7 @@ void ContractMatrixTest::test_C4_ensureOpen_failure_classified_consistently()
     } else if (method == "flushToDisc") {
         category = db.flushToDisc().category;
     } else if (method == "setLastCleanShutdownMarker") {
-        category = db.setLastCleanShutdownMarker(QDateTime::currentDateTime()).category;
+        category = db.setLastCleanShutdownMarker_dbg(QDateTime::currentDateTime()).category;
     } else if (method == "replaceAll") {
         category = db.replaceAll(Timeline(oneRow(), std::nullopt), Timeline({}, std::nullopt)).category;
     } else if (method == "loadDurations") {

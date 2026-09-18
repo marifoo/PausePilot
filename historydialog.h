@@ -149,10 +149,19 @@ public:
     /// rejection path without exec()-ing a real QMessageBox under the
     /// offscreen QPA plugin.
     bool debugSkipSplitMessages_ = false;
-    /// Incremented immediately before onSplitRow() constructs a real
-    /// SplitDialog. A too-short row must return before this point, so a test
-    /// can prove the modal was never opened without needing to exec() it.
-    int debugSplitDialogConstructedCount_ = 0;
+    /// D11 (D9 debt/R09-002): the one outcome onSplitRow() reached, recorded
+    /// UNCONDITIONALLY -- even when debugSkipSplitMessages_ suppresses the
+    /// actual QMessageBox -- so a test can distinguish "too-short row refused
+    /// before SplitDialog opened" from "SplitDialog opened", which is what
+    /// the old debugSplitDialogConstructedCount_ counter could not do (it only
+    /// proved the modal path was NOT taken).
+    enum class DebugSplitUi { None, TooShortInfo, DialogOpened };
+    DebugSplitUi debugLastSplitUi_ = DebugSplitUi::None;
+    /// D11 HIGH-1 fix: the exact text argument passed to (or that would be
+    /// passed to) the too-short QMessageBox::information() call, captured
+    /// from the same local variable the real call uses -- so a test can
+    /// assert on the actual message content, not just an opaque branch tag.
+    QString debugLastSplitMessage_;
 #endif
 
     /**

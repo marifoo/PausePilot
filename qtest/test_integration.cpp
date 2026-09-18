@@ -212,7 +212,7 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_present_is_s
     {
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        QVERIFY(db.setLastCleanShutdownMarker(QDateTime::currentDateTime()).ok());
+        QVERIFY(db.setLastCleanShutdownMarker_dbg(QDateTime::currentDateTime()).ok());
     }
 
     {

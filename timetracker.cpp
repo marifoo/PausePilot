@@ -279,58 +279,14 @@ void SessionState::adoptOngoingSegment(const TimeDuration& ongoing)
 
 #ifndef QT_NO_DEBUG
 
-TimeTracker::StateSnapshot TimeTracker::takeStateSnapshot() const
-{
-    return {
-        session_.durations.size(),
-        session_.segment_id,
-        session_.segment_start_time,
-        pending_commit_.hasPending(),
-        mode_
-    };
-}
-
-TimeTracker::StateGuard::StateGuard(const TimeTracker& tracker, const char* methodName)
-    : tracker_(tracker), method_(methodName), entry_(tracker.takeStateSnapshot())
-{
-}
-
-TimeTracker::StateGuard::~StateGuard()
-{
-    if (transitioned_) {
-        return; // Caller acknowledged the mutation
-    }
-    auto exit = tracker_.takeStateSnapshot();
-    bool changed = (exit.durations_size != entry_.durations_size)
-                || (exit.segment_id != entry_.segment_id)
-                || (exit.segment_start_time != entry_.segment_start_time)
-                || (exit.has_pending_commit != entry_.has_pending_commit)
-                || (exit.mode != entry_.mode);
-    if (changed) {
-        qWarning("[STATE-GUARD] Unacknowledged state mutation in %s: "
-                 "durations %zu->%zu, segId '%s'->'%s', pending %d->%d, mode %d->%d",
-                 method_,
-                 entry_.durations_size, exit.durations_size,
-                 qPrintable(entry_.segment_id.toString()), qPrintable(exit.segment_id.toString()),
-                 entry_.has_pending_commit, exit.has_pending_commit,
-                 static_cast<int>(entry_.mode), static_cast<int>(exit.mode));
-        Q_ASSERT_X(false, method_,
-                    "SessionState changed without explicit transition call");
-    }
-}
-
-void TimeTracker::StateGuard::markTransitioned()
-{
-    transitioned_ = true;
-}
-
 /**
  * Checks structural invariants on the in-memory duration segments.
  *
- * This runs after every public method in debug builds. It catches
- * data-structure corruption early — before it propagates to the DB
- * or produces confusing UI behavior. Violations are logged as warnings
- * (not fatal) so tests surface them as QWARN output.
+ * Called in debug builds after every mutator that can reorder or add
+ * duration segments (button/lock transitions, setDurationType,
+ * commitEditedTimeline). Catches data-structure corruption early — before
+ * it propagates to the DB or produces confusing UI behavior. Violations are
+ * logged as warnings (not fatal) so tests surface them as QWARN output.
  *
  * Invariants checked:
  *   1. Segment ordering: startTimes must be non-decreasing.
@@ -387,9 +343,25 @@ void TimeTracker::checkDurationInvariants() const
 
 /**
  * Cross-layer invariant: for each persisted segment, the DB must contain
- * either no row (not yet committed) or exactly one finalized row with a
- * matching segment_id. Called after every successful commitSession() in
+ * either no row (not yet committed, or a test double whose loadDurations()
+ * is not wired to mirror commitSession()) or exactly one finalized row with a
+ * matching segment_id. Called after every okOrDisabled() commitSession() in
  * updateDurationsInDB() to catch divergence between memory and storage.
+ *
+ * D11/R09-002: zero matches is accepted unconditionally rather than only for
+ * Disabled history, because FakeSessionStore (the store double most of the
+ * test suite runs against) does not automatically populate loadDurations()
+ * from commitSession() -- tightening this to "exactly one" after a real
+ * Success turns nearly every fake-store test into a QWARN failure. Making
+ * this a precise persistence-truth check would require either updating
+ * FakeSessionStore's loadDurations() to mirror commitSession() by default
+ * (a broader test-infrastructure change) or gating the strict check to only
+ * run against the real SqliteSessionStore -- both out of D11's surgical
+ * scope. This checker therefore still only catches actual duplication
+ * (matchCount > 1) and field mismatches, not a silently missing row.
+ * Deferred to D13 (review/implementation-plan-v2.md), which owns making
+ * FakeSessionStore::loadDurations() mirror committed state and then
+ * tightening this check.
  */
 void TimeTracker::checkCrossLayerInvariants() const
 {
@@ -939,10 +911,6 @@ void TimeTracker::emitTransition(Mode from, Mode to, TransitionCause cause)
 void TimeTracker::useTimerViaButton(Button button)
 {
     QMutexLocker locker(&mutex_);
-#ifndef QT_NO_DEBUG
-    StateGuard guard(*this, "useTimerViaButton");
-    guard.markTransitioned();
-#endif
     const QDateTime now = now_provider_();
     if (discardCrossMidnightOngoingAndStop(now)) {
         // Ongoing segment crossed midnight — engine is now in None state.
@@ -968,9 +936,8 @@ void TimeTracker::useTimerViaButton(Button button)
 // useTimerViaButton()'s boundary guard/switch -- it just translates the
 // toggle to the one typed input (Button) and dispatches through the single
 // production/test button surface. mutex_ is a QRecursiveMutex so re-entering
-// useTimerViaButton()'s own lock from the same thread is safe; the nested
-// StateGuard there covers this call too (the same pattern onStopPressed()
-// already relied on).
+// useTimerViaButton()'s own lock from the same thread is safe (the same
+// pattern onStopPressed() already relied on).
 void TimeTracker::onStartPausePressed()
 {
     QMutexLocker locker(&mutex_);
@@ -997,10 +964,6 @@ void TimeTracker::onStopPressed()
 void TimeTracker::useTimerViaLockEvent(LockEvent event, const QDateTime& lockTime)
 {
     QMutexLocker locker(&mutex_);
-#ifndef QT_NO_DEBUG
-    StateGuard guard(*this, "useTimerViaLockEvent");
-    guard.markTransitioned();
-#endif
     const QDateTime now = now_provider_();
     if (discardCrossMidnightOngoingAndStop(now)) {
         // Already-forced stopped — ignore the lock event for engine
@@ -1118,10 +1081,6 @@ Timeline TimeTracker::completedTimeline() const
 void TimeTracker::setDurationType(size_t idx, DurationType type)
 {
     QMutexLocker locker(&mutex_);
-#ifndef QT_NO_DEBUG
-    StateGuard guard(*this, "setDurationType");
-    guard.markTransitioned(); // Intentionally mutates durations
-#endif
     if (idx < session_.durations.size()) {
         session_.durations[idx].type = type;
         Logger::Log(QString("[TIMER] Duration type changed at index %1 to %2").arg(idx).arg(type == DurationType::Activity ? "Activity" : "Pause"));
@@ -1202,10 +1161,6 @@ bool TimeTracker::maybeReanchorCheckpoint(const TimeDuration& seg)
 TimeTracker::EditCommitResult TimeTracker::commitEditedTimeline(const Timeline& edited)
 {
     QMutexLocker locker(&mutex_);
-#ifndef QT_NO_DEBUG
-    StateGuard guard(*this, "commitEditedTimeline");
-    guard.markTransitioned(); // Intentionally replaces durations
-#endif
     const std::deque<TimeDuration>& newDurations = edited.completed();
     const std::optional<TimeDuration>& ongoing = edited.ongoing();
 
@@ -1323,12 +1278,6 @@ bool TimeTracker::shouldShowStartupRecoveryNotification() const
 {
     QMutexLocker locker(&mutex_);
     return startup_recovery_notification_needed_;
-}
-
-bool TimeTracker::canMarkCleanShutdown() const
-{
-    QMutexLocker locker(&mutex_);
-    return mode_ == Mode::None && !pending_commit_.hasPending() && !pending_discards_.hasPending();
 }
 
 bool TimeTracker::isFatalLatched() const

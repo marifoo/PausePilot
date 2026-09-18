@@ -30,8 +30,6 @@ void HistoryEditSession::buildFromTimer(TimeTracker& timer, const QDate& today)
     const auto& historyDurations = loaded.durations;
     history_load_failed_ = loaded.status == SessionStoreResult::TransientError
         || loaded.status == SessionStoreResult::FatalError;
-    history_load_skipped_ = loaded.skipped;
-    history_load_repaired_ = loaded.repaired;
 
     // Build a list of all current (in-memory) durations for dedup comparison.
     std::vector<TimeDuration> currentComparableDurations;

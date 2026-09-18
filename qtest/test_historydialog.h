@@ -31,7 +31,6 @@ private slots:
     void test_historydialog_split_action_splits_row();
     void test_historydialog_split_today_mixed_origins_routes_to_correct_bucket();
     void test_historydialog_split_non_today_db_row_survives_save_roundtrip();
-    void test_historydialog_shows_load_reconciliation_banner();
     void test_historydialog_save_unrelated_edit_preserves_row_and_creates_new_checkpoint();
     void test_historydialog_pauses_checkpoint_timer_for_dialog_lifetime();
     void test_historydialog_save_keeps_db_rows_for_history_plus_current_session();

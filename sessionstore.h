@@ -195,8 +195,6 @@ struct DrainResult {
  */
 struct LoadResult {
     std::deque<TimeDuration> durations;
-    int skipped = 0;
-    int repaired = 0;
     SessionStoreResult::Category status = SessionStoreResult::Success;
 
     size_t size() const { return durations.size(); }
@@ -286,7 +284,7 @@ enum class SchemaStatus { Ready, Created, Outdated, Inaccessible };
 /// it is a reminder tripwire, not a structural guarantee.
 enum class Operation {
     CommitSession, ReplaceAll, LoadDurations, HasEntriesForDate, SaveCheckpoint,
-    DiscardCheckpoint, CheckSchemaOnStartup, FlushToDisc, SetLastCleanShutdownMarker,
+    DiscardCheckpoint, CheckSchemaOnStartup, FlushToDisc,
     RecoverStartupCheckpoints, MarkCleanShutdown, Count
 };
 
@@ -376,15 +374,6 @@ public:
     /// TransientError on failure, Success otherwise.
     /// CallerBug is not applicable.
     virtual SessionStoreResult flushToDisc() = 0;
-
-    /// Writes the clean-shutdown marker timestamp.
-    /// Returns Disabled when history is off (no-op, not an error).
-    /// Returns TransientError on write failure.
-    /// CallerBug is not applicable.
-    /// Called only by markCleanShutdown() below (D6) -- no other caller
-    /// remains: writing this marker outside the FULL durability barrier is
-    /// exactly the ordering bug D6/R15-004 fixed.
-    virtual SessionStoreResult setLastCleanShutdownMarker(const QDateTime& timestamp) = 0;
 
     /// D6 (R05-002/R15-004): the single durable shutdown operation. The sole
     /// owner of "durably mark clean" -- ShutdownCoordinator is the only

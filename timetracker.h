@@ -348,10 +348,12 @@ private:
         }
         bool hasMidnight() const { return midnight_.has_value(); }
         std::optional<PendingMidnightEvent> midnight() const { return midnight_; }
+#ifndef QT_NO_DEBUG
         /// Test-only direct injection (mirrors the old setPendingMidnightEvent_dbg()).
         void setMidnight_dbg(StopReason reason, const QDateTime& timestamp) {
             midnight_ = PendingMidnightEvent{reason, timestamp};
         }
+#endif // QT_NO_DEBUG
 
         /// Begins (or supersedes) a pending LongOngoingLock correction.
         void beginLock(const QDateTime& lockTime) {
@@ -527,31 +529,6 @@ private:
     void onLongOngoingLockDetected(const QDateTime& now, const QDateTime& lockTime);
 
 #ifndef QT_NO_DEBUG
-    /// Debug-build state snapshot used by StateGuard to detect unlogged mutations.
-    struct StateSnapshot {
-        size_t durations_size;
-        SegmentId segment_id;
-        QDateTime segment_start_time;
-        bool has_pending_commit;
-        Mode mode;
-    };
-    StateSnapshot takeStateSnapshot() const;
-
-    /// RAII guard that captures state on entry to a public method and checks
-    /// for unexpected mutations on exit. Only active in debug builds.
-    class StateGuard {
-    public:
-        StateGuard(const TimeTracker& tracker, const char* methodName);
-        ~StateGuard();
-        /// Call this to acknowledge that the method intentionally modified state.
-        void markTransitioned();
-    private:
-        const TimeTracker& tracker_;
-        const char* method_;
-        StateSnapshot entry_;
-        bool transitioned_ = false;
-    };
-
     /// Checks structural invariants on session_.durations:
     ///   - Segment ordering: startTimes are non-decreasing
     ///   - No overlapping segments of the same type on the same day
@@ -669,7 +646,6 @@ public:
     void beginExclusiveEdit();
     /// Resumes checkpoints and replays deferred events. Call after closing HistoryDialog.
     void endExclusiveEdit();
-    bool canMarkCleanShutdown() const;
     /// True once a FatalError result has latched TimeTracker into the
     /// unavailable state (C4/R05-006). Start refuses to run while this is
     /// true; nothing but a fresh TimeTracker instance clears it. Public (C4
