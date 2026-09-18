@@ -25,8 +25,6 @@ private slots:
     
     // Core database tests
     void test_database_backups_and_retention_and_disable();
-    void test_databasemanager_write_failure();
-    void test_database_transaction_rollback_on_insert_failure();
     void test_database_transaction_rollback_on_replace_failure();
     void test_database_checkpoint_single_row_per_segment();
     void test_database_checkpoint_missing_segment_reinserts_same_segment_id();
@@ -96,8 +94,6 @@ private slots:
     // the injected now-provider's own timeSpec/offset.
     void test_D2_flushToDisc_normalizes_injected_offset_time_to_utc();
 
-    // Step 2 (S1): saveDurations(Append) upserts on segment_id collision
-    void test_database_saveDurations_append_upserts_existing_segment_id();
 
     // Step 3 (S2 + T3): atomic overlap-guarded finalisation.
     void test_finalizeIfNoOverlap_succeeds_when_no_overlap();
@@ -193,7 +189,6 @@ private slots:
 
     // C2 (R07-001): a failed COMMIT must roll back, leaving the connection
     // outside the transaction so later autocommit operations behave normally.
-    void test_C2_saveDurations_append_rolls_back_on_commit_failure();
     void test_C2_replaceAll_rolls_back_on_commit_failure();
     void test_C2_saveCheckpoint_insert_rolls_back_on_commit_failure();
     void test_C2_saveCheckpoint_update_rolls_back_on_commit_failure();

@@ -224,7 +224,7 @@ void TimerTest::test_timer_retry_append_failure_then_success_preserves_segments(
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
     SqliteSessionStore db2(settings);
-    QVERIFY(db2.saveDurations({}, TransactionMode::Append));
+    QVERIFY(db2.ensureOpen_dbg());
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(20);
@@ -277,7 +277,7 @@ void TimerTest::test_timer_retry_failure_keeps_unsaved_state_and_durations()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
     SqliteSessionStore db2(settings);
-    QVERIFY(db2.saveDurations({}, TransactionMode::Append));
+    QVERIFY(db2.ensureOpen_dbg());
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(20);
@@ -627,7 +627,7 @@ void TimerTest::test_boot_time_not_added_when_db_has_entries_for_today()
         QDateTime now = QDateTime::currentDateTimeUtc();
         std::deque<TimeDuration> durations;
         durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-3600), now.addSecs(-3540)));
-        QVERIFY(seeder.saveDurations(durations, TransactionMode::Append));
+        QVERIFY(seeder.commitSession(Timeline(durations, std::nullopt)).ok());
     }
 
     SqliteSessionStore db(settings);

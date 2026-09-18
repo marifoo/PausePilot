@@ -13,7 +13,7 @@
 #include "settings.h"
 #include "sessionstore.h"
 
-// saveDurations/createBackup use TransactionMode as an implementation detail.
+// createBackup uses TransactionMode as an implementation detail.
 // The enum is not part of SessionStore's public interface; it lives here
 // so it can be removed from types.h.
 enum class TransactionMode { Append, Replace };
@@ -51,14 +51,6 @@ public:
     SessionStoreResult flushToDisc() override;
     MarkCleanShutdownResult markCleanShutdown() override;
     StartupRecoveryResult recoverStartupCheckpoints(const QDateTime& now) override;
-
-    // Non-virtual helpers kept for test seeding and internal use.
-    // No longer part of SessionStore — callers that previously used the
-    // interface to call these should use commitSession instead.
-    bool saveDurations(const std::deque<TimeDuration>& durations, TransactionMode mode,
-                       const std::vector<QString>& removedSegmentIds = {});
-    SessionStoreResult updateDurationsById(const std::deque<TimeDuration>& durations,
-                                           const std::vector<QString>& removedSegmentIds = {});
 
 private:
     // Private types used by startup recovery helpers.
@@ -184,7 +176,7 @@ private:
     // This is particularly important for createBackup(), which closes and
     // reopens the database file: the mutex prevents any concurrent call from
     // hitting a closed connection during that window.  QRecursiveMutex is used
-    // because public methods may call each other (e.g. saveDurations →
+    // because public methods may call each other (e.g. replaceAll →
     // createBackup) and we must not deadlock on re-entry.
     mutable QRecursiveMutex db_mutex_;
 
@@ -224,6 +216,11 @@ private:
     void performRetentionCleanup();
     void pruneOldBackups(int keepCount = 5);
     bool insertRows(QSqlQuery& query, const std::deque<TimeDuration>& rows);
+    // D11 (R07-005/R09-002): no longer part of the public surface -- its only
+    // caller is commitSession(). Kept private; every test call site now goes
+    // through commitSession()/replaceAll() or a scoped raw-SQL fixture.
+    SessionStoreResult updateDurationsById(const std::deque<TimeDuration>& durations,
+                                           const std::vector<QString>& removedSegmentIds = {});
     // C2 (R07-001): commits the currently open transaction, rolling back on
     // any failure -- including the injected debug faults above -- so a
     // failed COMMIT never leaves the long-lived connection inside its

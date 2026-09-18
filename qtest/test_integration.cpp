@@ -312,12 +312,12 @@ void IntegrationTest::test_integration_retention_cleanup_preserves_current()
     // Insert data from 5 days ago (should be deleted)
     std::deque<TimeDuration> old;
     old.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addDays(-5), now.addDays(-5).addSecs(60)));
-    QVERIFY(manager.saveDurations(old, TransactionMode::Append));
+    QVERIFY(manager.commitSession(Timeline(old, std::nullopt)).ok());
     
     // Insert data from today (should be kept)
     std::deque<TimeDuration> current;
     current.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-90)));
-    QVERIFY(manager.saveDurations(current, TransactionMode::Append));
+    QVERIFY(manager.commitSession(Timeline(current, std::nullopt)).ok());
     
     // Cleanup runs in checkSchemaOnStartup(), not in the constructor.
     SqliteSessionStore manager2(settings);
@@ -352,11 +352,11 @@ void IntegrationTest::test_integration_duplicate_prevention()
     std::deque<TimeDuration> durations;
     durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
     
-    QVERIFY(manager.updateDurationsById(durations).ok());
+    QVERIFY(manager.commitSession(Timeline(durations, std::nullopt)).ok());
     // D7 (R03-002): duration is now derived from the endpoints, so moving
     // endTime is all that's needed -- no separate repair assignment.
     durations.front().endTime = end.addSecs(10);
-    QVERIFY(manager.updateDurationsById(durations).ok());
+    QVERIFY(manager.commitSession(Timeline(durations, std::nullopt)).ok());
     
     auto loaded = manager.loadDurations();
     QCOMPARE(loaded.size(), (size_t)1);
@@ -371,14 +371,14 @@ void IntegrationTest::test_integration_empty_database_operations()
     SqliteSessionStore manager(settings);
 
     // Operations on empty database should succeed
-    QVERIFY(manager.saveDurations({}, TransactionMode::Append));
+    QVERIFY(manager.commitSession(Timeline()).ok());
     auto loaded = manager.loadDurations();
     QCOMPARE(loaded.size(), (size_t)0);
     
     QCOMPARE(manager.hasEntriesForDate(QDate::currentDate()), EntriesForDateResult::No);
     
     std::deque<TimeDuration> empty;
-    QVERIFY(manager.updateDurationsById(empty).ok());
+    QVERIFY(manager.commitSession(Timeline(empty, std::nullopt)).ok());
 }
 
 // ============================================================================
@@ -1011,7 +1011,7 @@ void IntegrationTest::test_hasEntriesForDate_timezone()
     SqliteSessionStore db(settings);
     std::deque<TimeDuration> durations;
     durations.emplace_back(TimeDuration::fromPersistedRow(DurationType::Activity, localNoon, localNoonEnd));
-    QVERIFY(db.saveDurations(durations, TransactionMode::Append));
+    QVERIFY(db.commitSession(Timeline(durations, std::nullopt)).ok());
 
     // hasEntriesForDate must find this entry.
     QCOMPARE(db.hasEntriesForDate(testDate), EntriesForDateResult::Yes);
@@ -1050,9 +1050,20 @@ void IntegrationTest::test_bootCredit_suppressed_by_legacy_cross_midnight_row_on
     const QDateTime legacyEnd(QDate(2025, 3, 30), QTime(0, 30, 0), Qt::LocalTime);
     {
         SqliteSessionStore db(settings);
-        std::deque<TimeDuration> durations;
-        durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, legacyStart, legacyEnd));
-        QVERIFY(db.saveDurations(durations, TransactionMode::Append));
+        // D11: this row deliberately crosses local midnight (the legacy,
+        // out-of-contract shape under test), so it would be rejected by
+        // commitSession()'s/replaceAll()'s day-validity guard. Seed it via
+        // scoped raw SQL (the established fixture pattern for legacy
+        // cross-midnight rows) instead of a dbg wrapper.
+        QVERIFY(db.ensureOpen_dbg());
+        QSqlQuery q(db.rawDb_dbg());
+        q.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                  "VALUES (:seg, 0, :s, :e, 1)");
+        q.bindValue(":seg", SegmentId::mint().toString());
+        q.bindValue(":s", legacyStart.toUTC().toString(Qt::ISODateWithMs));
+        q.bindValue(":e", legacyEnd.toUTC().toString(Qt::ISODateWithMs));
+        QVERIFY(q.exec());
+        db.closeConnection_dbg();
     }
 
     SqliteSessionStore db(settings);
@@ -1115,7 +1126,7 @@ void IntegrationTest::test_midnight_boundary_timezone()
     std::deque<TimeDuration> durations;
     durations.emplace_back(TimeDuration::fromPersistedRow(DurationType::Activity, startOfDay14, endOfDay14));
     durations.emplace_back(TimeDuration::fromPersistedRow(DurationType::Activity, startOfDay15, endOfDay15));
-    QVERIFY(db.saveDurations(durations, TransactionMode::Append));
+    QVERIFY(db.commitSession(Timeline(durations, std::nullopt)).ok());
 
     // Boundary: 2025-06-14 must see entry A; entry B must not bleed into it.
     QCOMPARE(db.hasEntriesForDate(day14), EntriesForDateResult::Yes);

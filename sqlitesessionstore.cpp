@@ -16,12 +16,12 @@
  *   call private helpers that are also called from other public methods.
  *
  * Save methods:
- * - saveDurations(): Full save with backup creation, used for stopTimer/HistoryDialog
  * - saveCheckpoint(): Lightweight update without backup, used for periodic checkpoints
- * - updateDurationsById(): Smart upsert matching entries by stable segment_id
+ * - updateDurationsById(): Smart upsert matching entries by stable segment_id, used
+ *   via commitSession() for stopTimer/HistoryDialog
  *
  * Backup strategy:
- * - saveDurations() creates timestamped .backup file + .durations.txt log before writes
+ * - replaceAll() creates timestamped .backup file + .durations.txt log before writes
  * - saveCheckpoint() skips backup for performance (called every 5 minutes)
  *
  * Configuration:
@@ -778,7 +778,7 @@ bool SqliteSessionStore::ensureDiscardIntentsTable()
  * Strategy:
  * - Copies the .sqlite file to a timestamped .backup file.
  * - Writes a human-readable text dump (.durations.txt) for verification.
- * - This runs before 'saveDurations' (major save) but not 'saveCheckpoint' (frequent).
+ * - This runs before 'replaceAll' (major save) but not 'saveCheckpoint' (frequent).
  *
  * Concurrency:
  * - This method closes and reopens the database to ensure a clean file copy.
@@ -996,90 +996,6 @@ SqliteSessionStore::CommitOutcome SqliteSessionStore::commitOrRollback(const QSt
         closeConnection();
     }
     return CommitOutcome{false, err};
-}
-
-bool SqliteSessionStore::saveDurations(const std::deque<TimeDuration>& durations, TransactionMode mode,
-                                     const std::vector<QString>& removedSegmentIds)
-{
-    QMutexLocker locker(&db_mutex_);
-
-    // If history storage is disabled, treat as success (no-op)
-    if (history_days_to_keep_ == 0) {
-        return true;
-    }
-
-    // Validate connection first (ensureOpen before createBackup so we don't
-    // create a backup for a DB we can't open).
-    if (!ensureOpen()) {
-        Logger::Log("[DB] Could not open DB to save Durations");
-        return false;
-    }
-
-    const BackupResult backup = createBackup(durations, mode);
-    if (backup == BackupResult::ReopenFailed) {
-        Logger::Log("[DB] CRITICAL: DB connection lost after backup - aborting save");
-        return false;
-    }
-    if (backup != BackupResult::Success) {
-        const QString modeStr = (mode == TransactionMode::Replace) ? "REPLACE" : "APPEND";
-        Logger::Log("[DB] Warning: Backup failed before " + modeStr + " operation - proceeding without backup");
-    }
-
-    if (!db.transaction()) {
-        Logger::Log("[DB] Error starting transaction for Saving: " + db.lastError().text());
-        return false;
-    }
-
-    // Replace mode: clear existing entries before inserting new ones
-    if (mode == TransactionMode::Replace) {
-        QSqlQuery clearQuery(db);
-        if (!clearQuery.exec("DELETE FROM durations")) {
-            db.rollback();
-            Logger::Log("[DB] Error clearing durations table: " + clearQuery.lastError().text());
-            return false;
-        }
-    }
-
-    // Delete orphaned segment_ids that were merged away by cleanDurations.
-    // This must happen inside the same transaction as the INSERT for atomicity.
-    if (!removedSegmentIds.empty()) {
-        QSqlQuery deleteOrphanQuery(db);
-        deleteOrphanQuery.prepare("DELETE FROM durations WHERE segment_id = :segment_id");
-        for (const auto& orphanId : removedSegmentIds) {
-            deleteOrphanQuery.bindValue(":segment_id", orphanId);
-            if (!deleteOrphanQuery.exec()) {
-                db.rollback();
-                Logger::Log("[DB] Error deleting orphaned segment_id: " + deleteOrphanQuery.lastError().text());
-                return false;
-            }
-        }
-    }
-
-    // Prepare upsert statement for batch insertion (storing times in UTC).
-    // ON CONFLICT(segment_id) preserves the autoincrement id (unlike INSERT OR REPLACE),
-    // which the reconciliation path relies on via OrphanCheckpoint.id, and avoids aborting
-    // the surrounding transaction when an Append re-encounters an existing segment_id.
-    QSqlQuery query(db);
-    query.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
-                  "VALUES (:segment_id, :type, :start_utc, :end_utc, 1) "
-                  "ON CONFLICT(segment_id) DO UPDATE SET "
-                  "    type         = excluded.type, "
-                  "    start_utc    = excluded.start_utc, "
-                  "    end_utc      = excluded.end_utc, "
-                  "    is_finalized = excluded.is_finalized");
-
-    if (!insertRows(query, durations))
-        return false;
-
-    const bool commitSuccessful = commitOrRollback("Error committing save transaction").committed;
-
-#ifndef QT_NO_DEBUG
-    if (commitSuccessful) {
-        checkSegmentIdUniqueness();
-    }
-#endif
-
-    return commitSuccessful;
 }
 
 SessionStoreResult SqliteSessionStore::replaceAll(const Timeline& history, const Timeline& session)
@@ -1402,7 +1318,7 @@ EntriesForDateResult SqliteSessionStore::hasEntriesForDate(const QDate& date)
 /**
  * Saves or updates a checkpoint entry for crash recovery.
  *
- * Unlike saveDurations(), this method:
+ * Unlike replaceAll(), this method:
  * - Does NOT create backups (for performance - called every 5 minutes)
  * - Uses segment_id to update existing row instead of inserting new one
  * - Stores the actual segment_start_time_ (preserves original start, only updates end/duration)

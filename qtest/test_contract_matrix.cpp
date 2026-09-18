@@ -651,7 +651,7 @@ void ContractMatrixTest::test_recoverStartupCheckpoints_disabled_returns_Disable
 void ContractMatrixTest::test_C4_ensureOpen_failure_classified_consistently_data()
 {
     QTest::addColumn<QString>("method");
-    QTest::newRow("updateDurationsById")        << QString("updateDurationsById");
+    QTest::newRow("commitSession")               << QString("commitSession");
     QTest::newRow("flushToDisc")                << QString("flushToDisc");
     QTest::newRow("setLastCleanShutdownMarker") << QString("setLastCleanShutdownMarker");
     QTest::newRow("replaceAll")                 << QString("replaceAll");
@@ -689,8 +689,8 @@ void ContractMatrixTest::test_C4_ensureOpen_failure_classified_consistently()
     QVERIFY(!db.rawDb_dbg().isOpen());
 
     SessionStoreResult::Category category;
-    if (method == "updateDurationsById") {
-        category = db.updateDurationsById(oneRow()).category;
+    if (method == "commitSession") {
+        category = db.commitSession(Timeline(oneRow(), std::nullopt)).category;
     } else if (method == "flushToDisc") {
         category = db.flushToDisc().category;
     } else if (method == "setLastCleanShutdownMarker") {

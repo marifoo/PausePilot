@@ -58,7 +58,7 @@ public:
 
     // ---- In-memory data store ----
 
-    /// All stored durations (populated by saveDurations/updateDurationsById).
+    /// All stored durations (populated by commitSession/replaceAll).
     std::deque<TimeDuration> storedDurations;
 
     /// Last checkpoint saved (for inspection).
