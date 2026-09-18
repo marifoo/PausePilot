@@ -3,7 +3,6 @@
 
 #include <QObject>
 #include <QtGlobal>
-#include <QElapsedTimer>
 #include <QDateTime>
 #include <QMutex>
 #include <QTimer>
@@ -267,7 +266,6 @@ private:
     /// tests inject a controllable clock via setNowProvider_dbg(). Every internal
     /// "now" read in TimeTracker routes through this so the clock is fully drivable.
     std::function<QDateTime()> now_provider_;
-    QElapsedTimer timer_;
     SessionState session_;
     PendingCommit pending_commit_;
     PendingDiscards pending_discards_;
@@ -769,9 +767,6 @@ public:
     /// Forces the engine into a specific mode without transition logic.
     /// Use only in tests that need to arrange a pre-condition state.
     void forceMode_dbg(Mode m) { mode_ = m; }
-
-    /// Expose the QElapsedTimer so tests can reset it to control elapsed time.
-    QElapsedTimer& elapsedTimer_dbg() { return timer_; }
 
     /// Exposes the internal checkpoint-save path for direct testing.
     void saveCheckpoint_locked_dbg(const QDateTime& now) { saveCheckpoint_locked(now); }

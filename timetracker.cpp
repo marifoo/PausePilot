@@ -419,7 +419,7 @@ void TimeTracker::checkCrossLayerInvariants() const
 
 TimeTracker::TimeTracker(const Settings &settings, SessionStore& db, QObject *parent)
     : QObject(parent), settings_(settings), now_provider_(QDateTime::currentDateTime),
-      timer_(), session_(), mode_(Mode::None),
+      session_(), mode_(Mode::None),
       autopause_pending_resume_(false), is_locked_(false),
       dialog_open_(false), db_(db),
       checkpoint_interval_msec_(settings.getCheckpointIntervalMsec()),
@@ -540,7 +540,6 @@ void TimeTracker::startTimer(const QDateTime& now, TransitionCause cause)
 
     if (mode_ == Mode::Pause) {
         Logger::Log("[DEBUG] Starting TimeTracker from Pause - D=" + QString::number(session_.durations.size()));
-        timer_.restart();
 
         // Record the completed Pause segment with its own fresh segment_id
         // (current_checkpoint_segment_id was assigned when transitioning to Pause mode).
@@ -634,7 +633,6 @@ void TimeTracker::startTimer(const QDateTime& now, TransitionCause cause)
             QDateTime bootStart = now.addMSecs(-static_cast<qint64>(boot_time_sec) * 1000);
             addDuration(DurationType::Activity, bootStart, now);
         }
-        timer_.start();
         mode_ = Mode::Activity;
         session_.beginNewSegment(now);
         if (checkpoint_interval_msec_ > 0) {
@@ -672,7 +670,6 @@ void TimeTracker::pauseTimer(const QDateTime& now)
         return;
     }
     Logger::Log("[DEBUG] Pausing TimeTracker from Activity - D=" + QString::number(session_.durations.size()));
-    timer_.restart();
     addDuration(DurationType::Activity, session_.segment_start_time, now, session_.segment_id);
 
     finalizePauseTransition(now);
@@ -770,8 +767,6 @@ void TimeTracker::backpauseTimer(const QDateTime& now, const QDateTime& lockTime
         emit userWarning("Automatic pause skipped: the system clock moved backward.");
         return;
     }
-
-    timer_.restart();
 
     // Activity segment: segment_start_time to activity_end
     if (activity_end > session_.segment_start_time) {
@@ -1056,8 +1051,9 @@ void TimeTracker::onTick(const QDateTime& now)
 qint64 TimeTracker::getActiveTime() const
 {
     // Totals come from the wall-clock timeline (completed + ongoing) so the
-    // display stays consistent with persistence across a suspend; the monotonic
-    // timer_ freezes during suspend and no longer drives the displayed total.
+    // display stays consistent with persistence across a suspend; a monotonic
+    // elapsed timer would freeze during suspend and no longer drive the
+    // displayed total.
     return snapshot().activeMsec();
 }
 
@@ -1635,8 +1631,8 @@ void TimeTracker::saveCheckpoint_locked(const QDateTime& now)
     if (mode_ != Mode::Activity)        return;
     if (discardCrossMidnightOngoingAndStop(now)) return;
 
-    // Use wall-clock elapsed rather than timer_.elapsed() to stay correct
-    // across suspend. D2/LOW-E: routed through isClockReversed() for the
+    // Use wall-clock elapsed rather than a monotonic elapsed timer to stay
+    // correct across suspend. D2/LOW-E: routed through isClockReversed() for the
     // backward-step case explicitly; `wallClockMs == 0` (no time has passed
     // yet, not a reversal) is checked alongside it. Either way there is
     // nothing to save, no state is mutated, and the next tick (or a

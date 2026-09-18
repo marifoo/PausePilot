@@ -59,8 +59,10 @@ void IntegrationTest::test_integration_checkpoint_recovery_on_restart()
         // Manually save checkpoint
         tracker.saveCheckpoint_locked_dbg(clock.now());
         QVERIFY(tracker.getOngoingDuration().has_value());
-        QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
-        orphanSegmentId = tracker.sessionState_dbg().segment_id;
+        auto orphans = db.loadUnfinalizedCheckpoints_dbg();
+        QCOMPARE(orphans.size(), static_cast<size_t>(1));
+        QCOMPARE(orphans[0].segment_id, tracker.getOngoingDuration()->segment_id);
+        orphanSegmentId = orphans[0].segment_id;
 
         // Simulate an unclean shutdown: keep checkpoint row, skip graceful
         // stop. D11: no behavioral seam reaches this -- destructing the
@@ -120,7 +122,11 @@ void IntegrationTest::test_integration_orphan_reconciliation_is_idempotent()
         clock.advance(1200);  // seam-driven aging, no real sleep
         tracker.saveCheckpoint_locked_dbg(clock.now());
         QVERIFY(tracker.getOngoingDuration().has_value());
-        QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
+        {
+            auto orphans = db.loadUnfinalizedCheckpoints_dbg();
+            QCOMPARE(orphans.size(), static_cast<size_t>(1));
+            QCOMPARE(orphans[0].segment_id, tracker.getOngoingDuration()->segment_id);
+        }
         // D11: kept deliberately -- see the identical crash-simulation note
         // in test_integration_checkpoint_recovery_on_restart() above; no
         // behavioral seam leaves an orphan checkpoint unfinalized at
@@ -220,7 +226,11 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_present_is_s
         clock.advance(1200);  // seam-driven aging, no real sleep
         tracker.saveCheckpoint_locked_dbg(clock.now());
         QVERIFY(tracker.getOngoingDuration().has_value());
-        QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
+        {
+            auto orphans = db.loadUnfinalizedCheckpoints_dbg();
+            QCOMPARE(orphans.size(), static_cast<size_t>(1));
+            QCOMPARE(orphans[0].segment_id, tracker.getOngoingDuration()->segment_id);
+        }
         // D11: kept deliberately -- see the crash-simulation note in
         // test_integration_checkpoint_recovery_on_restart() above.
         tracker.sessionState_dbg().segment_id = SegmentId{};
@@ -260,7 +270,11 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_absent_shows
         clock.advance(1200);  // seam-driven aging, no real sleep
         tracker.saveCheckpoint_locked_dbg(clock.now());
         QVERIFY(tracker.getOngoingDuration().has_value());
-        QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
+        {
+            auto orphans = db.loadUnfinalizedCheckpoints_dbg();
+            QCOMPARE(orphans.size(), static_cast<size_t>(1));
+            QCOMPARE(orphans[0].segment_id, tracker.getOngoingDuration()->segment_id);
+        }
         // D11: kept deliberately -- see the crash-simulation note in
         // test_integration_checkpoint_recovery_on_restart() above.
         tracker.sessionState_dbg().segment_id = SegmentId{};
@@ -302,8 +316,12 @@ void IntegrationTest::test_integration_memory_db_consistency()
     // Save checkpoint
     tracker.saveCheckpoint_locked_dbg(QDateTime::currentDateTime());
     QVERIFY(tracker.getOngoingDuration().has_value());
-    QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
-    
+    {
+        auto orphans = db.loadUnfinalizedCheckpoints_dbg();
+        QCOMPARE(orphans.size(), static_cast<size_t>(1));
+        QCOMPARE(orphans[0].segment_id, tracker.getOngoingDuration()->segment_id);
+    }
+
     // Stop
     tracker.useTimerViaButton(Button::Stop);
     
@@ -651,9 +669,17 @@ void IntegrationTest::test_integration_backpause_db_update()
     tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock);
 
     // Backpause transitions to Pause and starts a fresh segment identity.
-    QVERIFY(tracker.getOngoingDuration().has_value());
+    // The Pause segment isn't checkpointed (saveCheckpoint_locked only
+    // writes while mode_ == Activity), so the DB can't observe this. The
+    // public getOngoingDuration() accessor is unsuitable for the emptiness
+    // claim: TimeDuration's private constructor mints a fresh SegmentId
+    // whenever the one it's given is empty, so an empty session_.segment_id
+    // would self-heal into a non-empty one before this test could see it.
+    // Read the raw debug field instead, which cannot self-heal.
+    auto ongoing = tracker.getOngoingDuration();
+    QVERIFY(ongoing.has_value());
     QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
-    QVERIFY(tracker.sessionState_dbg().segment_id.toString() != checkpointSegmentId.toString());
+    QVERIFY(ongoing->segment_id.toString() != checkpointSegmentId.toString());
     
     // Verify durations were updated in DB
     SqliteSessionStore db2(settings);
@@ -771,8 +797,8 @@ void IntegrationTest::test_Z_engine_watchdog_emits_MidnightWatchdog()
  *
  * If both the scheduled stop timer and the watchdog would fire (race), only
  * one stopped() signal is emitted.  Simulate by: arming the timer (1 ms fire),
- * backdating the segment, then calling onTick() to let the watchdog win — the
- * timer fires afterward but the engine is already stopped so it no-ops.
+ * then calling onTick() to let the watchdog win — the timer fires afterward
+ * but the engine is already stopped so it no-ops.
  */
 void IntegrationTest::test_AA_no_duplicate_stop_signal()
 {
@@ -794,17 +820,13 @@ void IntegrationTest::test_AA_no_duplicate_stop_signal()
     const QDateTime pastStop(QDate::currentDate(), QTime(23, 59, 59, 600));
     tracker.dayBoundaryWatcher_dbg().armScheduledStop(pastStop);
 
-    // Backdate segment so the watchdog also wants to fire. D11: kept
-    // deliberately -- this race test depends on two independently-clocked
-    // timers (the real-wall-clock armScheduledStop()/QTest::qWait() pair
-    // above, and the watchdog check below) landing in a specific order.
-    // Re-deriving "segment started exactly one real day before now" through
-    // a second FakeClock phase risks perturbing the real-timer arm/qWait
-    // timing this test exists to race against; the direct write is the
-    // narrowest way to hold that variable fixed while leaving the real-timer
-    // race intact.
-    tracker.sessionState_dbg().segment_start_time = QDateTime::currentDateTime().addDays(-1);
-
+    // No forced backdate needed: Start already anchored segment_start_time to
+    // the pinned FakeClock instant (2025-06-01), which onTick()'s real
+    // QDateTime::currentDateTime() argument below is trivially "cross
+    // midnight" from -- armScheduledStop() and onTick() both take `now` as an
+    // explicit argument and never consult now_provider_(), so the pinned
+    // clock and the real-wall-clock arm/qWait race stay independent without
+    // any direct write to session state.
     QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
     QVERIFY(stoppedSpy.isValid());
 
@@ -1363,8 +1385,12 @@ void IntegrationTest::test_A3_exit_anyway_leaves_checkpoint_untouched_for_recove
         clock.advance(20000);
         tracker.saveCheckpoint_locked_dbg(clock.now());
         QVERIFY(tracker.getOngoingDuration().has_value());
-        checkpointSegmentId = tracker.sessionState_dbg().segment_id;
-        QVERIFY(!checkpointSegmentId.isEmpty());
+        {
+            auto orphans = db.loadUnfinalizedCheckpoints_dbg();
+            QCOMPARE(orphans.size(), static_cast<size_t>(1));
+            QCOMPARE(orphans[0].segment_id, tracker.getOngoingDuration()->segment_id);
+            checkpointSegmentId = orphans[0].segment_id;
+        }
         clock.advance(5000);
 
         // Force the drain's commit to fail: close the connection before
@@ -1417,7 +1443,6 @@ void IntegrationTest::test_A4_watchdog_discard_failure_survives_reopen_never_cre
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    SegmentId rejectedSegmentId;
 
     {
         // Session 1: Start Activity before midnight and durably checkpoint
@@ -1437,8 +1462,11 @@ void IntegrationTest::test_A4_watchdog_discard_failure_survives_reopen_never_cre
         clock.advance(60000);
         tracker.saveCheckpoint_locked_dbg(clock.now());
         QVERIFY(tracker.getOngoingDuration().has_value());
-        rejectedSegmentId = tracker.sessionState_dbg().segment_id;
-        QVERIFY(!rejectedSegmentId.isEmpty());
+        {
+            auto orphans = db.loadUnfinalizedCheckpoints_dbg();
+            QCOMPARE(orphans.size(), static_cast<size_t>(1));
+            QCOMPARE(orphans[0].segment_id, tracker.getOngoingDuration()->segment_id);
+        }
 
         clock.setNow(QDateTime(preMidnight.date().addDays(1), QTime(0, 5, 0), Qt::LocalTime));
         db.setForceDiscardRowDeleteFailure_dbg(true);
@@ -1498,18 +1526,15 @@ void IntegrationTest::test_D2_real_sqlite_backward_clock_stop_preserves_checkpoi
         tracker.useTimerViaButton(Button::Start);
         QVERIFY(tracker.isActive());
         QVERIFY(tracker.getOngoingDuration().has_value());
-        segId = tracker.sessionState_dbg().segment_id;
 
         // A real checkpoint row is written for the recorded prefix.
         clock.setNow(checkpointEnd);
         tracker.triggerCheckpoint_dbg();
         {
-            QSqlQuery q(db.rawDb_dbg());
-            q.prepare("SELECT COUNT(*) FROM durations WHERE segment_id = :seg AND is_finalized = 0");
-            q.bindValue(":seg", segId.toString());
-            QVERIFY(q.exec());
-            QVERIFY(q.next());
-            QCOMPARE(q.value(0).toInt(), 1);
+            auto orphans = db.loadUnfinalizedCheckpoints_dbg();
+            QCOMPARE(orphans.size(), static_cast<size_t>(1));
+            QCOMPARE(orphans[0].segment_id, tracker.getOngoingDuration()->segment_id);
+            segId = orphans[0].segment_id;
         }
 
         // Act: a routine backward wall-clock step, then Stop.

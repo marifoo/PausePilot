@@ -42,7 +42,6 @@ void TimerTest::test_timer_start_pause_resume_stop_and_checkpoints()
     // Start -> Activity
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
-    QVERIFY(tracker.elapsedTimer_dbg().isValid());
     QVERIFY(tracker.isActive());
     QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
 
@@ -52,11 +51,9 @@ void TimerTest::test_timer_start_pause_resume_stop_and_checkpoints()
     QVERIFY(tracker.sessionState_dbg().durations.size() >= 1);
     QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
 
-    // Resume -> Activity and timer restarted
+    // Resume -> Activity
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
-    tracker.elapsedTimer_dbg().invalidate();
-    tracker.elapsedTimer_dbg().start();
 
     // Trigger checkpoint manually
     QTest::qWait(100); // Ensure elapsed > 0
@@ -86,8 +83,6 @@ void TimerTest::test_timer_backpause_resets_checkpoint_and_splits()
     tracker.useTimerViaButton(Button::Start);
 
     tracker.sessionState_dbg().segment_start_time = QDateTime::currentDateTime().addSecs(-120);
-    tracker.elapsedTimer_dbg().invalidate();
-    tracker.elapsedTimer_dbg().start();
 
     tracker.backpauseTimer_dbg(QDateTime::currentDateTime());
     QVERIFY(tracker.isPaused());
@@ -110,8 +105,6 @@ void TimerTest::test_timer_lock_events_checkpoint_and_resume()
     TimeTracker tracker(settings, db);
 
     tracker.useTimerViaButton(Button::Start);
-    tracker.elapsedTimer_dbg().invalidate();
-    tracker.elapsedTimer_dbg().start();
     tracker.useTimerViaLockEvent(LockEvent::Lock);
     QVERIFY(tracker.isLocked_dbg());
     tracker.useTimerViaLockEvent(LockEvent::Unlock);
@@ -375,12 +368,12 @@ void TimerTest::test_replaceAll_success_clears_unsaved_cache()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     // Arrange: a pending commit via a real failed Stop persist (behavior, not
     // direct field injection).
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     clock.advance(60ll * 1000ll);
@@ -402,11 +395,11 @@ void TimerTest::test_replaceAll_failure_keeps_unsaved_cache()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     // Arrange: a pending commit via a real failed Stop persist.
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     clock.advance(60ll * 1000ll);
@@ -853,7 +846,6 @@ void TimerTest::test_useTimerViaButton_force_stops_on_cross_midnight_ongoing()
     tracker.forceMode_dbg(TimeTracker::Mode::Activity);
     tracker.sessionState_dbg().segment_start_time =
         QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0));
-    tracker.elapsedTimer_dbg().start();
 
     // Act: try to stop — discardCrossMidnightOngoingAndStop should fire first
     tracker.useTimerViaButton(Button::Stop);
@@ -881,7 +873,6 @@ void TimerTest::test_useTimerViaButton_pause_event_is_dropped_when_cross_midnigh
     tracker.forceMode_dbg(TimeTracker::Mode::Activity);
     tracker.sessionState_dbg().segment_start_time =
         QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0));
-    tracker.elapsedTimer_dbg().start();
 
     // Act: user presses Pause — but the guard should intercept and force-stop
     tracker.useTimerViaButton(Button::Pause);
@@ -909,7 +900,6 @@ void TimerTest::test_useTimerViaLockEvent_unlock_does_not_restart_after_cross_mi
     tracker.sessionState_dbg().segment_start_time =
         QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0));
     tracker.setAutopausePendingResume_dbg(true);
-    tracker.elapsedTimer_dbg().start();
 
     // Act: Unlock event arrives — guard should discard and not restart
     tracker.useTimerViaLockEvent(LockEvent::Unlock);
@@ -936,7 +926,6 @@ void TimerTest::test_saveCheckpoint_locked_does_not_write_cross_midnight_row()
     tracker.forceMode_dbg(TimeTracker::Mode::Activity);
     tracker.sessionState_dbg().segment_start_time =
         QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0));
-    tracker.elapsedTimer_dbg().start();
 
     // Act: checkpoint fires (simulating late checkpoint after sleep)
     QDateTime now = QDateTime::currentDateTime();
@@ -990,8 +979,8 @@ void TimerTest::test_startTimer_drops_cross_midnight_boot_time_entry()
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    TimeTracker tracker(settings, db);
     FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(0, 30, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, db);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     // Act
@@ -1410,10 +1399,10 @@ void TimerTest::test_F4_unlock_during_dialog_replays_lock_interval_at_true_times
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -1468,10 +1457,10 @@ void TimerTest::test_F4_still_locked_at_dialog_close_replays_unchanged()
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -1515,10 +1504,10 @@ void TimerTest::test_A1_lock_before_midnight_replays_lock_first()
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -1583,10 +1572,10 @@ void TimerTest::test_A1_midnight_before_lock_replays_midnight_first()
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -1638,10 +1627,10 @@ void TimerTest::test_F4_ongoing_edited_away_skips_lock_correction_replay()
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -1691,10 +1680,10 @@ void TimerTest::test_F4_replay_rearms_midnight_stop_at_real_time()
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -2429,10 +2418,10 @@ void TimerTest::test_commitEditedTimeline_ignores_ongoing_when_already_stopped()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime start(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(start);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     QVERIFY(tracker.isStopped());
@@ -2475,10 +2464,10 @@ void TimerTest::test_seam_fake_clock_drives_ongoing_duration()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore db;
-    TimeTracker tracker(settings, db);
 
     const QDateTime start(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(start);
+    TimeTracker tracker(settings, db);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     // Act: start the engine (segment anchored at the fake now), then jump ahead.
@@ -2509,10 +2498,10 @@ void TimerTest::test_A2_backpause_anchors_at_lock_time_across_suspend()
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore db;
-    TimeTracker tracker(settings, db);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, db);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     // Act: Activity from 09:00; desktop locks at 10:00.
@@ -2552,10 +2541,10 @@ void TimerTest::test_A2_display_total_matches_wallclock_across_suspend()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore db;
-    TimeTracker tracker(settings, db);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, db);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     // Act: start Activity, then jump the wall clock two hours (simulated suspend).
@@ -2587,10 +2576,10 @@ void TimerTest::test_A3_watchdog_discard_deletes_checkpoint_row()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    TimeTracker tracker(settings, db);
 
     const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
     FakeClock clock(preMidnight);
+    TimeTracker tracker(settings, db);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     // Start Activity and write a checkpoint before midnight.
@@ -2618,10 +2607,10 @@ void TimerTest::test_A4_shutdown_called_cleared_on_fresh_session_start()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore db;
-    TimeTracker tracker(settings, db);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, db);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     // Act: start timer, stop it, then call shutdown().
@@ -2651,10 +2640,10 @@ void TimerTest::test_F2_shutdown_after_midnight_discards_checkpoint()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
     FakeClock clock(preMidnight);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -2689,10 +2678,10 @@ void TimerTest::test_A1_scheduled_deferred_credits_activity_through_cutoff_with_
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
     FakeClock clock(preMidnight);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -2735,10 +2724,10 @@ void TimerTest::test_A1_scheduled_deferred_credits_activity_through_cutoff_no_ch
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
     FakeClock clock(preMidnight);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -2769,10 +2758,10 @@ void TimerTest::test_A1_scheduled_deferred_credits_pause_through_cutoff()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
     FakeClock clock(preMidnight);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -2816,10 +2805,10 @@ void TimerTest::test_A1_watchdog_deferred_discards_entire_segment_with_checkpoin
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
     FakeClock clock(preMidnight);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -2855,10 +2844,10 @@ void TimerTest::test_A1_watchdog_deferred_discards_entire_segment_no_checkpoint(
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
     FakeClock clock(preMidnight);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -2885,10 +2874,10 @@ void TimerTest::test_A1_onMidnightTimerFired_captures_typed_event_while_dialog_o
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
     FakeClock clock(cutoff);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -2926,10 +2915,10 @@ void TimerTest::test_A1_tick_captures_watchdog_event_while_dialog_open()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -2963,10 +2952,10 @@ void TimerTest::test_A1_unrelated_history_edit_preserved_during_deferred_midnigh
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(20, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3022,10 +3011,10 @@ void TimerTest::test_A1_repeated_endExclusiveEdit_does_not_replay_twice()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
     FakeClock clock(preMidnight);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3055,10 +3044,10 @@ void TimerTest::test_F2_ontime_stop_does_not_discard_checkpoint()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3086,10 +3075,10 @@ void TimerTest::test_F3_pause_failure_marks_unsaved()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3120,10 +3109,10 @@ void TimerTest::test_F3_backpause_failure_marks_unsaved()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3155,10 +3144,10 @@ void TimerTest::test_F3_recovery_after_pause_failure_clears_unsaved()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3210,10 +3199,10 @@ void TimerTest::test_A2_first_submit_outcome()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3250,10 +3239,10 @@ void TimerTest::test_A2_retry_failure_retains_same_payload_and_refuses_start()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3292,10 +3281,10 @@ void TimerTest::test_A2_retry_success_clears_payload_and_permits_start()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3323,11 +3312,11 @@ void TimerTest::test_A2_no_stale_failure_state_across_intermittent_successes()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     for (int cycle = 0; cycle < 3; ++cycle) {
@@ -3372,10 +3361,10 @@ void TimerTest::test_A2_repeated_failed_start_neither_starts_nor_mutates_payload
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3457,9 +3446,9 @@ void TimerTest::test_A3_drain_retries_preexisting_pending_payload_while_stopped(
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3487,9 +3476,9 @@ void TimerTest::test_A3_drain_retry_failure_keeps_incomplete_and_payload()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3525,9 +3514,9 @@ void TimerTest::test_A3_drain_running_session_stop_commit_fails_then_drain_succe
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3559,9 +3548,9 @@ void TimerTest::test_A3_drain_running_session_stop_commit_fails_then_drain_fails
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3590,9 +3579,9 @@ void TimerTest::test_A3_drain_idempotent_repeated_calls_after_success()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3616,9 +3605,9 @@ void TimerTest::test_A3_drain_idempotent_repeated_calls_after_failure()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3665,9 +3654,9 @@ void TimerTest::test_A3_user_retry_reports_fresh_failure_message()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3704,9 +3693,9 @@ void TimerTest::test_A3_destructor_is_noop_after_successful_drain()
     FakeSessionStore fakeDb;
     int commitsAfterDrain = 0;
     {
-        TimeTracker tracker(settings, fakeDb);
         const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
         FakeClock clock(t0);
+        TimeTracker tracker(settings, fakeDb);
         tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
         tracker.useTimerViaButton(Button::Start);
@@ -3734,10 +3723,10 @@ void TimerTest::test_A4_discard_transient_failure_retains_intent_and_blocks_clea
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
     FakeClock clock(preMidnight);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     const SegmentId segId = tracker.sessionState_dbg().segment_id;
@@ -3769,10 +3758,10 @@ void TimerTest::test_A4_discard_fatal_failure_retains_intent_and_blocks_clean_ma
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
     FakeClock clock(preMidnight);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
 
@@ -3800,10 +3789,10 @@ void TimerTest::test_A4_discard_disabled_resolves_intent_without_mutating_checkp
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
     FakeClock clock(preMidnight);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     clock.advance(60ll * 1000ll);
@@ -3835,10 +3824,10 @@ void TimerTest::test_A4_start_retries_pending_discard_without_blocking_start()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
     FakeClock clock(preMidnight);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
 
@@ -3864,10 +3853,10 @@ void TimerTest::test_A4_drain_retries_pending_discard_then_succeeds()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
     FakeClock clock(preMidnight);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
 
@@ -3892,10 +3881,10 @@ void TimerTest::test_A4_drain_incomplete_while_discard_unresolved()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
     FakeClock clock(preMidnight);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
 
@@ -3929,12 +3918,12 @@ void TimerTest::test_C4_fatal_checkpoint_failure_latches_and_stops_tracking()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-    QSignalSpy fatalSpy(&tracker, &TimeTracker::fatalError);
-    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    QSignalSpy fatalSpy(&tracker, &TimeTracker::fatalError);
+    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3962,10 +3951,10 @@ void TimerTest::test_C4_fatal_latch_disables_start_even_after_store_recovers()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -3995,11 +3984,11 @@ void TimerTest::test_C4_fatal_error_shows_dialog_exactly_once()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-    QSignalSpy fatalSpy(&tracker, &TimeTracker::fatalError);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    QSignalSpy fatalSpy(&tracker, &TimeTracker::fatalError);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -4034,11 +4023,11 @@ void TimerTest::test_C4_transient_checkpoint_failure_is_silent_and_tracking_cont
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -4116,10 +4105,10 @@ void TimerTest::test_C4_fatal_pauseresume_commit_stops_without_started_after_sto
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -4172,10 +4161,10 @@ void TimerTest::test_C4_fatal_pause_transition_ends_stopped_not_impossible_state
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -4228,10 +4217,10 @@ void TimerTest::test_C4_fatal_during_midnight_discard_still_reports_midnightwatc
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
     FakeClock clock(preMidnight);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -4278,10 +4267,10 @@ void TimerTest::test_C4_callerBug_commit_payload_is_retained_not_dropped()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     clock.advance(60ll * 1000ll);
@@ -4318,10 +4307,10 @@ void TimerTest::test_C4_callerBug_commit_keeps_start_refused_while_persistent()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     clock.advance(60ll * 1000ll);
@@ -4392,12 +4381,12 @@ void TimerTest::test_C4_fatalError_emitted_once_userWarning_not_emitted_for_fata
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-    QSignalSpy fatalSpy(&tracker, &TimeTracker::fatalError);
-    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    QSignalSpy fatalSpy(&tracker, &TimeTracker::fatalError);
+    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -4480,10 +4469,10 @@ void TimerTest::test_D2_stop_backward_clock_step_zero_mutation_drain_still_clean
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -4526,10 +4515,10 @@ void TimerTest::test_D2_stop_backward_clock_step_never_discards_checkpoint()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -4562,10 +4551,10 @@ void TimerTest::test_D2_stop_rejects_backward_clock_step_across_date_not_misclas
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -4599,10 +4588,10 @@ void TimerTest::test_D2_pause_refuses_backward_clock_step_no_state_mutated()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -4637,10 +4626,10 @@ void TimerTest::test_D2_backpause_refuses_backward_clock_step_no_state_mutated()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -4669,7 +4658,6 @@ void TimerTest::test_D2_pause_refuses_dst_fallback_backward_step()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     // Europe/Berlin 2025 fall-back: 03:00 CEST -> 02:00 CET on Oct 26.
     // Model it directly as the wall-clock repeat it produces: the segment
@@ -4678,6 +4666,7 @@ void TimerTest::test_D2_pause_refuses_dst_fallback_backward_step()
     // earlier in UTC terms -- the same shape as a manual backward step.
     const QDateTime t0(QDate(2025, 10, 26), QTime(2, 30, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -4700,12 +4689,12 @@ void TimerTest::test_D2_pause_proceeds_normally_through_dst_springforward()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     // Europe/Berlin 2025 spring-forward: 02:00 CET jumps to 03:00 CEST on
     // Mar 30. Model the forward jump directly: 01:30 -> 03:15 local.
     const QDateTime t0(QDate(2025, 3, 30), QTime(1, 30, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -4733,10 +4722,10 @@ void TimerTest::test_D2_scheduled_stop_fires_early_after_backward_step_rearms()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -4767,10 +4756,10 @@ void TimerTest::test_D2_scheduled_stop_reaches_boundary_after_rearm_then_stops()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -4807,10 +4796,10 @@ void TimerTest::test_D2_scheduled_stop_late_same_day_applies_captured_boundary()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -4850,10 +4839,10 @@ void TimerTest::test_D2_scheduled_stop_late_across_date_defers_to_watchdog_disca
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -4895,9 +4884,9 @@ void TimerTest::test_D5_cancelShutdown_after_active_shutdown_stays_stopped_not_r
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore db;
-    TimeTracker tracker(settings, db);
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, db);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -4948,9 +4937,9 @@ void TimerTest::test_D5_cancelShutdown_retains_pending_commit_for_next_start()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -5024,8 +5013,8 @@ void TimerTest::test_D10_transitioned_emits_one_event_per_real_transition()
     }
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
     FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     switch (scenario) {
@@ -5093,8 +5082,8 @@ void TimerTest::test_D10_noop_inputs_emit_no_transitioned()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
     FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     Button action = Button::Pause;
@@ -5198,10 +5187,10 @@ void TimerTest::test_D10_deferred_events_replay_chronologically_lock_first()
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -5250,10 +5239,10 @@ void TimerTest::test_D10_deferred_events_replay_chronologically_midnight_first()
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -5299,8 +5288,8 @@ void TimerTest::test_D10_longlock_disabled_autopause_dialog_open_is_dropped_not_
     Settings settings(settingsPath);
     QVERIFY(!settings.isAutopauseEnabled());
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
     FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
@@ -5332,10 +5321,10 @@ void TimerTest::test_D10_midnight_scheduled_live_emits_transitioned()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -5372,10 +5361,10 @@ void TimerTest::test_D10_midnight_watchdog_live_emits_transitioned()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
     const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
     FakeClock clock(preMidnight);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -5444,9 +5433,9 @@ void TimerTest::test_D10_fatal_commit_on_stop_keeps_buttonstop_cause()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
