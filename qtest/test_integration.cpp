@@ -58,10 +58,20 @@ void IntegrationTest::test_integration_checkpoint_recovery_on_restart()
 
         // Manually save checkpoint
         tracker.saveCheckpoint_locked_dbg(clock.now());
+        QVERIFY(tracker.getOngoingDuration().has_value());
         QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
         orphanSegmentId = tracker.sessionState_dbg().segment_id;
 
-        // Simulate an unclean shutdown: keep checkpoint row, skip graceful stop.
+        // Simulate an unclean shutdown: keep checkpoint row, skip graceful
+        // stop. D11: no behavioral seam reaches this -- destructing the
+        // tracker while mode_ is still Activity/Pause runs the destructor's
+        // own last-resort drainForShutdown(), which gracefully finalizes the
+        // segment (see ~TimeTracker(), timetracker.cpp:455-482) instead of
+        // leaving it as the unfinalized orphan checkpoint this test needs to
+        // exercise startup recovery against. forceMode_dbg()/sessionState_dbg()
+        // are kept here deliberately to make the destructor's drain a no-op
+        // (mode already None, no pending commit/discard), matching what a
+        // real process crash would leave behind.
         tracker.forceMode_dbg(TimeTracker::Mode::None);
         tracker.sessionState_dbg().segment_id = SegmentId{};
 
@@ -109,7 +119,12 @@ void IntegrationTest::test_integration_orphan_reconciliation_is_idempotent()
         tracker.useTimerViaButton(Button::Start);
         clock.advance(1200);  // seam-driven aging, no real sleep
         tracker.saveCheckpoint_locked_dbg(clock.now());
+        QVERIFY(tracker.getOngoingDuration().has_value());
         QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
+        // D11: kept deliberately -- see the identical crash-simulation note
+        // in test_integration_checkpoint_recovery_on_restart() above; no
+        // behavioral seam leaves an orphan checkpoint unfinalized at
+        // destruction (the destructor's own drain would finalize it).
         tracker.sessionState_dbg().segment_id = SegmentId{};
         tracker.forceMode_dbg(TimeTracker::Mode::None);
     }
@@ -204,7 +219,10 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_present_is_s
         tracker.useTimerViaButton(Button::Start);
         clock.advance(1200);  // seam-driven aging, no real sleep
         tracker.saveCheckpoint_locked_dbg(clock.now());
+        QVERIFY(tracker.getOngoingDuration().has_value());
         QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
+        // D11: kept deliberately -- see the crash-simulation note in
+        // test_integration_checkpoint_recovery_on_restart() above.
         tracker.sessionState_dbg().segment_id = SegmentId{};
         tracker.forceMode_dbg(TimeTracker::Mode::None);
     }
@@ -241,7 +259,10 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_absent_shows
         tracker.useTimerViaButton(Button::Start);
         clock.advance(1200);  // seam-driven aging, no real sleep
         tracker.saveCheckpoint_locked_dbg(clock.now());
+        QVERIFY(tracker.getOngoingDuration().has_value());
         QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
+        // D11: kept deliberately -- see the crash-simulation note in
+        // test_integration_checkpoint_recovery_on_restart() above.
         tracker.sessionState_dbg().segment_id = SegmentId{};
         tracker.forceMode_dbg(TimeTracker::Mode::None);
     }
@@ -280,6 +301,7 @@ void IntegrationTest::test_integration_memory_db_consistency()
     
     // Save checkpoint
     tracker.saveCheckpoint_locked_dbg(QDateTime::currentDateTime());
+    QVERIFY(tracker.getOngoingDuration().has_value());
     QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
     
     // Stop
@@ -476,30 +498,38 @@ void IntegrationTest::test_5_0a_cross_midnight_ongoing_discarded_completed_prese
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
 
-    // Arrange: start the timer, add a completed same-day segment manually,
-    // then rewind segment_start_time to yesterday to simulate cross-midnight.
+    // Arrange: start the timer yesterday (via the clock seam), add a
+    // completed yesterday-same-day segment, then advance the clock into
+    // today so the ongoing segment (still anchored to yesterday) crosses
+    // local midnight -- the real transition path a sleep-through-midnight
+    // takes, instead of writing segment_start_time directly.
+    const QDateTime yesterdayStart(QDate::currentDate().addDays(-1), QTime(20, 0, 0), Qt::LocalTime);
+    // FakeClock declared before TimeTracker: see outlives-tracker note above
+    // (test_5_0a_watchdog_helper_returns_false_when_not_crossed, ~line 588).
+    FakeClock clock(yesterdayStart);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
 
     // Insert a completed segment via direct addDuration() so we control the
     // timestamps and guarantee a positive duration independent of wall-clock.
-    const QDateTime segStart = QDateTime::currentDateTime().addSecs(-10);
-    const QDateTime segEnd   = QDateTime::currentDateTime().addSecs(-1);
+    const QDateTime segStart = yesterdayStart.addSecs(60);
+    const QDateTime segEnd   = yesterdayStart.addSecs(69);
     tracker.addDuration_dbg(DurationType::Activity, segStart, segEnd);
-    QVERIFY(!tracker.sessionState_dbg().durations.empty());
-    const size_t completedCount = tracker.sessionState_dbg().durations.size();
+    QVERIFY(!tracker.completedTimeline().completed().empty());
+    const size_t completedCount = tracker.completedTimeline().completed().size();
 
-    // Simulate sleep through midnight: move segment_start_time to yesterday.
-    const QDateTime yesterday = QDateTime::currentDateTime().addDays(-1);
-    tracker.sessionState_dbg().segment_start_time = yesterday;
+    // Simulate sleep through midnight: advance the clock into today.
+    clock.setNow(QDateTime(QDate::currentDate(), QTime(9, 0, 0), Qt::LocalTime));
 
     // Pre-condition: watchdog predicate should now be true.
     QVERIFY(tracker.isOngoingSegmentCrossMidnight());
 
     // Act: call the internal helper with "now" (today).
-    const QDateTime today = QDateTime::currentDateTime();
+    const QDateTime today = clock.now();
     fakeDb.callLog.clear();
     const bool fired = tracker.discardCrossMidnightOngoingAndStop_dbg(today);
 
@@ -507,9 +537,9 @@ void IntegrationTest::test_5_0a_cross_midnight_ongoing_discarded_completed_prese
     QVERIFY(fired);
     QVERIFY(tracker.isStopped());
     QVERIFY(fakeDb.callLog.contains("commitSession"));
-    // The completed segments must NOT be in session_.durations any more
+    // The completed segments must NOT be in the completed timeline any more
     // (they were flushed and resetForNewSession was called).
-    QCOMPARE(tracker.sessionState_dbg().durations.size(), static_cast<size_t>(0));
+    QCOMPARE(tracker.completedTimeline().completed().size(), static_cast<size_t>(0));
     (void)completedCount; // used to verify state before discard
 }
 
@@ -523,15 +553,21 @@ void IntegrationTest::test_5_0a_discard_is_idempotent()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
+
+    const QDateTime yesterdayStart(QDate::currentDate().addDays(-1), QTime(20, 0, 0), Qt::LocalTime);
+    // FakeClock declared before TimeTracker: see outlives-tracker note above
+    // (test_5_0a_watchdog_helper_returns_false_when_not_crossed, ~line 588).
+    FakeClock clock(yesterdayStart);
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
 
-    // Force segment to yesterday.
-    tracker.sessionState_dbg().segment_start_time = QDateTime::currentDateTime().addDays(-1);
+    // Advance the clock into today: the segment started yesterday.
+    clock.setNow(QDateTime(QDate::currentDate(), QTime(9, 0, 0), Qt::LocalTime));
 
-    const QDateTime today = QDateTime::currentDateTime();
+    const QDateTime today = clock.now();
     QVERIFY(tracker.discardCrossMidnightOngoingAndStop_dbg(today));
     QVERIFY(tracker.isStopped());
 
@@ -552,7 +588,15 @@ void IntegrationTest::test_5_0a_watchdog_helper_returns_false_when_not_crossed()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
+
+    // FakeClock is declared before TimeTracker so it outlives it: the
+    // tracker is left in Activity at scope exit, and ~TimeTracker()'s
+    // drainForShutdown() calls back into the now-provider, which captures
+    // &clock by reference.
+    const QDateTime dayStart(QDate::currentDate(), QTime(20, 0, 0), Qt::LocalTime);
+    FakeClock clock(dayStart);
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     // Stopped: must be false.
     QVERIFY(tracker.isStopped());
@@ -562,12 +606,14 @@ void IntegrationTest::test_5_0a_watchdog_helper_returns_false_when_not_crossed()
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(!tracker.isOngoingSegmentCrossMidnight());
 
-    // Backdate to yesterday: must be true.
-    tracker.sessionState_dbg().segment_start_time = QDateTime::currentDateTime().addDays(-1);
+    // Advance the clock into the next day: must be true.
+    clock.setNow(QDateTime(QDate::currentDate().addDays(1), QTime(9, 0, 0), Qt::LocalTime));
     QVERIFY(tracker.isOngoingSegmentCrossMidnight());
 
-    // Restore so destructor stops cleanly.
-    tracker.sessionState_dbg().segment_start_time = QDateTime::currentDateTime();
+    // Restore the clock to the segment's own day so the destructor's
+    // drainForShutdown() stops the engine cleanly instead of hitting the
+    // cross-midnight watchdog path.
+    clock.setNow(dayStart.addSecs(60));
 }
 
 void IntegrationTest::test_integration_backpause_db_update()
@@ -585,20 +631,29 @@ void IntegrationTest::test_integration_backpause_db_update()
     
     // Save checkpoint
     tracker.saveCheckpoint_locked_dbg(QDateTime::currentDateTime());
-    SegmentId checkpointSegmentId = tracker.sessionState_dbg().segment_id;
+    QVERIFY(tracker.getOngoingDuration().has_value());
+    auto checkpointOrphans = db.loadUnfinalizedCheckpoints_dbg();
+    SegmentId checkpointSegmentId = checkpointOrphans.empty() ? SegmentId{} : checkpointOrphans[0].segment_id;
     QVERIFY(!checkpointSegmentId.isEmpty());
 
     // Simulate lock
     tracker.useTimerViaLockEvent(LockEvent::Lock);
 
-    // Checkpoint ID should still be valid (lock doesn't reset it)
-    QCOMPARE(tracker.sessionState_dbg().segment_id.toString(), checkpointSegmentId.toString());
-    
+    // Checkpoint row should still be present and unchanged in the store
+    // (lock doesn't reset its identity).
+    QVERIFY(tracker.getOngoingDuration().has_value());
+    auto lockOrphans = db.loadUnfinalizedCheckpoints_dbg();
+    QCOMPARE(lockOrphans.size(), static_cast<size_t>(1));
+    QVERIFY(!lockOrphans[0].segment_id.isEmpty());
+    QCOMPARE(lockOrphans[0].segment_id.toString(), checkpointSegmentId.toString());
+
     // Simulate long ongoing lock (triggers backpause)
     tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock);
-    
+
     // Backpause transitions to Pause and starts a fresh segment identity.
+    QVERIFY(tracker.getOngoingDuration().has_value());
     QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
+    QVERIFY(tracker.sessionState_dbg().segment_id.toString() != checkpointSegmentId.toString());
     
     // Verify durations were updated in DB
     SqliteSessionStore db2(settings);
@@ -642,7 +697,7 @@ void IntegrationTest::test_Y_engine_scheduled_stop_emits_MidnightScheduled()
     const QDateTime segStart = QDateTime::currentDateTime().addSecs(-30);
     const QDateTime segEnd   = QDateTime::currentDateTime().addSecs(-5);
     tracker.addDuration_dbg(DurationType::Activity, segStart, segEnd);
-    QVERIFY(!tracker.sessionState_dbg().durations.empty());
+    QVERIFY(!tracker.completedTimeline().completed().empty());
     fakeDb.callLog.clear();
 
     // Spy on the stopped() signal.
@@ -683,19 +738,26 @@ void IntegrationTest::test_Z_engine_watchdog_emits_MidnightWatchdog()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
+
+    // Simulate sleep through midnight: start yesterday (via the clock seam),
+    // then advance the clock into today before ticking.
+    const QDateTime yesterdayStart(QDate::currentDate().addDays(-1), QTime(20, 0, 0), Qt::LocalTime);
+    // FakeClock declared before TimeTracker: see outlives-tracker note above
+    // (test_5_0a_watchdog_helper_returns_false_when_not_crossed, ~line 588).
+    FakeClock clock(yesterdayStart);
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
 
-    // Simulate sleep through midnight: backdate segment_start_time to yesterday.
-    tracker.sessionState_dbg().segment_start_time = QDateTime::currentDateTime().addDays(-1);
+    clock.setNow(QDateTime(QDate::currentDate(), QTime(9, 0, 0), Qt::LocalTime));
 
     QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
     QVERIFY(stoppedSpy.isValid());
 
     // Simulate the 100 ms heartbeat with today's "now".
-    tracker.onTick(QDateTime::currentDateTime());
+    tracker.onTick(clock.now());
 
     // Engine must have stopped and emitted MidnightWatchdog.
     QCOMPARE(stoppedSpy.count(), 1);
@@ -732,7 +794,15 @@ void IntegrationTest::test_AA_no_duplicate_stop_signal()
     const QDateTime pastStop(QDate::currentDate(), QTime(23, 59, 59, 600));
     tracker.dayBoundaryWatcher_dbg().armScheduledStop(pastStop);
 
-    // Backdate segment so the watchdog also wants to fire.
+    // Backdate segment so the watchdog also wants to fire. D11: kept
+    // deliberately -- this race test depends on two independently-clocked
+    // timers (the real-wall-clock armScheduledStop()/QTest::qWait() pair
+    // above, and the watchdog check below) landing in a specific order.
+    // Re-deriving "segment started exactly one real day before now" through
+    // a second FakeClock phase risks perturbing the real-timer arm/qWait
+    // timing this test exists to race against; the direct write is the
+    // narrowest way to hold that variable fixed while leaving the real-timer
+    // race intact.
     tracker.sessionState_dbg().segment_start_time = QDateTime::currentDateTime().addDays(-1);
 
     QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
@@ -1076,7 +1146,8 @@ void IntegrationTest::test_bootCredit_suppressed_by_legacy_cross_midnight_row_on
     QTest::qWait(10);
 
     qint64 totalActivity = 0;
-    for (const auto& d : tracker.sessionState_dbg().durations)
+    const Timeline completed = tracker.completedTimeline();
+    for (const auto& d : completed.completed())
         if (d.type == DurationType::Activity && d.duration() >= 25000)
             totalActivity += d.duration();
     QVERIFY2(totalActivity < 29000,
@@ -1211,6 +1282,8 @@ void IntegrationTest::test_A_toggle_ongoing_to_pause_crash_recovery_uses_refresh
 
         // Simulate crash: destroy tracker without calling Stop.
         // The unfinalized DB row retains the end_utc set by replaceAll.
+        // D11: kept deliberately -- see the crash-simulation note in
+        // test_integration_checkpoint_recovery_on_restart() above.
         tracker.forceMode_dbg(TimeTracker::Mode::None);
         tracker.sessionState_dbg().segment_id = SegmentId{};
     }
@@ -1289,6 +1362,7 @@ void IntegrationTest::test_A3_exit_anyway_leaves_checkpoint_untouched_for_recove
         tracker.useTimerViaButton(Button::Start);
         clock.advance(20000);
         tracker.saveCheckpoint_locked_dbg(clock.now());
+        QVERIFY(tracker.getOngoingDuration().has_value());
         checkpointSegmentId = tracker.sessionState_dbg().segment_id;
         QVERIFY(!checkpointSegmentId.isEmpty());
         clock.advance(5000);
@@ -1362,6 +1436,7 @@ void IntegrationTest::test_A4_watchdog_discard_failure_survives_reopen_never_cre
         tracker.useTimerViaButton(Button::Start);
         clock.advance(60000);
         tracker.saveCheckpoint_locked_dbg(clock.now());
+        QVERIFY(tracker.getOngoingDuration().has_value());
         rejectedSegmentId = tracker.sessionState_dbg().segment_id;
         QVERIFY(!rejectedSegmentId.isEmpty());
 
@@ -1422,6 +1497,7 @@ void IntegrationTest::test_D2_real_sqlite_backward_clock_stop_preserves_checkpoi
         tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.useTimerViaButton(Button::Start);
         QVERIFY(tracker.isActive());
+        QVERIFY(tracker.getOngoingDuration().has_value());
         segId = tracker.sessionState_dbg().segment_id;
 
         // A real checkpoint row is written for the recorded prefix.
