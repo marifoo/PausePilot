@@ -82,12 +82,19 @@ void TimerTest::test_timer_backpause_resets_checkpoint_and_splits()
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
+    // FakeClock declared before TimeTracker so it outlives it (see the
+    // ~TimeTracker() drain note elsewhere in this file).
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
     TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
 
-    tracker.sessionState_dbg().segment_start_time = QDateTime::currentDateTime().addSecs(-120);
+    // Move now 120s past the Start anchor, reaching the same 120s elapsed
+    // segment the removed sessionState_dbg() write forced directly.
+    clock.advance(120ll * 1000ll);
 
-    tracker.backpauseTimer_dbg(QDateTime::currentDateTime());
+    tracker.backpauseTimer_dbg(clock.now());
     QVERIFY(tracker.isPaused());
     QVERIFY(tracker.getOngoingDuration().has_value());
     QVERIFY(tracker.completedTimeline().completed().size() >= 2);
@@ -150,13 +157,22 @@ void TimerTest::test_timer_set_duration_type()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    TimeTracker tracker(settings, db);
 
-    // Add a duration manually. Anchored to a fixed same-day time (not
+    // Seed one completed Activity row through a real Start -> Pause
+    // transition (pauseTimer's addDuration(), timetracker.cpp:673) rather
+    // than sessionState_dbg(). Anchored to a fixed same-day time (not
     // QDateTime::currentDateTime()) so the seeded row can never straddle
     // midnight and trip the Timeline same-day assertion in completedTimeline().
     QDateTime now = QDateTime(QDate::currentDate(), QTime(12, 0, 0));
-    tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-10), now));
+    // FakeClock declared before TimeTracker so it outlives it (see the
+    // ~TimeTracker() drain note elsewhere in this file).
+    FakeClock clock(now);
+    TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(10ll * 1000ll);
+    tracker.useTimerViaButton(Button::Pause);
+
     QCOMPARE(tracker.completedTimeline().completed().size(), (size_t)1);
     QCOMPARE(tracker.completedTimeline().completed()[0].type, DurationType::Activity);
 
