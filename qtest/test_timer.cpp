@@ -566,7 +566,7 @@ void TimerTest::test_boot_time_not_added_when_history_disabled()
     // Assert: no boot time was added on either start, because history is
     // disabled and hasEntriesForDate returns Unknown.
     // The only durations should be from actual timer running, not boot time.
-    qint64 totalActivity = sumDurations(tracker.sessionState_dbg().durations, DurationType::Activity);
+    qint64 totalActivity = sumDurations(tracker.completedTimeline().completed(), DurationType::Activity);
     // Boot time would be 30000ms. If it were added, total would be >= 30000.
     // Since we only ran for ~10ms, it should be much less.
     QVERIFY2(totalActivity < 5000,
@@ -598,7 +598,7 @@ void TimerTest::test_boot_time_added_once_on_empty_db()
     QTest::qWait(10);
 
     // Assert: boot time (30s = 30000ms) was added as an Activity segment
-    qint64 totalActivity = sumDurations(tracker.sessionState_dbg().durations, DurationType::Activity);
+    qint64 totalActivity = sumDurations(tracker.completedTimeline().completed(), DurationType::Activity);
     QVERIFY2(totalActivity >= 29000,
              "Boot time should be added when DB is empty for today");
 
@@ -638,7 +638,7 @@ void TimerTest::test_boot_time_not_added_when_db_has_entries_for_today()
     QTest::qWait(10);
 
     // Assert: no boot time added. Only the in-progress segment should exist.
-    qint64 totalActivity = sumDurations(tracker.sessionState_dbg().durations, DurationType::Activity);
+    qint64 totalActivity = sumDurations(tracker.completedTimeline().completed(), DurationType::Activity);
     QVERIFY2(totalActivity < 5000,
              "Boot time should not be added when DB already has entries for today");
 
@@ -727,10 +727,11 @@ void TimerTest::test_addduration_appends_single_same_day_segment()
     tracker.addDuration_dbg(DurationType::Activity, start, end);
 
     // Assert
-    QCOMPARE(tracker.sessionState_dbg().durations.size(), static_cast<size_t>(1));
-    QCOMPARE(tracker.sessionState_dbg().durations[0].type, DurationType::Activity);
-    QCOMPARE(tracker.sessionState_dbg().durations[0].startTime, start);
-    QCOMPARE(tracker.sessionState_dbg().durations[0].endTime, end);
+    const auto completed = tracker.completedTimeline().completed();
+    QCOMPARE(completed.size(), static_cast<size_t>(1));
+    QCOMPARE(completed[0].type, DurationType::Activity);
+    QCOMPARE(completed[0].startTime, start);
+    QCOMPARE(completed[0].endTime, end);
 }
 
 void TimerTest::test_addduration_discards_cross_midnight_segment()
@@ -750,7 +751,7 @@ void TimerTest::test_addduration_discards_cross_midnight_segment()
     tracker.addDuration_dbg(DurationType::Activity, start, end);
 
     // Assert: cross-midnight segment was silently discarded
-    QVERIFY(tracker.sessionState_dbg().durations.empty());
+    QVERIFY(tracker.completedTimeline().completed().empty());
 }
 
 void TimerTest::test_addduration_discards_zero_and_negative_duration()
@@ -769,7 +770,7 @@ void TimerTest::test_addduration_discards_zero_and_negative_duration()
     tracker.addDuration_dbg(DurationType::Activity, now, now.addSecs(-10));
 
     // Assert
-    QVERIFY(tracker.sessionState_dbg().durations.empty());
+    QVERIFY(tracker.completedTimeline().completed().empty());
 }
 
 // 9.1: all three DurationCreateError causes (InvalidTimestamp, NonPositive, CrossMidnight)
@@ -788,11 +789,11 @@ void TimerTest::test_addduration_discards_invalid_timestamp()
 
     // Invalid start
     tracker.addDuration_dbg(DurationType::Activity, invalid, valid);
-    QVERIFY(tracker.sessionState_dbg().durations.empty());
+    QVERIFY(tracker.completedTimeline().completed().empty());
 
     // Invalid end
     tracker.addDuration_dbg(DurationType::Activity, valid, invalid);
-    QVERIFY(tracker.sessionState_dbg().durations.empty());
+    QVERIFY(tracker.completedTimeline().completed().empty());
 }
 
 void TimerTest::test_isOngoingSegmentCrossMidnight_returns_false_when_stopped()
@@ -810,15 +811,22 @@ void TimerTest::test_isOngoingSegmentCrossMidnight_returns_false_when_stopped()
 
 void TimerTest::test_isOngoingSegmentCrossMidnight_returns_false_for_same_day()
 {
-    // Arrange
+    // Arrange: start the segment 60s ago via the clock seam, then observe
+    // at "now" -- a real Start rather than writing segment_start_time
+    // directly.
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
+    // FakeClock declared before TimeTracker so it outlives it (see the
+    // outlives-tracker note at test_integration.cpp:614).
+    const QDateTime now = QDateTime::currentDateTime();
+    FakeClock clock(now.addSecs(-60));
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
-    tracker.forceMode_dbg(TimeTracker::Mode::Activity);
-    tracker.sessionState_dbg().segment_start_time = QDateTime::currentDateTime().addSecs(-60);
+    tracker.useTimerViaButton(Button::Start);
+    clock.setNow(now);
 
     // Assert
     QVERIFY(!tracker.isOngoingSegmentCrossMidnight());
@@ -826,16 +834,21 @@ void TimerTest::test_isOngoingSegmentCrossMidnight_returns_false_for_same_day()
 
 void TimerTest::test_isOngoingSegmentCrossMidnight_returns_true_when_segment_started_yesterday()
 {
-    // Arrange
+    // Arrange: start yesterday just before midnight via the clock seam,
+    // then advance the clock into today -- the real sleep-through-midnight
+    // transition, instead of writing segment_start_time directly.
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
+    // FakeClock declared before TimeTracker so it outlives it (see the
+    // outlives-tracker note at test_integration.cpp:614).
+    FakeClock clock(QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0), Qt::LocalTime));
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
-    tracker.forceMode_dbg(TimeTracker::Mode::Activity);
-    tracker.sessionState_dbg().segment_start_time =
-        QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0));
+    tracker.useTimerViaButton(Button::Start);
+    clock.setNow(QDateTime::currentDateTime());
 
     // Assert
     QVERIFY(tracker.isOngoingSegmentCrossMidnight());
@@ -843,23 +856,42 @@ void TimerTest::test_isOngoingSegmentCrossMidnight_returns_true_when_segment_sta
 
 void TimerTest::test_useTimerViaButton_force_stops_on_cross_midnight_ongoing()
 {
-    // Arrange
+    // Arrange: start yesterday just before midnight via the clock seam,
+    // then advance the clock into today -- the real sleep-through-midnight
+    // transition, instead of writing segment_start_time directly.
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
+    // FakeClock declared before TimeTracker so it outlives it (see the
+    // outlives-tracker note at test_integration.cpp:614).
+    FakeClock clock(QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0), Qt::LocalTime));
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
-    tracker.forceMode_dbg(TimeTracker::Mode::Activity);
-    tracker.sessionState_dbg().segment_start_time =
-        QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0));
+    tracker.useTimerViaButton(Button::Start);
+    clock.setNow(QDateTime::currentDateTime());
 
     // Act: try to stop — discardCrossMidnightOngoingAndStop should fire first
     tracker.useTimerViaButton(Button::Stop);
 
-    // Assert: engine is in None, no cross-midnight row in DB
+    // Assert: engine is in None, no cross-midnight row in DB.
+    // (!tracker.sessionState_dbg().segment_start_time.isValid() is not
+    // asserted here: mode_ is assigned Mode::None at exactly two sites in
+    // the codebase -- stopTimer() (timetracker.cpp:853), immediately
+    // followed by session_.clearSegment() at :854, and
+    // commitEditedTimeline()'s no-ongoing branch (timetracker.cpp:1206),
+    // preceded by clearSegment() at :1204 -- and clearSegment()
+    // (timetracker.cpp:240-248) clears segment_start_time in the same
+    // straight-line body. The midnight watchdog delegates teardown to
+    // stopTimer() (discardCrossMidnightOngoingAndStop(), timetracker.cpp:1601)
+    // so it is covered by the :853/:854 pair; initializeFromStore()
+    // (timetracker.cpp:445-453) never touches mode_ or session_; and
+    // commitEditedTimeline()'s stopped branch (timetracker.cpp:1193-1199)
+    // refuses to adopt a segment while mode_ == None. So isStopped()
+    // implies !segment_start_time.isValid() on every path -- enforcing
+    // this centrally is P5e's job (checkDurationInvariants()).)
     QVERIFY(tracker.isStopped());
-    QVERIFY(!tracker.sessionState_dbg().segment_start_time.isValid());
     QVERIFY(!tracker.isAutopausePendingResume_dbg());
     // FakeSessionStore captures writes; no duration should have been written
     // with a cross-midnight segment (the in-flight segment is discarded)
@@ -870,28 +902,43 @@ void TimerTest::test_useTimerViaButton_force_stops_on_cross_midnight_ongoing()
 
 void TimerTest::test_useTimerViaButton_pause_event_is_dropped_when_cross_midnight()
 {
-    // Arrange: simulate cross-midnight state, user tries to pause
+    // Arrange: simulate cross-midnight state via the clock seam -- start
+    // yesterday just before midnight, then advance the clock into today --
+    // instead of writing segment_start_time directly.
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
+    // FakeClock declared before TimeTracker so it outlives it (see the
+    // outlives-tracker note at test_integration.cpp:614).
+    FakeClock clock(QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0), Qt::LocalTime));
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
-    tracker.forceMode_dbg(TimeTracker::Mode::Activity);
-    tracker.sessionState_dbg().segment_start_time =
-        QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0));
+    tracker.useTimerViaButton(Button::Start);
+    clock.setNow(QDateTime::currentDateTime());
 
     // Act: user presses Pause — but the guard should intercept and force-stop
     tracker.useTimerViaButton(Button::Pause);
 
-    // Assert: engine is in None (not Pause)
+    // Assert: engine is in None (not Pause).
+    // (!tracker.sessionState_dbg().segment_start_time.isValid() is not
+    // asserted here for the same reason as in
+    // test_useTimerViaButton_force_stops_on_cross_midnight_ongoing above --
+    // mode_ is assigned Mode::None only alongside clearSegment() (see that
+    // test's comment for the full chain of sites), so isStopped() implies
+    // !segment_start_time.isValid() on every path. Enforcing this centrally
+    // is P5e's job (checkDurationInvariants()).)
     QVERIFY(tracker.isStopped());
-    QVERIFY(!tracker.sessionState_dbg().segment_start_time.isValid());
 }
 
 void TimerTest::test_useTimerViaLockEvent_unlock_does_not_restart_after_cross_midnight_discard()
 {
-    // Arrange: simulate cross-midnight with autopause_pending_resume_ set
+    // Arrange: simulate cross-midnight with autopause_pending_resume_ set.
+    // Drive Pause mode with a segment anchored just before midnight through
+    // real transitions -- Start yesterday evening, Pause at 23:59:58 (still
+    // same-day), then advance the clock into today -- instead of writing
+    // mode_/segment_start_time directly.
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
@@ -901,12 +948,19 @@ void TimerTest::test_useTimerViaLockEvent_unlock_does_not_restart_after_cross_mi
 
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
+    // FakeClock declared before TimeTracker so it outlives it (see the
+    // outlives-tracker note at test_integration.cpp:614).
+    const QDate yesterday = QDate::currentDate().addDays(-1);
+    FakeClock clock(QDateTime(yesterday, QTime(23, 0, 0), Qt::LocalTime));
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
-    tracker.forceMode_dbg(TimeTracker::Mode::Pause);
-    tracker.sessionState_dbg().segment_start_time =
-        QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0));
+    tracker.useTimerViaButton(Button::Start);
+    clock.setNow(QDateTime(yesterday, QTime(23, 59, 58, 0), Qt::LocalTime));
+    tracker.useTimerViaButton(Button::Pause);
+    QVERIFY(tracker.isPaused());
     tracker.setAutopausePendingResume_dbg(true);
+    clock.setNow(QDateTime::currentDateTime());
 
     // Act: Unlock event arrives — guard should discard and not restart
     tracker.useTimerViaLockEvent(LockEvent::Unlock);
@@ -918,7 +972,11 @@ void TimerTest::test_useTimerViaLockEvent_unlock_does_not_restart_after_cross_mi
 
 void TimerTest::test_saveCheckpoint_locked_does_not_write_cross_midnight_row()
 {
-    // Arrange
+    // Arrange: start yesterday just before midnight via the clock seam,
+    // instead of writing segment_start_time directly. No event loop is
+    // spun before the checkpoint call below, so the real checkpoint QTimer
+    // (armed by Start) cannot fire first (trap: it would force-stop the
+    // segment before the Act below gets to).
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
@@ -928,14 +986,19 @@ void TimerTest::test_saveCheckpoint_locked_does_not_write_cross_midnight_row()
 
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
+    // FakeClock declared before TimeTracker so it outlives it (see the
+    // outlives-tracker note at test_integration.cpp:614).
+    FakeClock clock(QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0), Qt::LocalTime));
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
-    tracker.forceMode_dbg(TimeTracker::Mode::Activity);
-    tracker.sessionState_dbg().segment_start_time =
-        QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0));
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
 
-    // Act: checkpoint fires (simulating late checkpoint after sleep)
-    QDateTime now = QDateTime::currentDateTime();
+    // Act: checkpoint fires with "now" on the far side of midnight
+    // (simulating late checkpoint after sleep)
+    clock.setNow(QDateTime::currentDateTime());
+    const QDateTime now = clock.now();
     tracker.saveCheckpoint_locked_dbg(now);
 
     // Assert: engine stopped, no checkpoint written to DB
@@ -995,7 +1058,7 @@ void TimerTest::test_startTimer_drops_cross_midnight_boot_time_entry()
 
     // Assert: cross-midnight boot entry was dropped; no completed durations
     // (the ongoing segment is fresh from startTimer)
-    QCOMPARE(tracker.sessionState_dbg().durations.size(), static_cast<size_t>(0));
+    QCOMPARE(tracker.completedTimeline().completed().size(), static_cast<size_t>(0));
     QVERIFY(tracker.isActive());
 
     tracker.useTimerViaButton(Button::Stop);
@@ -1003,16 +1066,21 @@ void TimerTest::test_startTimer_drops_cross_midnight_boot_time_entry()
 
 void TimerTest::test_getOngoingDuration_returns_nullopt_when_cross_midnight()
 {
-    // Arrange
+    // Arrange: start yesterday just before midnight via the clock seam,
+    // then advance the clock into today -- the real sleep-through-midnight
+    // transition, instead of writing segment_start_time directly.
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
+    // FakeClock declared before TimeTracker so it outlives it (see the
+    // outlives-tracker note at test_integration.cpp:614).
+    FakeClock clock(QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0), Qt::LocalTime));
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
-    tracker.forceMode_dbg(TimeTracker::Mode::Activity);
-    tracker.sessionState_dbg().segment_start_time =
-        QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0));
+    tracker.useTimerViaButton(Button::Start);
+    clock.setNow(QDateTime::currentDateTime());
 
     // Act
     auto result = tracker.getOngoingDuration();
@@ -1125,7 +1193,8 @@ void TimerTest::test_E_boot_time_gate_entries_yes_skips_boot_time()
     // Assert: no boot-time segment was added (session_.durations is empty
     // at start because there are no completed segments yet)
     qint64 totalActivity = 0;
-    for (const auto& d : tracker.sessionState_dbg().durations)
+    const auto completedNow = tracker.completedTimeline();
+    for (const auto& d : completedNow.completed())
         if (d.type == DurationType::Activity)
             totalActivity += d.duration();
     QVERIFY2(totalActivity < 5000,
@@ -1157,7 +1226,8 @@ void TimerTest::test_E_boot_time_gate_entries_no_adds_boot_time()
 
     // Assert: a 30-second boot-time Activity segment was prepended
     qint64 totalActivity = 0;
-    for (const auto& d : tracker.sessionState_dbg().durations)
+    const auto completedNow = tracker.completedTimeline();
+    for (const auto& d : completedNow.completed())
         if (d.type == DurationType::Activity)
             totalActivity += d.duration();
     QVERIFY2(totalActivity >= 29000,
@@ -1190,7 +1260,8 @@ void TimerTest::test_E_boot_time_gate_entries_unknown_skips_boot_time()
 
     // Assert: no boot-time segment added
     qint64 totalActivity = 0;
-    for (const auto& d : tracker.sessionState_dbg().durations)
+    const auto completedNow = tracker.completedTimeline();
+    for (const auto& d : completedNow.completed())
         if (d.type == DurationType::Activity)
             totalActivity += d.duration();
     QVERIFY2(totalActivity < 5000,
@@ -1225,6 +1296,23 @@ void TimerTest::test_E_boot_time_inmemory_start_date_skips_boot_time()
     QDateTime now = QDateTime::currentDateTime();
     QDateTime startToday = QDateTime(now.date(), QTime(23, 0, 0));
     QDateTime endTomorrow = startToday.addSecs(3600); // crosses midnight
+    // Seam kept deliberately: no public API can inject a cross-midnight
+    // *completed* segment directly into session_.durations -- addDuration()
+    // discards it by design (TimeDuration::create returns CrossMidnight,
+    // covered separately by test_addduration_discards_cross_midnight_segment),
+    // so this in-memory precondition is unreachable through any real
+    // transition. Narrow replacement seams for this arrangement are P5e's job.
+    // Hazard: this pre-seeds a cross-midnight completed row directly, and
+    // Timeline's constructor runs assertSameDayInvariant() under
+    // #ifndef QT_NO_DEBUG (timeline.cpp:10-17), which Q_ASSERTs
+    // !isCrossMidnight(...) per completed row (timeline.cpp:108-113). It is
+    // safe only because Start's None branch reaches
+    // session_.resetForNewSession() (timetracker.cpp:631) below and wipes
+    // the pre-seed before completedTimeline() reads it; if Start ever
+    // returns earlier -- fatal_state_latched_ (:591), !retryUnsavedDurations()
+    // (:599), or the second latch check (:608) -- the pre-seed survives and
+    // the read below aborts the whole qtest binary instead of failing one
+    // test.
     tracker.sessionState_dbg().durations.push_back(
         TimeDuration::fromPersistedRow(DurationType::Activity, startToday, endTomorrow));
 
@@ -1233,8 +1321,12 @@ void TimerTest::test_E_boot_time_inmemory_start_date_skips_boot_time()
     QTest::qWait(10);
 
     // Assert: boot time was NOT added (in-memory start-date check fired).
+    // (See the pre-seed comment above: this completedTimeline() read is the
+    // Q_ASSERT hazard site -- it is only safe because resetForNewSession()
+    // already wiped the pre-seeded cross-midnight row.)
     qint64 totalActivity = 0;
-    for (const auto& d : tracker.sessionState_dbg().durations)
+    const auto completedNow = tracker.completedTimeline();
+    for (const auto& d : completedNow.completed())
         if (d.type == DurationType::Activity && d.duration() >= 25000)
             totalActivity += d.duration();
     QVERIFY2(totalActivity < 29000,
