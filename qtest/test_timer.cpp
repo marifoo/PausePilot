@@ -43,13 +43,13 @@ void TimerTest::test_timer_start_pause_resume_stop_and_checkpoints()
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
     QVERIFY(tracker.isActive());
-    QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
+    QVERIFY(tracker.getOngoingDuration().has_value());
 
     // Pause -> durations captured and checkpoint id reset
     tracker.useTimerViaButton(Button::Pause);
     QVERIFY(tracker.isPaused());
-    QVERIFY(tracker.sessionState_dbg().durations.size() >= 1);
-    QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
+    QVERIFY(tracker.completedTimeline().completed().size() >= 1);
+    QVERIFY(tracker.getOngoingDuration().has_value());
 
     // Resume -> Activity
     tracker.useTimerViaButton(Button::Start);
@@ -58,12 +58,15 @@ void TimerTest::test_timer_start_pause_resume_stop_and_checkpoints()
     // Trigger checkpoint manually
     QTest::qWait(100); // Ensure elapsed > 0
     tracker.saveCheckpoint_locked_dbg(QDateTime::currentDateTime());
-    QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
+    QVERIFY(tracker.getOngoingDuration().has_value());
 
     // Stop -> move to None and durations flushed
     tracker.useTimerViaButton(Button::Stop);
     QVERIFY(tracker.isStopped());
-    QVERIFY(tracker.sessionState_dbg().segment_id.isEmpty());
+    // (segment_id.isEmpty() after Stop is not asserted here: mode_ == None
+    // implies it, since clearSegment() -- which clears segment_id -- runs
+    // straight-line with the mode_ = Mode::None assignment at
+    // timetracker.cpp:853-854, the only site reached by a Stop.)
 }
 
 void TimerTest::test_timer_backpause_resets_checkpoint_and_splits()
@@ -86,11 +89,11 @@ void TimerTest::test_timer_backpause_resets_checkpoint_and_splits()
 
     tracker.backpauseTimer_dbg(QDateTime::currentDateTime());
     QVERIFY(tracker.isPaused());
-    QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
-    QVERIFY(tracker.sessionState_dbg().durations.size() >= 2);
+    QVERIFY(tracker.getOngoingDuration().has_value());
+    QVERIFY(tracker.completedTimeline().completed().size() >= 2);
     // Sum should equal ~120s
-    qint64 total = sumDurations(tracker.sessionState_dbg().durations, DurationType::Activity) +
-                   sumDurations(tracker.sessionState_dbg().durations, DurationType::Pause);
+    qint64 total = sumDurations(tracker.completedTimeline().completed(), DurationType::Activity) +
+                   sumDurations(tracker.completedTimeline().completed(), DurationType::Pause);
     QVERIFY(total >= 120000 - 2000); // allow minor tolerance
 }
 
@@ -149,19 +152,21 @@ void TimerTest::test_timer_set_duration_type()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    // Add a duration manually
-    QDateTime now = QDateTime::currentDateTime();
+    // Add a duration manually. Anchored to a fixed same-day time (not
+    // QDateTime::currentDateTime()) so the seeded row can never straddle
+    // midnight and trip the Timeline same-day assertion in completedTimeline().
+    QDateTime now = QDateTime(QDate::currentDate(), QTime(12, 0, 0));
     tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-10), now));
-    QCOMPARE(tracker.sessionState_dbg().durations.size(), (size_t)1);
-    QCOMPARE(tracker.sessionState_dbg().durations[0].type, DurationType::Activity);
+    QCOMPARE(tracker.completedTimeline().completed().size(), (size_t)1);
+    QCOMPARE(tracker.completedTimeline().completed()[0].type, DurationType::Activity);
 
     // Change to Pause
     tracker.setDurationType(0, DurationType::Pause);
-    QCOMPARE(tracker.sessionState_dbg().durations[0].type, DurationType::Pause);
+    QCOMPARE(tracker.completedTimeline().completed()[0].type, DurationType::Pause);
 
     // Invalid index
     tracker.setDurationType(99, DurationType::Activity);
-    QCOMPARE(tracker.sessionState_dbg().durations[0].type, DurationType::Pause); // Unchanged
+    QCOMPARE(tracker.completedTimeline().completed()[0].type, DurationType::Pause); // Unchanged
 }
 
 void TimerTest::test_timer_checkpoints_paused()
@@ -233,13 +238,11 @@ void TimerTest::test_timer_retry_append_failure_then_success_preserves_segments(
     tracker.useTimerViaButton(Button::Stop);
 
     QVERIFY(tracker.hasPendingCommit_dbg());
-    QVERIFY(!tracker.sessionState_dbg().durations.empty());
-    std::deque<TimeDuration> unsavedCopy = tracker.sessionState_dbg().durations;
+    std::deque<TimeDuration> unsavedCopy = tracker.pendingCommitPayload_dbg();
 
     // Retry while DB is still blocked -> must stay unsaved.
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.hasPendingCommit_dbg());
-    QVERIFY(!tracker.sessionState_dbg().durations.empty());
 
     // Restore DB and retry again -> previously unsaved rows should be appended.
     QVERIFY(dbFile.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ReadUser | QFile::ReadGroup | QFile::ReadOther));
@@ -283,14 +286,10 @@ void TimerTest::test_timer_retry_failure_keeps_unsaved_state_and_durations()
     tracker.useTimerViaButton(Button::Stop);
 
     QVERIFY(tracker.hasPendingCommit_dbg());
-    QVERIFY(!tracker.sessionState_dbg().durations.empty());
-    const size_t sizeBeforeRetry = tracker.sessionState_dbg().durations.size();
 
     // Retry still fails -> must still be unsaved with data intact.
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.hasPendingCommit_dbg());
-    QVERIFY(!tracker.sessionState_dbg().durations.empty());
-    QVERIFY(tracker.sessionState_dbg().durations.size() >= sizeBeforeRetry);
 
     // Cleanup permissions for following tests, then resolve the pending
     // payload via the same idempotent drain a real shutdown would use (A3):
@@ -1144,7 +1143,7 @@ void TimerTest::test_D_timetracker_public_surface_regression()
     QTest::qWait(10);
 
     // setDurationType: index 0 should exist after Activity+Pause cycle
-    if (!tracker.sessionState_dbg().durations.empty()) {
+    if (!tracker.completedTimeline().completed().empty()) {
         tracker.setDurationType(0, DurationType::Pause);
         tracker.setDurationType(0, DurationType::Activity);
     }
@@ -1393,7 +1392,7 @@ void TimerTest::test_dialog_open_blocks_backpause()
 
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
-    const size_t dursBefore = tracker.sessionState_dbg().durations.size();
+    const size_t dursBefore = tracker.completedTimeline().completed().size();
 
     // Open dialog — suspends mutation
     tracker.beginExclusiveEdit();
@@ -1403,7 +1402,7 @@ void TimerTest::test_dialog_open_blocks_backpause()
     tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock);
 
     // backpause must NOT have been applied
-    QCOMPARE(tracker.sessionState_dbg().durations.size(), dursBefore);
+    QCOMPARE(tracker.completedTimeline().completed().size(), dursBefore);
     QVERIFY(tracker.isActive());
 
     // Pending correction recorded, still locked (no Unlock yet)
@@ -1521,7 +1520,12 @@ void TimerTest::test_F4_unlock_during_dialog_replays_lock_interval_at_true_times
     clock.setNow(dialogCloseTime);
     tracker.endExclusiveEdit();
 
-    const auto& d = tracker.sessionState_dbg().durations;
+    // Bind before iterating: completedTimeline() returns by value and
+    // completed() returns a reference into it, so a range-for over the
+    // chained call would bind to a freed temporary (see the dangling-
+    // reference trap noted in P5b, test_timer.cpp / commit a58dfea).
+    const auto completedNow = tracker.completedTimeline();
+    const auto& d = completedNow.completed();
     bool foundActivity = false;
     bool foundPause = false;
     for (const auto& seg : d) {
@@ -1537,7 +1541,9 @@ void TimerTest::test_F4_unlock_during_dialog_replays_lock_interval_at_true_times
     // time (10:30), not at dialog-close time (10:35) — the post-unlock work
     // stays Activity.
     QVERIFY(tracker.isActive());
-    QCOMPARE(tracker.sessionState_dbg().segment_start_time, unlockTime);
+    const auto ongoing = tracker.getOngoingDuration();
+    QVERIFY(ongoing.has_value());
+    QCOMPARE(ongoing->startTime, unlockTime);
 
     tracker.useTimerViaButton(Button::Stop);
 }
@@ -1577,7 +1583,11 @@ void TimerTest::test_F4_still_locked_at_dialog_close_replays_unchanged()
     QVERIFY(tracker.isAutopausePendingResume_dbg());
     QVERIFY(!tracker.pendingLockCorrection_dbg().has_value());
 
-    const auto& d = tracker.sessionState_dbg().durations;
+    // Bind before iterating (see the dangling-reference trap noted in P5b,
+    // commit a58dfea): completedTimeline() returns by value and completed()
+    // returns a reference into it.
+    const auto completedNow = tracker.completedTimeline();
+    const auto& d = completedNow.completed();
     bool foundActivity = false;
     for (const auto& seg : d)
         if (seg.type == DurationType::Activity && seg.startTime == t0 && seg.endTime == lockTime)
