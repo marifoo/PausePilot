@@ -33,12 +33,6 @@ private slots:
     void test_timer_retry_append_failure_then_success_preserves_segments();
     void test_timer_retry_failure_keeps_unsaved_state_and_durations();
 
-    // SessionState transition tests
-    void test_session_state_begin_new_segment();
-    void test_session_state_clear_segment();
-    void test_session_state_reset_for_new_session();
-    void test_session_state_adopt_ongoing_segment();
-
     // Issue 9: retry cache cleared after successful replaceAll
     void test_replaceAll_success_clears_unsaved_cache();
     void test_replaceAll_failure_keeps_unsaved_cache();
@@ -74,6 +68,7 @@ private slots:
     void test_session_state_start_to_pause_transition();
     void test_session_state_pause_to_activity_transition();
     void test_session_state_stop_clears_segment();
+    void test_session_state_adopted_segment_start_time_anchors_committed_row();
 
     // Boot time + hasEntriesForDate tri-state tests (T18)
     void test_boot_time_not_added_when_history_disabled();

@@ -304,64 +304,6 @@ void TimerTest::test_timer_retry_failure_keeps_unsaved_state_and_durations()
 // SessionState transition tests
 // ============================================================================
 
-void TimerTest::test_session_state_begin_new_segment()
-{
-    // Arrange
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-
-    QDateTime startTime = QDateTime::currentDateTime();
-    QVERIFY(tracker.sessionState_dbg().segment_id.isEmpty());
-    QVERIFY(!tracker.sessionState_dbg().segment_start_time.isValid());
-
-    // Act
-    tracker.sessionState_dbg().beginNewSegment(startTime);
-
-    // Assert
-    QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
-    QCOMPARE(tracker.sessionState_dbg().segment_start_time, startTime);
-}
-
-void TimerTest::test_session_state_clear_segment()
-{
-    // Arrange
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-    tracker.sessionState_dbg().beginNewSegment(QDateTime::currentDateTime());
-    QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
-
-    // Act
-    tracker.sessionState_dbg().clearSegment();
-
-    // Assert
-    QVERIFY(tracker.sessionState_dbg().segment_id.isEmpty());
-    QVERIFY(!tracker.sessionState_dbg().segment_start_time.isValid());
-}
-
-void TimerTest::test_session_state_reset_for_new_session()
-{
-    // Arrange
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-    QDateTime now = QDateTime::currentDateTime();
-    tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-10), now));
-
-    // Act
-    tracker.sessionState_dbg().resetForNewSession();
-
-    // Assert
-    QVERIFY(tracker.sessionState_dbg().durations.empty());
-}
-
 void TimerTest::test_replaceAll_success_clears_unsaved_cache()
 {
     QTemporaryDir tempDir;
@@ -423,55 +365,58 @@ void TimerTest::test_replaceAll_failure_keeps_unsaved_cache()
     QVERIFY(tracker.drainForShutdown().clean());
 }
 
-void TimerTest::test_session_state_adopt_ongoing_segment()
-{
-    // Arrange
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-    QDateTime start = QDateTime::currentDateTime().addSecs(-30);
-    QDateTime end = QDateTime::currentDateTime();
-    TimeDuration ongoing = TimeDuration::fromLiveSession(DurationType::Activity, start, end);
-
-    // Act
-    tracker.sessionState_dbg().adoptOngoingSegment(ongoing);
-
-    // Assert
-    QCOMPARE(tracker.sessionState_dbg().segment_id.toString(), ongoing.segment_id.toString());
-    QCOMPARE(tracker.sessionState_dbg().segment_start_time, start);
-}
-
 void TimerTest::test_session_state_start_to_pause_transition()
 {
-    // Arrange: Start -> Activity, then pause
+    // Arrange: Start -> Activity, then pause, then stop -- FakeClock drives
+    // time instead of real waits.
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     // Act: start
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
+    clock.advance(60ll * 1000ll);
 
     // Assert: Activity mode, valid segment
     QVERIFY(tracker.isActive());
-    QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
-    QVERIFY(tracker.sessionState_dbg().segment_start_time.isValid());
-    SegmentId activitySegId = tracker.sessionState_dbg().segment_id;
+    QVERIFY(tracker.getOngoingDuration().has_value());
+    const SegmentId activitySegId = tracker.getOngoingDuration()->segment_id;
 
     // Act: pause
     tracker.useTimerViaButton(Button::Pause);
 
     // Assert: Pause mode, new segment id (different from Activity)
     QVERIFY(tracker.isPaused());
-    QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
-    QVERIFY(tracker.sessionState_dbg().segment_id != activitySegId);
-    QVERIFY(tracker.sessionState_dbg().segment_start_time.isValid());
-    QVERIFY(tracker.sessionState_dbg().durations.size() >= 1);
-    QCOMPARE(tracker.sessionState_dbg().durations.back().type, DurationType::Activity);
+    QVERIFY(tracker.getOngoingDuration().has_value());
+    QVERIFY(tracker.getOngoingDuration()->segment_id != activitySegId);
+
+    const SegmentId pauseSegId = tracker.getOngoingDuration()->segment_id;
+
+    // Act: stop
+    clock.advance(30ll * 1000ll);
+    tracker.useTimerViaButton(Button::Stop);
+
+    // Assert: the committed timeline holds exactly the Activity and Pause
+    // segments, each under its own id and with its own type. FakeSessionStore
+    // does not dedupe re-submissions of the same segment_id the way the real
+    // store's upsert does (documented in fakesessionstore.h), so identify
+    // segments by the deduped id set rather than by raw row count.
+    QCOMPARE(fakeDb.committedSegmentIds.size(), 2);
+    QVERIFY(fakeDb.committedSegmentIds.contains(activitySegId.toString()));
+    QVERIFY(fakeDb.committedSegmentIds.contains(pauseSegId.toString()));
+    const auto activityRow = std::find_if(fakeDb.storedDurations.begin(), fakeDb.storedDurations.end(),
+        [&](const TimeDuration& d) { return d.segment_id == activitySegId; });
+    const auto pauseRow = std::find_if(fakeDb.storedDurations.begin(), fakeDb.storedDurations.end(),
+        [&](const TimeDuration& d) { return d.segment_id == pauseSegId; });
+    QVERIFY(activityRow != fakeDb.storedDurations.end());
+    QVERIFY(pauseRow != fakeDb.storedDurations.end());
+    QCOMPARE(activityRow->type, DurationType::Activity);
+    QCOMPARE(pauseRow->type, DurationType::Pause);
 }
 
 void TimerTest::test_session_state_pause_to_activity_transition()
@@ -481,23 +426,36 @@ void TimerTest::test_session_state_pause_to_activity_transition()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
+    clock.advance(10ll * 1000ll);
     tracker.useTimerViaButton(Button::Pause);
-    QTest::qWait(10);
+    clock.advance(10ll * 1000ll);
 
-    SegmentId pauseSegId = tracker.sessionState_dbg().segment_id;
-    size_t durationsBeforeResume = tracker.sessionState_dbg().durations.size();
+    QVERIFY(tracker.getOngoingDuration().has_value());
+    const SegmentId pauseSegId = tracker.getOngoingDuration()->segment_id;
+    // FakeSessionStore does not dedupe re-submissions of the same segment_id
+    // the way the real store's upsert does, so track distinct committed
+    // segments through the deduped id set rather than raw row count.
+    const int committedBeforeResume = fakeDb.committedSegmentIds.size();
+    QVERIFY(!fakeDb.committedSegmentIds.contains(pauseSegId.toString()));
 
     // Act: resume (Start from Pause)
     tracker.useTimerViaButton(Button::Start);
 
-    // Assert: Activity mode, new segment id, pause duration recorded
+    // Assert: Activity mode, new segment id, pause duration committed
     QVERIFY(tracker.isActive());
-    QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
-    QVERIFY(tracker.sessionState_dbg().segment_id != pauseSegId);
-    QVERIFY(tracker.sessionState_dbg().durations.size() > durationsBeforeResume);
+    QVERIFY(tracker.getOngoingDuration().has_value());
+    QVERIFY(tracker.getOngoingDuration()->segment_id != pauseSegId);
+    QCOMPARE(fakeDb.committedSegmentIds.size(), committedBeforeResume + 1);
+    QVERIFY(fakeDb.committedSegmentIds.contains(pauseSegId.toString()));
+    const auto pauseRow = std::find_if(fakeDb.storedDurations.begin(), fakeDb.storedDurations.end(),
+        [&](const TimeDuration& d) { return d.segment_id == pauseSegId; });
+    QVERIFY(pauseRow != fakeDb.storedDurations.end());
+    QCOMPARE(pauseRow->type, DurationType::Pause);
 }
 
 void TimerTest::test_session_state_stop_clears_segment()
@@ -507,19 +465,68 @@ void TimerTest::test_session_state_stop_clears_segment()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
-    QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
+    clock.advance(10ll * 1000ll);
+    QVERIFY(tracker.getOngoingDuration().has_value());
 
     // Act
     tracker.useTimerViaButton(Button::Stop);
 
-    // Assert: None mode, segment cleared, durations cleared (saved to DB)
+    // Assert: None mode, no pending commit (durations cleared, saved to DB)
     QVERIFY(tracker.isStopped());
-    QVERIFY(tracker.sessionState_dbg().segment_id.isEmpty());
-    QVERIFY(!tracker.sessionState_dbg().segment_start_time.isValid());
     QVERIFY(!tracker.hasPendingCommit_dbg());
+}
+
+void TimerTest::test_session_state_adopted_segment_start_time_anchors_committed_row()
+{
+    // Arrange: Start an Activity segment, then commit a History-style edit
+    // that moves ITS start time earlier (same segment_id, same type -- just
+    // a moved anchor), the way HistoryDialog::saveChanges() does via
+    // TimeTracker::commitEditedTimeline(). This drives
+    // SessionState::adoptOngoingSegment() through its real public entry
+    // point rather than a _dbg seam.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    QVERIFY(tracker.getOngoingDuration().has_value());
+    const SegmentId segId = tracker.getOngoingDuration()->segment_id;
+
+    // Act: edit the ongoing segment's start time to 20 minutes earlier than
+    // t0 and commit it, as a History edit would.
+    const QDateTime editedStart = t0.addSecs(-20 * 60);
+    const TimeDuration editedOngoing = TimeDuration::fromLiveSession(
+        DurationType::Activity, editedStart, clock.now(), segId);
+    const TimeTracker::EditCommitResult commitResult =
+        tracker.commitEditedTimeline(Timeline({}, editedOngoing));
+    QVERIFY(commitResult.ok);
+
+    // Advance further and stop, so the ongoing segment is finalized and
+    // written to the store.
+    clock.advance(5ll * 60ll * 1000ll);
+    const QDateTime stopTime = clock.now();
+    tracker.useTimerViaButton(Button::Stop);
+
+    // Assert: the committed row's startTime (and thus its length) reflects
+    // the edited anchor, not the original t0 start -- read from the store,
+    // not a _dbg seam.
+    const auto row = std::find_if(fakeDb.storedDurations.begin(), fakeDb.storedDurations.end(),
+        [&](const TimeDuration& d) { return d.segment_id == segId; });
+    QVERIFY(row != fakeDb.storedDurations.end());
+    QCOMPARE(row->type, DurationType::Activity);
+    QCOMPARE(row->startTime, editedStart);
+    QCOMPARE(row->duration(), editedStart.msecsTo(stopTime));
 }
 
 // ============================================================================
