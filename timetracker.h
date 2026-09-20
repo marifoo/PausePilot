@@ -735,7 +735,6 @@ public:
 
     /// Direct access to the SessionState for test setup and assertions.
     SessionState& sessionState_dbg() { return session_; }
-    const SessionState& sessionState_dbg() const { return session_; }
 
     /// True iff a pending commit payload is currently retained (blocks a new
     /// session from starting until retried successfully). Test probe exposing
