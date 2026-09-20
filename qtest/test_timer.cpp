@@ -627,17 +627,25 @@ void TimerTest::test_boot_time_not_added_when_db_has_entries_for_today()
 
     Settings settings(settingsPath);
 
+    // Anchored to a fixed local noon-ish civil day (not real now), so the
+    // seed and the tracker's "today" can never straddle local midnight --
+    // see the house convention at test_timer.cpp:78 and git show 5e63eae.
+    const QDateTime anchor(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+
     // Use a separate SqliteSessionStore to seed an entry for today
     {
         SqliteSessionStore seeder(settings);
-        QDateTime now = QDateTime::currentDateTimeUtc();
         std::deque<TimeDuration> durations;
-        durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-3600), now.addSecs(-3540)));
+        durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, anchor.addSecs(-3600), anchor.addSecs(-3540)));
         QVERIFY(seeder.commitSession(Timeline(durations, std::nullopt)).ok());
     }
 
     SqliteSessionStore db(settings);
+    // FakeClock declared before TimeTracker so it outlives it (see the
+    // outlives-tracker note at test_integration.cpp:614).
+    FakeClock clock(anchor);
     TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     // Act: start the timer (DB already has entries for today)
     tracker.useTimerViaButton(Button::Start);
@@ -819,14 +827,16 @@ void TimerTest::test_isOngoingSegmentCrossMidnight_returns_false_for_same_day()
 {
     // Arrange: start the segment 60s ago via the clock seam, then observe
     // at "now" -- a real Start rather than writing segment_start_time
-    // directly.
+    // directly. Anchored to a fixed local civil time (not real now), so
+    // the 60s-earlier start can never land on the previous day -- see the
+    // house convention at test_timer.cpp:78 and git show 5e63eae.
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
     // FakeClock declared before TimeTracker so it outlives it (see the
     // outlives-tracker note at test_integration.cpp:614).
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(now.addSecs(-60));
     TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });

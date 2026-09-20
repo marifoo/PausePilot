@@ -286,23 +286,32 @@ void IntegrationTest::test_integration_memory_db_consistency()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
+    // FakeClock declared before TimeTracker so it outlives it (see the
+    // outlives-tracker note at test_integration.cpp:614). Anchored to a
+    // fixed local civil time, not real now, so this test cannot go
+    // cross-midnight and trip getOngoingDuration()'s nullopt-on-cross-
+    // midnight behavior (timetracker.cpp:1272-1273) -- see the house
+    // convention at test_timer.cpp:78 and git show 5e63eae.
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
     TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     // Start -> Activity for 50ms
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(50);
-    
+    clock.advance(50);
+
     // Pause
     tracker.useTimerViaButton(Button::Pause);
     auto memoryDurations = tracker.completedTimeline();
     QVERIFY(memoryDurations.completed().size() >= 1);
-    
+
     // Resume -> Activity for 50ms
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(50);
-    
+    clock.advance(50);
+
     // Save checkpoint
-    tracker.saveCheckpoint_locked_dbg(QDateTime::currentDateTime());
+    tracker.saveCheckpoint_locked_dbg(clock.now());
     QVERIFY(tracker.getOngoingDuration().has_value());
     {
         auto orphans = db.loadUnfinalizedCheckpoints_dbg();
@@ -629,14 +638,23 @@ void IntegrationTest::test_integration_backpause_db_update()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
+    // FakeClock declared before TimeTracker so it outlives it (see the
+    // outlives-tracker note at test_integration.cpp:614). Anchored to a
+    // fixed local civil time, not real now, so this test cannot go
+    // cross-midnight and trip discardCrossMidnightOngoingAndStop() inside
+    // saveCheckpoint_locked_dbg() below -- see the house convention at
+    // test_timer.cpp:78 and git show 5e63eae.
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
     TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     // Start activity
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(100);
-    
+    clock.advance(100);
+
     // Save checkpoint
-    tracker.saveCheckpoint_locked_dbg(QDateTime::currentDateTime());
+    tracker.saveCheckpoint_locked_dbg(clock.now());
     QVERIFY(tracker.getOngoingDuration().has_value());
     auto checkpointOrphans = db.loadUnfinalizedCheckpoints_dbg();
     SegmentId checkpointSegmentId = checkpointOrphans.empty() ? SegmentId{} : checkpointOrphans[0].segment_id;
