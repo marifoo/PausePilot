@@ -28,6 +28,54 @@ static const QString kKeyLogToFile         = "uTimer/debug_log_to_file";
 static const QString kKeyHistoryDays       = "uTimer/history_days_to_keep";
 static const QString kKeyBootTimeSec       = "uTimer/boot_time_seconds";
 static const QString kKeyCheckpointMin     = "uTimer/checkpoint_interval_minutes";
+
+/// Reads an int setting, falling back to default_val (with a Logger note,
+/// no UI) if the key is present but not a valid integer. Range clamping is
+/// left to the caller (qBound), unchanged from before.
+int readIntChecked(QSettings& sfile, const QString& key, int default_val)
+{
+	if (!sfile.contains(key)) return default_val;
+	const QVariant v = sfile.value(key);
+	bool ok = false;
+	const int val = v.toInt(&ok);
+	if (!ok) {
+		Logger::Log("Settings: malformed integer for " + key + " (\"" + v.toString() +
+					"\"), using default " + QString::number(default_val));
+		return default_val;
+	}
+	return val;
+}
+
+/// Same as readIntChecked() for unsigned settings.
+unsigned int readUIntChecked(QSettings& sfile, const QString& key, unsigned int default_val)
+{
+	if (!sfile.contains(key)) return default_val;
+	const QVariant v = sfile.value(key);
+	bool ok = false;
+	const unsigned int val = v.toUInt(&ok);
+	if (!ok) {
+		Logger::Log("Settings: malformed unsigned integer for " + key + " (\"" + v.toString() +
+					"\"), using default " + QString::number(default_val));
+		return default_val;
+	}
+	return val;
+}
+
+/// QVariant::toBool() has no ok-overload and silently treats any non-empty
+/// string that isn't "0"/"false" as true, so a malformed value would flip a
+/// default-false setting on instead of being rejected. Recognize only the
+/// forms QSettings itself writes/reads and fall back otherwise.
+bool readBoolChecked(QSettings& sfile, const QString& key, bool default_val)
+{
+	if (!sfile.contains(key)) return default_val;
+	const QVariant v = sfile.value(key);
+	const QString s = v.toString().trimmed().toLower();
+	if (s == "true" || s == "1") return true;
+	if (s == "false" || s == "0") return false;
+	Logger::Log("Settings: malformed boolean for " + key + " (\"" + v.toString() +
+				"\"), using default " + QString(default_val ? "true" : "false"));
+	return default_val;
+}
 } // namespace
 
 Settings::Settings(const QString filename) : sfile_(filename, QSettings::IniFormat)
@@ -41,20 +89,20 @@ Settings::Settings(const QString filename) : sfile_(filename, QSettings::IniForm
 
 void Settings::readSettingsFile()
 {
-	autostart_timing_ = sfile_.value(kKeyPressStart, true).toBool();
-	autopause_enabled_ = sfile_.value(kKeyAutopause, true).toBool();
-	backpause_min_ = qBound(0, sfile_.value(kKeyAutopauseThresh, 15).toInt(), 99);
-	start_minimized_ = sfile_.value(kKeyStartMinimized, false).toBool();
-	start_pinned_to_top_ = sfile_.value(kKeyStartPinned, false).toBool();
-	warning_nopause_ = sfile_.value(kKeyWarnNoPause, false).toBool();
+	autostart_timing_ = readBoolChecked(sfile_, kKeyPressStart, true);
+	autopause_enabled_ = readBoolChecked(sfile_, kKeyAutopause, true);
+	backpause_min_ = qBound(0, readIntChecked(sfile_, kKeyAutopauseThresh, 15), 99);
+	start_minimized_ = readBoolChecked(sfile_, kKeyStartMinimized, false);
+	start_pinned_to_top_ = readBoolChecked(sfile_, kKeyStartPinned, false);
+	warning_nopause_ = readBoolChecked(sfile_, kKeyWarnNoPause, false);
 	warning_nopause_min_ = 6*60;
 	pause_for_warning_nopause_min_ = 30;
-	warning_activity_ = sfile_.value(kKeyWarnActivity, false).toBool();
+	warning_activity_ = readBoolChecked(sfile_, kKeyWarnActivity, false);
 	warning_activity_min_ = 9*60+45;
-	history_days_to_keep_ = qMax(0, sfile_.value(kKeyHistoryDays, 99).toInt());
-	log_to_file_ = sfile_.value(kKeyLogToFile, false).toBool();
-	boot_time_sec_ = qBound(0u, sfile_.value(kKeyBootTimeSec, 0).toUInt(), 3600u);
-	checkpoint_interval_min_ = qBound(0, sfile_.value(kKeyCheckpointMin, 5).toInt(), 60);
+	history_days_to_keep_ = qMax(0, readIntChecked(sfile_, kKeyHistoryDays, 99));
+	log_to_file_ = readBoolChecked(sfile_, kKeyLogToFile, false);
+	boot_time_sec_ = qBound(0u, readUIntChecked(sfile_, kKeyBootTimeSec, 0u), 3600u);
+	checkpoint_interval_min_ = qBound(0, readIntChecked(sfile_, kKeyCheckpointMin, 5), 60);
 }
 
 void Settings::writeAndSync()

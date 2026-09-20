@@ -7,7 +7,10 @@
 /// Converts minutes to milliseconds.
 qint64 convMinToMsec(const int& minutes);
 
-/// Formats a millisecond duration as "hh:mm:ss".
+/// Formats a millisecond duration as "hh:mm:ss" using plain arithmetic (no
+/// wrap at 24h: hours keep counting, e.g. "25:00:00", "100:30:00").
+/// A negative duration is formatted as "-hh:mm:ss" (sign, then the
+/// magnitude).
 QString convMSecToTimeStr(const qint64& time);
 
 /// Formats (minutes, seconds) as a two-digit hundredths-of-an-hour string.

@@ -1,5 +1,5 @@
 #include "timeformat.h"
-#include <QDateTime>
+#include <QStringList>
 
 qint64 convMinToMsec(const int& minutes)
 {
@@ -8,7 +8,16 @@ qint64 convMinToMsec(const int& minutes)
 
 QString convMSecToTimeStr(const qint64& time)
 {
-    return QDateTime::fromTime_t(static_cast<unsigned int>(time / 1000)).toUTC().toString("hh:mm:ss");
+    const bool negative = time < 0;
+    const qint64 total_sec = (negative ? -time : time) / 1000;
+    const qint64 hours = total_sec / 3600;
+    const qint64 minutes = (total_sec % 3600) / 60;
+    const qint64 seconds = total_sec % 60;
+    return QString("%1%2:%3:%4")
+            .arg(negative ? "-" : "")
+            .arg(hours, 2, 10, QChar('0'))
+            .arg(minutes, 2, 10, QChar('0'))
+            .arg(seconds, 2, 10, QChar('0'));
 }
 
 QString convMinAndSecToHourPctString(const int min, const int sec)

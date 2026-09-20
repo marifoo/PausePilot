@@ -105,3 +105,38 @@ void SettingsTest::test_settings_boot_time_sec_bound()
     // Assert: value is capped at 3600 seconds (1 hour).
     QCOMPARE(capped.getBootTimeSec(), 3600u);
 }
+
+// D12-1: a malformed (non-numeric) int key must fall back to the documented
+// default (5 min), not the 0 that QSettings::toInt() silently produces on
+// failure (which would then wrongly clamp to 0 via qBound).
+void SettingsTest::test_settings_malformed_int_uses_default()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = QDir(tempDir.path()).filePath("user-settings.ini");
+
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/checkpoint_interval_minutes", "notanumber");
+    writer.sync();
+
+    Settings s(settingsPath);
+    QCOMPARE(s.getCheckpointIntervalMsec(), convMinToMsec(5));
+}
+
+// D12-1: QVariant::toBool() has no ok-overload and treats any non-empty
+// string that isn't "0"/"false" as true, so an unrecognized value would
+// silently flip a default-false setting on. Must fall back to the default
+// instead.
+void SettingsTest::test_settings_malformed_bool_uses_default()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = QDir(tempDir.path()).filePath("user-settings.ini");
+
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/debug_log_to_file", "banana");
+    writer.sync();
+
+    Settings s(settingsPath);
+    QCOMPARE(s.logToFile(), false);
+}

@@ -7,6 +7,11 @@ void HelpersTest::test_helpers_conversions()
     // convMSecToTimeStr
     QCOMPARE(convMSecToTimeStr(3661000), QString("01:01:01"));
     QCOMPARE(convMSecToTimeStr(0), QString("00:00:00"));
+    // Negative durations get a leading '-' with the magnitude formatted normally.
+    QCOMPARE(convMSecToTimeStr(-3661000), QString("-01:01:01"));
+    // 24h and beyond must keep counting, not wrap.
+    QCOMPARE(convMSecToTimeStr(24LL*3600*1000), QString("24:00:00"));
+    QCOMPARE(convMSecToTimeStr(100LL*3600*1000 + 30*60000), QString("100:30:00"));
 
     // convMinAndSecToHourPctString
     // 30 min = 0.5 hours -> "50" (dot is added by caller)

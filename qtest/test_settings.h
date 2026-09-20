@@ -16,6 +16,10 @@ private slots:
     // A14: boot_time_sec_ is bounded so a garbage/huge value cannot silently
     // void the boot credit (see timer.cpp cross-midnight day-boundary check).
     void test_settings_boot_time_sec_bound();
+    // D12-1: a malformed (present but unparseable) key falls back to the
+    // documented default instead of silently becoming 0/false.
+    void test_settings_malformed_int_uses_default();
+    void test_settings_malformed_bool_uses_default();
 };
 
 #endif // TEST_SETTINGS_H
