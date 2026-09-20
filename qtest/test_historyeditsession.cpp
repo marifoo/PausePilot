@@ -14,10 +14,6 @@ using TestCommon::mk;
 
 namespace {
 
-QDateTime makeUTC(qint64 ms) {
-    return QDateTime::fromMSecsSinceEpoch(ms, Qt::UTC);
-}
-
 // Fixed civil anchor -- NOT the real "today". The old helpers paired the
 // real local calendar date (QDate::currentDate()) with a Qt::UTC time
 // spec: at a nonzero UTC offset that pairing names a different local day

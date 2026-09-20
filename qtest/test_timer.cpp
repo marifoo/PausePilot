@@ -1538,7 +1538,7 @@ void TimerTest::test_dialog_open_allows_lock_bookkeeping()
     tracker.beginExclusiveEdit();
     QVERIFY(!tracker.isLocked_dbg());
 
-    const size_t checksBefore = fakeDb.callLog.count("saveCheckpoint");
+    const int checksBefore = fakeDb.callLog.count("saveCheckpoint");
 
     // Fire Lock while dialog is open
     tracker.useTimerViaLockEvent(LockEvent::Lock);

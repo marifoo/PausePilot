@@ -910,18 +910,6 @@ SessionStoreResult SqliteSessionStore::commitSession(const Timeline& session)
     return updateDurationsById(normed.completed(), orphanIds);
 }
 
-/**
- * Persists a batch of duration entries to the database.
- *
- * Modes:
- * - Append: Adds new entries to the end (standard usage).
- * - Replace: Deletes ALL existing entries and writes the new set (used by HistoryDialog).
- *
- * Safety:
- * - Wraps the operation in a SQL transaction.
- * - Creates a file-level backup before starting.
- * - Rolls back the transaction on any error.
- */
 bool SqliteSessionStore::insertRows(QSqlQuery& query, const std::deque<TimeDuration>& rows)
 {
     for (const auto& d : rows) {

@@ -2,7 +2,6 @@
 #define LOCKSTATEWATCHER_H
 
 #include <QObject>
-#include <QElapsedTimer>
 #include <QDateTime>
 #include <deque>
 #include <optional>
