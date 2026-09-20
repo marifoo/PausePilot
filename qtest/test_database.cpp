@@ -3976,9 +3976,14 @@ void DatabaseTest::test_A4_recovery_never_deletes_finalized_row_matching_intent(
     QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Created);
 
     // Seed a FINALIZED row under a known segment id.
+    // Anchored at local noon (Qt::LocalTime), not a fixed UTC hour: a
+    // 9:00-10:00 UTC row straddles local midnight under a large enough
+    // offset (e.g. Marquesas, UTC-9:30, puts it at 23:30-00:30 local),
+    // which trips Timeline's assertSameDayInvariant() Q_ASSERT when
+    // Timeline(finalized, ...) is constructed just below.
     const SegmentId segId = SegmentId::mint();
-    const QDateTime start = QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::UTC);
-    const QDateTime end   = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime start = QDateTime(QDate(2025, 6, 1), QTime(12, 0, 0), Qt::LocalTime);
+    const QDateTime end   = QDateTime(QDate(2025, 6, 1), QTime(13, 0, 0), Qt::LocalTime);
     std::deque<TimeDuration> finalized;
     finalized.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, start, end, segId));
     QVERIFY(manager.commitSession(Timeline(finalized, std::nullopt)).ok());
@@ -3994,7 +3999,7 @@ void DatabaseTest::test_A4_recovery_never_deletes_finalized_row_matching_intent(
     manager.closeConnection_dbg();
 
     // Act: recovery runs (no unfinalized rows exist at all).
-    const QDateTime now = QDateTime(QDate(2025, 6, 1), QTime(11, 0, 0), Qt::UTC);
+    const QDateTime now = QDateTime(QDate(2025, 6, 1), QTime(14, 0, 0), Qt::LocalTime);
     const StartupRecoveryResult res = manager.recoverStartupCheckpoints(now);
 
     // Assert: recovery succeeded, the finalized row survives untouched, and
