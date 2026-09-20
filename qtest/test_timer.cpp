@@ -669,11 +669,20 @@ void TimerTest::test_boot_time_added_once_on_empty_db()
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
+    // D15/F1 (part 3, B1): Start computes bootStart = now - boot_time_seconds
+    // (timetracker.cpp:646). On the real clock, within 30s of local midnight
+    // that lands on the previous civil day and addDuration() rejects the
+    // cross-midnight interval as CrossMidnight -- boot time silently isn't
+    // credited and this assertion fails. Pin to fixedNow() (local noon), far
+    // from that window. FakeClock declared before TimeTracker so it outlives
+    // it (see the outlives-tracker note at test_integration.cpp:614).
+    FakeClock clock(fixedNow());
     TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     // Act: start the timer (first session today, empty DB)
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
+    clock.advance(10);
 
     // Assert: boot time (30s = 30000ms) was added as an Activity segment
     qint64 totalActivity = sumDurations(tracker.completedTimeline().completed(), DurationType::Activity);
@@ -1306,11 +1315,17 @@ void TimerTest::test_E_boot_time_gate_entries_no_adds_boot_time()
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
     fakeDb.entriesForDateResult = EntriesForDateResult::No;
+    // D15/F1 (part 3, B1): see test_boot_time_added_once_on_empty_db() above
+    // -- Start's bootStart = now - boot_time_seconds can cross local midnight
+    // on the real clock. FakeClock declared before TimeTracker so it outlives
+    // it (see the outlives-tracker note at test_integration.cpp:614).
+    FakeClock clock(fixedNow());
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     // Act
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
+    clock.advance(10);
 
     // Assert: a 30-second boot-time Activity segment was prepended
     qint64 totalActivity = 0;

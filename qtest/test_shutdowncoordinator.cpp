@@ -5,6 +5,7 @@
 #include <QtTest>
 
 using TestCommon::createSettingsFile;
+using TestCommon::fixedNow;
 
 // ============================================================================
 // Test G — happy path: stop, flush, marker
@@ -16,11 +17,21 @@ void ShutdownCoordinatorTest::test_G_happy_path_stop_flush_marker()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
+    // D15/F1 (part 3, B2): Start() arms a real QTimer for the scheduled
+    // midnight stop at 23:59:59.500 relative to "now" (timetracker.cpp:654).
+    // On the real clock, if actual local midnight arrives mid-test that
+    // timer can fire and stop the tracker out from under this test's
+    // assumptions. Pinning to fixedNow() (local noon) arms it ~12 real
+    // hours out, so it cannot fire during this test's brief run. FakeClock
+    // declared before TimeTracker so it outlives it (see the
+    // outlives-tracker note at test_integration.cpp:614).
+    FakeClock clock(fixedNow());
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock.advance(20);
     QVERIFY(tracker.getOngoingDuration().has_value());
 
     fakeDb.callLog.clear();

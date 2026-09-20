@@ -1,4 +1,5 @@
 #include "test_history_commit.h"
+#include "fakeclock.h"
 #include <QtTest>
 #include <QMessageBox>
 #include <algorithm>
@@ -172,10 +173,20 @@ void HistoryCommitTest::test_raii_guard_resumes_on_accept()
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
+    // D15/F1 (part 3, B2): Start() arms a real QTimer for the scheduled
+    // midnight stop at 23:59:59.500 relative to "now" (timetracker.cpp:654).
+    // On the real clock, if actual local midnight arrives mid-test that
+    // timer can fire and stop the tracker out from under this test's
+    // assumptions. Pinning to fixedNow() (local noon) arms it ~12 real
+    // hours out, so it cannot fire during this test's brief run. FakeClock
+    // declared before TimeTracker so it outlives it (see the
+    // outlives-tracker note at test_integration.cpp:614).
+    FakeClock clock(fixedNow());
     TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock.advance(20);
     QVERIFY(tracker.isCheckpointTimerActive_dbg());
 
     {
@@ -210,10 +221,20 @@ void HistoryCommitTest::test_raii_guard_resumes_on_reject()
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
+    // D15/F1 (part 3, B2): Start() arms a real QTimer for the scheduled
+    // midnight stop at 23:59:59.500 relative to "now" (timetracker.cpp:654).
+    // On the real clock, if actual local midnight arrives mid-test that
+    // timer can fire and stop the tracker out from under this test's
+    // assumptions. Pinning to fixedNow() (local noon) arms it ~12 real
+    // hours out, so it cannot fire during this test's brief run. FakeClock
+    // declared before TimeTracker so it outlives it (see the
+    // outlives-tracker note at test_integration.cpp:614).
+    FakeClock clock(fixedNow());
     TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock.advance(20);
     QVERIFY(tracker.isCheckpointTimerActive_dbg());
 
     {
@@ -248,10 +269,20 @@ void HistoryCommitTest::test_raii_guard_resumes_on_destruction()
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
+    // D15/F1 (part 3, B2): Start() arms a real QTimer for the scheduled
+    // midnight stop at 23:59:59.500 relative to "now" (timetracker.cpp:654).
+    // On the real clock, if actual local midnight arrives mid-test that
+    // timer can fire and stop the tracker out from under this test's
+    // assumptions. Pinning to fixedNow() (local noon) arms it ~12 real
+    // hours out, so it cannot fire during this test's brief run. FakeClock
+    // declared before TimeTracker so it outlives it (see the
+    // outlives-tracker note at test_integration.cpp:614).
+    FakeClock clock(fixedNow());
     TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock.advance(20);
     QVERIFY(tracker.isCheckpointTimerActive_dbg());
 
     {
