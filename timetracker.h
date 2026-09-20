@@ -764,10 +764,6 @@ public:
     bool isAutopausePendingResume_dbg() const { return autopause_pending_resume_; }
     void setAutopausePendingResume_dbg(bool v) { autopause_pending_resume_ = v; }
 
-    /// Forces the engine into a specific mode without transition logic.
-    /// Use only in tests that need to arrange a pre-condition state.
-    void forceMode_dbg(Mode m) { mode_ = m; }
-
     /// Simulates a process crash that skips the graceful shutdown drain:
     /// forgets the tracker was running (mode_ -> None, segment anchor
     /// cleared) without finalizing the ongoing segment, so its checkpoint

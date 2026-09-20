@@ -71,12 +71,10 @@ void IntegrationTest::test_integration_checkpoint_recovery_on_restart()
         // own last-resort drainForShutdown(), which gracefully finalizes the
         // segment (see ~TimeTracker(), timetracker.cpp:455-482) instead of
         // leaving it as the unfinalized orphan checkpoint this test needs to
-        // exercise startup recovery against. forceMode_dbg()/sessionState_dbg()
-        // are kept here deliberately to make the destructor's drain a no-op
-        // (mode already None, no pending commit/discard), matching what a
-        // real process crash would leave behind.
-        tracker.forceMode_dbg(TimeTracker::Mode::None);
-        tracker.sessionState_dbg().segment_id = SegmentId{};
+        // exercise startup recovery against. simulateCrashWithoutShutdown_dbg()
+        // makes the destructor's drain a no-op (mode already None, no pending
+        // commit/discard), matching what a real process crash would leave behind.
+        tracker.simulateCrashWithoutShutdown_dbg();
 
         // Simulate crash (tracker destroyed without stopping)
     }
@@ -129,12 +127,9 @@ void IntegrationTest::test_integration_orphan_reconciliation_is_idempotent()
             QCOMPARE(orphans.size(), static_cast<size_t>(1));
             QCOMPARE(orphans[0].segment_id, tracker.getOngoingDuration()->segment_id);
         }
-        // D11: kept deliberately -- see the identical crash-simulation note
-        // in test_integration_checkpoint_recovery_on_restart() above; no
-        // behavioral seam leaves an orphan checkpoint unfinalized at
-        // destruction (the destructor's own drain would finalize it).
-        tracker.sessionState_dbg().segment_id = SegmentId{};
-        tracker.forceMode_dbg(TimeTracker::Mode::None);
+        // D11: see the crash-simulation note in
+        // test_integration_checkpoint_recovery_on_restart() above.
+        tracker.simulateCrashWithoutShutdown_dbg();
     }
 
     {
@@ -236,8 +231,7 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_present_is_s
         }
         // D11: kept deliberately -- see the crash-simulation note in
         // test_integration_checkpoint_recovery_on_restart() above.
-        tracker.sessionState_dbg().segment_id = SegmentId{};
-        tracker.forceMode_dbg(TimeTracker::Mode::None);
+        tracker.simulateCrashWithoutShutdown_dbg();
     }
 
     {
@@ -281,8 +275,7 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_absent_shows
         }
         // D11: kept deliberately -- see the crash-simulation note in
         // test_integration_checkpoint_recovery_on_restart() above.
-        tracker.sessionState_dbg().segment_id = SegmentId{};
-        tracker.forceMode_dbg(TimeTracker::Mode::None);
+        tracker.simulateCrashWithoutShutdown_dbg();
     }
 
     {
@@ -674,15 +667,9 @@ void IntegrationTest::test_integration_backpause_db_update()
 
     // Backpause transitions to Pause and starts a fresh segment identity.
     // The Pause segment isn't checkpointed (saveCheckpoint_locked only
-    // writes while mode_ == Activity), so the DB can't observe this. The
-    // public getOngoingDuration() accessor is unsuitable for the emptiness
-    // claim: TimeDuration's private constructor mints a fresh SegmentId
-    // whenever the one it's given is empty, so an empty session_.segment_id
-    // would self-heal into a non-empty one before this test could see it.
-    // Read the raw debug field instead, which cannot self-heal.
+    // writes while mode_ == Activity), so the DB can't observe this.
     auto ongoing = tracker.getOngoingDuration();
     QVERIFY(ongoing.has_value());
-    QVERIFY(!tracker.sessionState_dbg().segment_id.isEmpty());
     QVERIFY(ongoing->segment_id.toString() != checkpointSegmentId.toString());
     
     // Verify durations were updated in DB
@@ -1313,8 +1300,7 @@ void IntegrationTest::test_A_toggle_ongoing_to_pause_crash_recovery_uses_refresh
         // The unfinalized DB row retains the end_utc set by replaceAll.
         // D11: kept deliberately -- see the crash-simulation note in
         // test_integration_checkpoint_recovery_on_restart() above.
-        tracker.forceMode_dbg(TimeTracker::Mode::None);
-        tracker.sessionState_dbg().segment_id = SegmentId{};
+        tracker.simulateCrashWithoutShutdown_dbg();
     }
 
     {

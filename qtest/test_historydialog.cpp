@@ -567,8 +567,7 @@ void HistoryDialogTest::test_historydialog_save_then_crash_reopen_retains_curren
         dialog.saveChanges();
 
         // Simulate crash: skip graceful stop/finalize.
-        tracker.forceMode_dbg(TimeTracker::Mode::None);
-        tracker.sessionState_dbg().segment_id = SegmentId{};
+        tracker.simulateCrashWithoutShutdown_dbg();
     }
 
     {
