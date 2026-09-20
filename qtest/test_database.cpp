@@ -21,32 +21,55 @@ void DatabaseTest::cleanupTestCase()
     TestCommon::clearDataDirOverride();
 }
 
-void DatabaseTest::test_database_backups_and_retention_and_disable()
+void DatabaseTest::test_database_replaceAll_persists_durations_when_retention_enabled()
 {
+    // Arrange: history_days_to_keep>0 => ensureOpen/ensureSchema create DB
     resetDatabaseFile();
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 2));
     SqliteSessionStore manager(settings);
-
-    // history_days_to_keep>0 => ensureOpen/ensureSchema create DB
     QVERIFY(manager.ensureOpen_dbg()); // no-op but should succeed
 
-    // Insert entries across 3 days to trigger pruning on next open
     std::deque<TimeDuration> durations;
     QDateTime now = QDateTime::currentDateTimeUtc();
     durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addDays(-3), now.addDays(-3).addSecs(60)));
     durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addDays(-1), now.addDays(-1).addSecs(60)));
     durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now, now.addSecs(60)));
-    QVERIFY(manager.replaceAll(Timeline(durations, std::nullopt), Timeline()).ok());
 
+    // Act
+    auto result = manager.replaceAll(Timeline(durations, std::nullopt), Timeline());
+
+    // Assert
+    QVERIFY(result.ok());
+    // performRetentionCleanup() only runs from checkSchemaOnStartup()
+    // (sqlitesessionstore.cpp), which this test never calls -- ensureOpen()
+    // and the constructor do not invoke it. So no pruning happens here at
+    // all, and this >= 2 does not exercise retention; that exact boundary is
+    // what test_retention_cleanup_runs_once_across_multiple_opens and
+    // test_D2_retentionCutoff_uses_injected_clock_exact_boundary pin.
+    // Kept as-is: it is the original assertion, restated verbatim.
     auto loaded = manager.loadDurations();
-    QVERIFY(static_cast<int>(loaded.size()) >= 2); // old entries pruned on ensureOpen
+    QVERIFY(static_cast<int>(loaded.size()) >= 2);
+}
 
-    // history_days_to_keep=0 disables db
+void DatabaseTest::test_database_disabled_history_ignores_writes_and_returns_no_durations()
+{
+    // Arrange: history_days_to_keep=0 disables db
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
     Settings disabled(createSettingsFile(tempDir.path(), 0));
     SqliteSessionStore managerDisabled(disabled);
-    QVERIFY(managerDisabled.commitSession(Timeline(durations, std::nullopt)).okOrDisabled());
+    std::deque<TimeDuration> durations;
+    QDateTime now = QDateTime::currentDateTimeUtc();
+    durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now, now.addSecs(60)));
+
+    // Act
+    auto result = managerDisabled.commitSession(Timeline(durations, std::nullopt));
+
+    // Assert
+    QVERIFY(result.okOrDisabled());
     auto loadedDisabled = managerDisabled.loadDurations();
     QCOMPARE(static_cast<int>(loadedDisabled.size()), 0);
 }

@@ -24,7 +24,8 @@ private slots:
     void cleanupTestCase();
     
     // Core database tests
-    void test_database_backups_and_retention_and_disable();
+    void test_database_replaceAll_persists_durations_when_retention_enabled();
+    void test_database_disabled_history_ignores_writes_and_returns_no_durations();
     void test_database_transaction_rollback_on_replace_failure();
     void test_database_checkpoint_single_row_per_segment();
     void test_database_checkpoint_missing_segment_reinserts_same_segment_id();

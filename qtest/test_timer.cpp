@@ -20,39 +20,105 @@ void TimerTest::cleanupTestCase()
     TestCommon::clearDataDirOverride();
 }
 
-void TimerTest::test_timer_start_pause_resume_stop_and_checkpoints()
+void TimerTest::test_timer_start_transitions_to_active()
 {
+    // Arrange
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
-
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    // Start -> Activity
+    // Act
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
+
+    // Assert
     QVERIFY(tracker.isActive());
     QVERIFY(tracker.getOngoingDuration().has_value());
+}
 
-    // Pause -> durations captured and checkpoint id reset
+void TimerTest::test_timer_pause_captures_duration_and_keeps_ongoing()
+{
+    // Arrange: reach Activity mode first (setup, not the behavior under test)
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    Settings settings(settingsPath);
+    SqliteSessionStore db(settings);
+    TimeTracker tracker(settings, db);
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(10);
+
+    // Act
     tracker.useTimerViaButton(Button::Pause);
+
+    // Assert: durations captured and checkpoint id reset
     QVERIFY(tracker.isPaused());
     QVERIFY(tracker.completedTimeline().completed().size() >= 1);
     QVERIFY(tracker.getOngoingDuration().has_value());
+}
 
-    // Resume -> Activity
+void TimerTest::test_timer_resume_from_pause_transitions_to_active()
+{
+    // Arrange: reach Pause mode first (setup, not the behavior under test)
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    Settings settings(settingsPath);
+    SqliteSessionStore db(settings);
+    TimeTracker tracker(settings, db);
     tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(10);
+    tracker.useTimerViaButton(Button::Pause);
+
+    // Act
+    tracker.useTimerViaButton(Button::Start);
+
+    // Assert
     QVERIFY(tracker.isActive());
+}
 
-    // Trigger checkpoint manually
+void TimerTest::test_timer_manual_checkpoint_preserves_ongoing_duration()
+{
+    // Arrange: reach Activity mode first (setup, not the behavior under test)
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    tracker.useTimerViaButton(Button::Start);
     QTest::qWait(100); // Ensure elapsed > 0
-    tracker.saveCheckpoint_locked_dbg(QDateTime::currentDateTime());
-    QVERIFY(tracker.getOngoingDuration().has_value());
 
-    // Stop -> move to None and durations flushed
+    // Act
+    tracker.saveCheckpoint_locked_dbg(QDateTime::currentDateTime());
+
+    // Assert: the checkpoint is actually written to the store (savedCheckpoints
+    // is the real teeth here -- getOngoingDuration() alone depends only on
+    // mode_/segment_start_time and does not depend on saveCheckpoint_locked's
+    // success path, so it would pass even if the write were a no-op).
+    QCOMPARE(fakeDb.savedCheckpoints.size(), static_cast<size_t>(1));
+    QVERIFY(tracker.getOngoingDuration().has_value());
+}
+
+void TimerTest::test_timer_stop_transitions_to_stopped()
+{
+    // Arrange: reach Activity mode first (setup, not the behavior under test)
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    Settings settings(settingsPath);
+    SqliteSessionStore db(settings);
+    TimeTracker tracker(settings, db);
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(10);
+
+    // Act
     tracker.useTimerViaButton(Button::Stop);
+
+    // Assert: move to None
     QVERIFY(tracker.isStopped());
     // (segment_id.isEmpty() after Stop is not asserted here: mode_ == None
     // implies it, since clearSegment() -- which clears segment_id -- runs

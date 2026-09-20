@@ -13,6 +13,7 @@ private slots:
     void test_J_activity_warning_fires_once();
 
     // Test K: no-pause warning fires only when activity high AND pause low
+    void test_K_nopause_warning_condition_data();
     void test_K_nopause_warning_condition();
 
     // Test L: reset re-arms both warnings

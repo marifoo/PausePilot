@@ -53,8 +53,27 @@ void HealthMonitorTest::test_J_activity_warning_fires_once()
 // Test K — no-pause warning condition
 // ============================================================================
 
+void HealthMonitorTest::test_K_nopause_warning_condition_data()
+{
+    QTest::addColumn<qint64>("activityMs");
+    QTest::addColumn<qint64>("pauseMs");
+    QTest::addColumn<int>("expectedWarnings");
+
+    QTest::newRow("activity_high_pause_low_fires")
+        << kNoPauseActivityMs + 1 << kMinPauseMs - 1 << 1;
+    QTest::newRow("activity_high_pause_ok_no_warning")
+        << kNoPauseActivityMs + 1 << kMinPauseMs + 1 << 0;
+    QTest::newRow("activity_below_threshold_no_warning")
+        << kNoPauseActivityMs - 1 << static_cast<qint64>(0) << 0;
+}
+
 void HealthMonitorTest::test_K_nopause_warning_condition()
 {
+    QFETCH(qint64, activityMs);
+    QFETCH(qint64, pauseMs);
+    QFETCH(int, expectedWarnings);
+
+    // Arrange
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     QSettings seed(QDir(tempDir.path()).filePath("user-settings.ini"), QSettings::IniFormat);
@@ -62,33 +81,15 @@ void HealthMonitorTest::test_K_nopause_warning_condition()
     seed.setValue("uTimer/show_warning_when_not_30min_pause_after_6h_activity", true);
     seed.sync();
     Settings settings(QDir(tempDir.path()).filePath("user-settings.ini"));
+    HealthMonitor monitor(settings);
+    monitor.reset();
+    QSignalSpy spy(&monitor, &HealthMonitor::warningTriggered);
 
-    // Activity high, pause LOW → warning fires
-    {
-        HealthMonitor monitor(settings);
-        monitor.reset();
-        QSignalSpy spy(&monitor, &HealthMonitor::warningTriggered);
-        monitor.check(kNoPauseActivityMs + 1, kMinPauseMs - 1);
-        QCOMPARE(spy.count(), 1);
-    }
+    // Act
+    monitor.check(activityMs, pauseMs);
 
-    // Activity high, pause OK → no warning
-    {
-        HealthMonitor monitor(settings);
-        monitor.reset();
-        QSignalSpy spy(&monitor, &HealthMonitor::warningTriggered);
-        monitor.check(kNoPauseActivityMs + 1, kMinPauseMs + 1);
-        QCOMPARE(spy.count(), 0);
-    }
-
-    // Activity below threshold → no warning even with low pause
-    {
-        HealthMonitor monitor(settings);
-        monitor.reset();
-        QSignalSpy spy(&monitor, &HealthMonitor::warningTriggered);
-        monitor.check(kNoPauseActivityMs - 1, 0);
-        QCOMPARE(spy.count(), 0);
-    }
+    // Assert
+    QCOMPARE(spy.count(), expectedWarnings);
 }
 
 // ============================================================================

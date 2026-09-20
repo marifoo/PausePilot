@@ -24,7 +24,11 @@ private slots:
     void cleanupTestCase();
     
     // Existing TimeTracker tests
-    void test_timer_start_pause_resume_stop_and_checkpoints();
+    void test_timer_start_transitions_to_active();
+    void test_timer_pause_captures_duration_and_keeps_ongoing();
+    void test_timer_resume_from_pause_transitions_to_active();
+    void test_timer_manual_checkpoint_preserves_ongoing_duration();
+    void test_timer_stop_transitions_to_stopped();
     void test_timer_backpause_resets_checkpoint_and_splits();
     void test_timer_lock_events_checkpoint_and_resume();
     void test_timer_ongoing_duration();
