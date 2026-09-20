@@ -292,9 +292,22 @@ void SessionState::adoptOngoingSegment(const TimeDuration& ongoing)
  *   1. Segment ordering: startTimes must be non-decreasing.
  *   2. No overlapping segments of the same type on the same day.
  *   3. All segment_ids must be non-empty.
+ *   4. When mode_ == Mode::None, the segment anchor must be clear:
+ *      segment_id empty and segment_start_time invalid.
  */
 void TimeTracker::checkDurationInvariants() const
 {
+    // Invariant 4: stopped means no anchor. Checked independently of the
+    // durations deque below -- it must fire even with zero completed
+    // segments.
+    if (mode_ == Mode::None
+        && (!session_.segment_id.isEmpty() || session_.segment_start_time.isValid())) {
+        qWarning("[INVARIANT] Stopped (mode_ == None) but segment anchor is not clear: "
+                 "segment_id=%s, segment_start_time=%s",
+                 qPrintable(session_.segment_id.toString()),
+                 qPrintable(session_.segment_start_time.toString(Qt::ISODate)));
+    }
+
     const auto& durations = session_.durations;
     if (durations.empty()) {
         return;

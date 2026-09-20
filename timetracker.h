@@ -768,6 +768,19 @@ public:
     /// Use only in tests that need to arrange a pre-condition state.
     void forceMode_dbg(Mode m) { mode_ = m; }
 
+    /// Simulates a process crash that skips the graceful shutdown drain:
+    /// forgets the tracker was running (mode_ -> None, segment anchor
+    /// cleared) without finalizing the ongoing segment, so its checkpoint
+    /// row is left as an unfinalized orphan for startup recovery to
+    /// reconcile. There is no behavioural route to this state -- letting
+    /// the tracker destruct while still running invokes ~TimeTracker()'s
+    /// last-resort drainForShutdown(), which gracefully finalizes the
+    /// segment instead, the opposite of what a crash-recovery test needs.
+    void simulateCrashWithoutShutdown_dbg() {
+        mode_ = Mode::None;
+        session_.clearSegment();
+    }
+
     /// Exposes the internal checkpoint-save path for direct testing.
     void saveCheckpoint_locked_dbg(const QDateTime& now) { saveCheckpoint_locked(now); }
 
@@ -777,6 +790,19 @@ public:
     /// Exposes the addDuration path for direct testing.
     void addDuration_dbg(DurationType type, const QDateTime& start, const QDateTime& end) {
         addDuration(type, start, end);
+    }
+
+    /// Appends a single already-built TimeDuration directly onto the
+    /// completed-segment deque, bypassing addDuration()'s create() guards
+    /// (same-day, positive duration). No behavioural route can arrange a
+    /// cross-midnight *completed* row: addDuration() discards it by design
+    /// (TimeDuration::create returns CrossMidnight). CAUTION: a cross-midnight
+    /// row seeded here makes the next completedTimeline()/snapshot() call
+    /// abort the whole qtest binary -- Timeline's constructor Q_ASSERTs
+    /// same-day per completed row (timeline.cpp:14-16, 107-113). Callers must
+    /// ensure nothing reads the timeline while such a row is seeded.
+    void seedCompletedDuration_dbg(const TimeDuration& d) {
+        session_.durations.push_back(d);
     }
 
     /// Returns whether the periodic checkpoint QTimer is currently running.

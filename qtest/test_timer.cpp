@@ -695,9 +695,9 @@ void TimerTest::test_pause_row_persisted_immediately_on_resume()
         QTest::qWait(20);
 
         // Simulate crash: destroy tracker without calling stopTimer.
-        // Set mode to None to prevent destructor from saving a clean stop.
-        tracker.forceMode_dbg(TimeTracker::Mode::None);
-        tracker.sessionState_dbg().segment_id = SegmentId{};
+        // Prevents the destructor's drain from gracefully finalizing the
+        // segment, so it survives as an unfinalized orphan.
+        tracker.simulateCrashWithoutShutdown_dbg();
     }
 
     // Assert: re-read the DB and verify the Pause row survived the crash.
@@ -1311,24 +1311,24 @@ void TimerTest::test_E_boot_time_inmemory_start_date_skips_boot_time()
     QDateTime now = QDateTime::currentDateTime();
     QDateTime startToday = QDateTime(now.date(), QTime(23, 0, 0));
     QDateTime endTomorrow = startToday.addSecs(3600); // crosses midnight
-    // Seam kept deliberately: no public API can inject a cross-midnight
-    // *completed* segment directly into session_.durations -- addDuration()
-    // discards it by design (TimeDuration::create returns CrossMidnight,
-    // covered separately by test_addduration_discards_cross_midnight_segment),
-    // so this in-memory precondition is unreachable through any real
-    // transition. Narrow replacement seams for this arrangement are P5e's job.
+    // seedCompletedDuration_dbg() kept deliberately: no public API can inject
+    // a cross-midnight *completed* segment directly into session_.durations
+    // -- addDuration() discards it by design (TimeDuration::create returns
+    // CrossMidnight, covered separately by
+    // test_addduration_discards_cross_midnight_segment), so this in-memory
+    // precondition is unreachable through any real transition.
     // Hazard: this pre-seeds a cross-midnight completed row directly, and
     // Timeline's constructor runs assertSameDayInvariant() under
     // #ifndef QT_NO_DEBUG (timeline.cpp:10-17), which Q_ASSERTs
     // !isCrossMidnight(...) per completed row (timeline.cpp:108-113). It is
     // safe only because Start's None branch reaches
-    // session_.resetForNewSession() (timetracker.cpp:631) below and wipes
+    // session_.resetForNewSession() (timetracker.cpp:644) below and wipes
     // the pre-seed before completedTimeline() reads it; if Start ever
-    // returns earlier -- fatal_state_latched_ (:591), !retryUnsavedDurations()
-    // (:599), or the second latch check (:608) -- the pre-seed survives and
+    // returns earlier -- fatal_state_latched_ (:604), !retryUnsavedDurations()
+    // (:612), or the second latch check (:621) -- the pre-seed survives and
     // the read below aborts the whole qtest binary instead of failing one
     // test.
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, startToday, endTomorrow));
 
     // Act: start the timer (DB says No, but in-memory entry exists for today)
@@ -2597,19 +2597,22 @@ void TimerTest::test_commitEditedTimeline_ignores_ongoing_when_already_stopped()
     // Assert: commit still reports success; the ongoing segment is ignored.
     QVERIFY(result.ok);
     QVERIFY2(tracker.isStopped(), "engine must remain stopped, not half-started");
-    // Left as a seam read, not converted: this is the one place in the file
-    // where no public accessor can observe what these two lines check. The
-    // "already stopped" branch (timetracker.cpp:1193-1199) is a pure no-op
-    // on session_ -- if it were corrupted to call adoptOngoingSegment()
-    // instead of refusing, segment_id/segment_start_time would become
-    // non-empty while mode_ stayed None, which is exactly the "impossible
-    // state" this test (A14) exists to guard against. But getOngoingDuration()
-    // returns nullopt unconditionally whenever mode_ == Mode::None
-    // (timetracker.cpp:1242, checked before segment_start_time is even
-    // read), so it cannot distinguish a correctly-refused half-adopt from a
-    // corrupted one -- so the getOngoingDuration() assertion at the end of
-    // this test would pass either way. These two direct reads are the only
-    // way to catch that specific regression through the current public surface.
+    // This test is the one documented exception the seam-removal series does
+    // not convert: no public observable exists for the A14 impossible state.
+    // checkDurationInvariants()'s invariant 4 (timetracker.cpp:~303) asserts
+    // centrally that mode_ == Mode::None implies segment_id/segment_start_time
+    // are clear, and it is unconditionally called at the end of
+    // commitEditedTimeline() (timetracker.cpp:~1224) regardless of which
+    // branch ran -- but every production reader of the anchor (isStopped(),
+    // getOngoingDuration()) gates on mode_ first, so neither can distinguish
+    // a correctly-refused half-adopt from a corrupted one, and the
+    // invariant's only report channel is a qWarning that is NOT enforced on
+    // Windows (qtest/main.cpp's message handler gates QWARN-as-failure inside
+    // #ifndef _WIN32). If the "already stopped" branch (timetracker.cpp:
+    // ~1206-1212) were corrupted to call adoptOngoingSegment() instead of
+    // refusing, segment_id/segment_start_time would become non-empty while
+    // mode_ stayed None -- exactly the "impossible state" A14 guards against
+    // -- and nothing but these two direct reads would catch it on MSVC.
     QVERIFY2(tracker.sessionState_dbg().segment_id.isEmpty(),
              "segment_id must stay empty -- refused, not half-adopted");
     QVERIFY2(!tracker.sessionState_dbg().segment_start_time.isValid(),
