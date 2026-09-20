@@ -546,13 +546,22 @@ void HistoryEditSessionTest::test_toggle_activity_to_pause_payload_end_utc_advan
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
+
+    // Deterministic clock (D15/F1): buildSavePayload() below places the
+    // ongoing segment into a Timeline whose constructor asserts same-day, so
+    // a real-clock start/refresh pair straddling local midnight would abort
+    // the whole qtest binary rather than fail this one test. See
+    // test_backward_clock_jump_keeps_engine_running() above for the
+    // declared-before-tracker ordering rationale.
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(12, 0, 0), Qt::LocalTime));
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(30);
+    clock.advance(30);
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker, QDate::currentDate());
+    session.buildFromTimer(tracker, clock.now().date());
 
     QVERIFY(session.pendingTimelines()[0].ongoing().has_value());
     QCOMPARE(session.pendingTimelines()[0].ongoing()->type, DurationType::Activity);
@@ -562,11 +571,11 @@ void HistoryEditSessionTest::test_toggle_activity_to_pause_payload_end_utc_advan
     QVERIFY(session.setOngoingType(0, DurationType::Pause));
 
     // Advance clock so the engine snapshot is later than dialogOpenEnd.
-    QTest::qWait(100);
+    clock.advance(100);
 
-    const QDateTime before = QDateTime::currentDateTime();
+    const QDateTime before = clock.now();
     session.refreshOngoing(tracker);
-    const QDateTime after = QDateTime::currentDateTime();
+    const QDateTime after = clock.now();
 
     const auto payload = session.buildSavePayload();
 
@@ -600,15 +609,22 @@ void HistoryEditSessionTest::test_toggle_pause_to_activity_payload_end_utc_advan
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
+
+    // Deterministic clock (D15/F1): see
+    // test_toggle_activity_to_pause_payload_end_utc_advances() above for why
+    // buildSavePayload()'s ongoing-segment Timeline makes a real clock here
+    // unsafe near local midnight.
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(12, 0, 0), Qt::LocalTime));
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock.advance(20);
     tracker.useTimerViaButton(Button::Pause);
-    QTest::qWait(20);
+    clock.advance(20);
 
     HistoryEditSession session;
-    session.buildFromTimer(tracker, QDate::currentDate());
+    session.buildFromTimer(tracker, clock.now().date());
 
     QVERIFY(session.pendingTimelines()[0].ongoing().has_value());
     QCOMPARE(session.pendingTimelines()[0].ongoing()->type, DurationType::Pause);
@@ -617,11 +633,11 @@ void HistoryEditSessionTest::test_toggle_pause_to_activity_payload_end_utc_advan
     // Act: user toggles ongoing type back to Activity.
     QVERIFY(session.setOngoingType(0, DurationType::Activity));
 
-    QTest::qWait(100);
+    clock.advance(100);
 
-    const QDateTime before = QDateTime::currentDateTime();
+    const QDateTime before = clock.now();
     session.refreshOngoing(tracker);
-    const QDateTime after = QDateTime::currentDateTime();
+    const QDateTime after = clock.now();
 
     const auto payload = session.buildSavePayload();
 

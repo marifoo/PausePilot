@@ -7,6 +7,7 @@
 #include "../historyeditsession.h"
 
 using TestCommon::createSettingsFile;
+using TestCommon::fixedNow;
 
 void HistoryCommitTest::initTestCase()
 {
@@ -39,7 +40,7 @@ void HistoryCommitTest::test_accept_stays_open_on_db_failure()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = fixedNow();
     const TimeDuration seeded =
         TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-30), now.addSecs(-20));
     tracker.seedCompletedDuration_dbg(seeded);
@@ -143,7 +144,7 @@ void HistoryCommitTest::test_accept_closes_on_success()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = fixedNow();
     tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-30), now.addSecs(-10)));
 

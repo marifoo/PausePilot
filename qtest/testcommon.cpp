@@ -37,6 +37,21 @@ qint64 sumDurations(const std::deque<TimeDuration>& d, DurationType type)
     return total;
 }
 
+QDateTime fixedNow()
+{
+    // Today's real date, but pinned to local noon: History pages group by
+    // real calendar date (e.g. "page 0 is today"), so the date component
+    // must track QDate::currentDate() for fixtures that mix this with
+    // day-relative lookups. Only the time-of-day needs pinning away from
+    // midnight -- see the header comment for why.
+    return QDateTime(QDate::currentDate(), QTime(12, 0, 0), Qt::LocalTime);
+}
+
+QDateTime fixedNowUtc()
+{
+    return fixedNow().toUTC();
+}
+
 void setDataDirOverride(const QString& dirPath)
 {
     qputenv("UTIMER_DATA_DIR", dirPath.toUtf8());

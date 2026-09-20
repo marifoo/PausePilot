@@ -10,6 +10,8 @@
 #endif
 
 using TestCommon::createSettingsFile;
+using TestCommon::fixedNow;
+using TestCommon::fixedNowUtc;
 using TestCommon::mk;
 using TestCommon::sumDurations;
 
@@ -41,7 +43,7 @@ void IntegrationTest::test_integration_checkpoint_recovery_on_restart()
         // Drive the clock via the seam: no real sleep needed to age the checkpoint
         // past the 1 s minimum-recoverable-orphan threshold.
         // FakeClock declared before TimeTracker: see outlives-tracker note above
-        FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        FakeClock clock(fixedNow().addSecs(-10));
         TimeTracker tracker(settings, db);
         tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
@@ -71,10 +73,18 @@ void IntegrationTest::test_integration_checkpoint_recovery_on_restart()
     }
     
     {
-        // Second session: startup reconciliation finalizes orphan checkpoint
+        // Second session: startup reconciliation finalizes orphan checkpoint.
+        // D15/F1: recoverStartupCheckpoints() policy-drops any orphan whose
+        // endTime is more than kOrphanFutureSlackMs ahead of "now"
+        // (sqlitesessionstore.cpp) -- the checkpoint above was written
+        // relative to fixedNow(), so "now" here must be pinned the same way
+        // rather than left as the real wall clock, or the checkpoint reads
+        // as future-dated whenever the real time of day is far from noon.
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
+        FakeClock clock(fixedNow());
         TimeTracker tracker(settings, db);
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.initializeFromStore();
         QVERIFY(tracker.getStartupRecoveredMsec() > 0);
 
@@ -106,7 +116,7 @@ void IntegrationTest::test_integration_orphan_reconciliation_is_idempotent()
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
         // FakeClock declared before TimeTracker: see outlives-tracker note above
-        FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        FakeClock clock(fixedNow().addSecs(-10));
         TimeTracker tracker(settings, db);
         tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.useTimerViaButton(Button::Start);
@@ -124,9 +134,13 @@ void IntegrationTest::test_integration_orphan_reconciliation_is_idempotent()
     }
 
     {
+        // D15/F1: pin "now" to fixedNow() -- see the same comment in
+        // test_integration_checkpoint_recovery_on_restart() above.
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
+        FakeClock clock(fixedNow());
         TimeTracker tracker(settings, db);
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.initializeFromStore();
         QCOMPARE(tracker.getStartupRecoveredMsec() >= 1, true);
     }
@@ -134,7 +148,9 @@ void IntegrationTest::test_integration_orphan_reconciliation_is_idempotent()
     {
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
+        FakeClock clock(fixedNow());
         TimeTracker tracker(settings, db);
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.initializeFromStore();
         QCOMPARE(tracker.getStartupRecoveredMsec(), static_cast<qint64>(0));
         SqliteSessionStore db2(settings);
@@ -208,7 +224,7 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_present_is_s
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
         // FakeClock declared before TimeTracker: see outlives-tracker note above
-        FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        FakeClock clock(fixedNow().addSecs(-10));
         TimeTracker tracker(settings, db);
         tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.useTimerViaButton(Button::Start);
@@ -226,15 +242,23 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_present_is_s
     }
 
     {
+        // D15/F1: the marker must be >= the newest finalized orphan's end
+        // time (fixedNow()-based, see above) to suppress the recovery
+        // notification -- a real "now" here is unrelated to that anchor
+        // whenever the wall clock isn't near noon.
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
-        QVERIFY(db.setLastCleanShutdownMarker_dbg(QDateTime::currentDateTime()).ok());
+        QVERIFY(db.setLastCleanShutdownMarker_dbg(fixedNow()).ok());
     }
 
     {
+        // D15/F1: pin "now" to fixedNow() -- see the same comment in
+        // test_integration_checkpoint_recovery_on_restart() above.
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
+        FakeClock clock(fixedNow());
         TimeTracker tracker(settings, db);
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.initializeFromStore();
         QVERIFY(tracker.getStartupRecoveredMsec() > 0);
         QVERIFY(!tracker.shouldShowStartupRecoveryNotification());
@@ -252,7 +276,7 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_absent_shows
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
         // FakeClock declared before TimeTracker: see outlives-tracker note above
-        FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        FakeClock clock(fixedNow().addSecs(-10));
         TimeTracker tracker(settings, db);
         tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.useTimerViaButton(Button::Start);
@@ -270,9 +294,13 @@ void IntegrationTest::test_integration_orphan_reconciliation_marker_absent_shows
     }
 
     {
+        // D15/F1: pin "now" to fixedNow() -- see the same comment in
+        // test_integration_checkpoint_recovery_on_restart() above.
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
+        FakeClock clock(fixedNow());
         TimeTracker tracker(settings, db);
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
         tracker.initializeFromStore();
         QVERIFY(tracker.getStartupRecoveredMsec() > 0);
         QVERIFY(tracker.shouldShowStartupRecoveryNotification());
@@ -344,8 +372,8 @@ void IntegrationTest::test_integration_retention_cleanup_preserves_current()
     Settings settings(createSettingsFile(tempDir.path(), 2)); // Keep 2 days
     SqliteSessionStore manager(settings);
 
-    QDateTime now = QDateTime::currentDateTimeUtc();
-    
+    QDateTime now = fixedNowUtc();
+
     // Insert data from 5 days ago (should be deleted)
     std::deque<TimeDuration> old;
     old.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addDays(-5), now.addDays(-5).addSecs(60)));
@@ -382,7 +410,7 @@ void IntegrationTest::test_integration_duplicate_prevention()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore manager(settings);
 
-    QDateTime start = QDateTime::currentDateTime();
+    QDateTime start = fixedNow();
     QDateTime end = start.addSecs(10);
     
     // Insert same segment twice via update-by-id; second call updates same row.
@@ -721,8 +749,8 @@ void IntegrationTest::test_Y_engine_scheduled_stop_emits_MidnightScheduled()
     QVERIFY(tracker.isActive());
 
     // Add a completed same-day segment so we can verify it is preserved.
-    const QDateTime segStart = QDateTime::currentDateTime().addSecs(-30);
-    const QDateTime segEnd   = QDateTime::currentDateTime().addSecs(-5);
+    const QDateTime segStart = clock.now().addSecs(-30);
+    const QDateTime segEnd   = clock.now().addSecs(-5);
     tracker.addDuration_dbg(DurationType::Activity, segStart, segEnd);
     QVERIFY(!tracker.completedTimeline().completed().empty());
     fakeDb.callLog.clear();
@@ -1264,7 +1292,7 @@ void IntegrationTest::test_A_toggle_ongoing_to_pause_crash_recovery_uses_refresh
 
         // Seam-driven clock: advance instead of sleeping through the flow.
         // FakeClock declared before TimeTracker: see outlives-tracker note above
-        FakeClock clock(QDateTime::currentDateTime().addSecs(-10));
+        FakeClock clock(fixedNow().addSecs(-10));
         TimeTracker tracker(settings, db);
         tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
@@ -1335,7 +1363,7 @@ void IntegrationTest::test_A_toggle_ongoing_to_pause_crash_recovery_uses_refresh
         }
 
         // Run recovery.
-        const QDateTime now = QDateTime::currentDateTime();
+        const QDateTime now = fixedNow();
         StartupRecoveryResult result = db.recoverStartupCheckpoints(now);
         QVERIFY(result.ok());
         QVERIFY(result.finalized_count >= 1);
@@ -1380,7 +1408,7 @@ void IntegrationTest::test_A3_exit_anyway_leaves_checkpoint_untouched_for_recove
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
         // FakeClock declared before TimeTracker: see outlives-tracker note above
-        FakeClock clock(QDateTime::currentDateTime().addSecs(-30));
+        FakeClock clock(fixedNow().addSecs(-30));
         TimeTracker tracker(settings, db);
         tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
@@ -1422,9 +1450,13 @@ void IntegrationTest::test_A3_exit_anyway_leaves_checkpoint_untouched_for_recove
     // Session 2: real reopen. Startup recovery must finalize exactly the
     // durable 20 s checkpoint -- no more, no less -- and must not duplicate
     // it, proving Exit Anyway left the durable checkpoint untouched.
+    // D15/F1: pin "now" to fixedNow() -- see the same comment in
+    // test_integration_checkpoint_recovery_on_restart() above.
     Settings settings(settingsPath);
     SqliteSessionStore db2(settings);
+    FakeClock reopenedClock(fixedNow());
     TimeTracker reopened(settings, db2);
+    reopened.setNowProvider_dbg([&reopenedClock]() { return reopenedClock.now(); });
     reopened.initializeFromStore();
 
     QCOMPARE(reopened.getStartupRecoveredMsec(), static_cast<qint64>(20000));

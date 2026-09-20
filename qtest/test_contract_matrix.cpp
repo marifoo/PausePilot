@@ -21,6 +21,7 @@
 #include <QSqlQuery>
 
 using TestCommon::createSettingsFile;
+using TestCommon::fixedNowUtc;
 
 // C4 (R02-003/"done when"): this file has one section below per
 // SessionStore::Operation. If SessionStore grows a 12th virtual, add its
@@ -336,7 +337,7 @@ void ContractMatrixTest::test_saveCheckpoint_disabled_returns_Disabled()
     SqliteSessionStore db(Settings(disabledSettings(dir)));
 
     const SessionStoreResult r = db.saveCheckpoint(DurationType::Activity,
-        QDateTime::currentDateTimeUtc(), QDateTime::currentDateTimeUtc().addSecs(60),
+        fixedNowUtc(), fixedNowUtc().addSecs(60),
         SegmentId::mint());
     QCOMPARE(r.category, SessionStoreResult::Disabled);
     QVERIFY(!r.ok());
@@ -363,7 +364,7 @@ void ContractMatrixTest::test_saveCheckpoint_callerBug_empty_segmentId()
     db.checkSchemaOnStartup();
 
     const SessionStoreResult r = db.saveCheckpoint(DurationType::Activity,
-        QDateTime::currentDateTimeUtc(), QDateTime::currentDateTimeUtc().addSecs(60),
+        fixedNowUtc(), fixedNowUtc().addSecs(60),
         SegmentId{});
     QCOMPARE(r.category, SessionStoreResult::CallerBug);
     // transient/fatal: ensureOpen() failure returns TransientError (C4/R07-003)
@@ -390,7 +391,7 @@ void ContractMatrixTest::test_saveCheckpoint_callerBug_invalid_interval()
 
     // Reversed interval (end before start) -- a NonPositive violation.
     const SessionStoreResult r = db.saveCheckpoint(DurationType::Activity,
-        QDateTime::currentDateTimeUtc(), QDateTime::currentDateTimeUtc().addSecs(-60),
+        fixedNowUtc(), fixedNowUtc().addSecs(-60),
         SegmentId::mint());
     QCOMPARE(r.category, SessionStoreResult::CallerBug);
 }

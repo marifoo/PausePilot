@@ -6,6 +6,7 @@
 #include <algorithm>
 
 using TestCommon::createSettingsFile;
+using TestCommon::fixedNow;
 using TestCommon::sumDurations;
 
 void TimerTest::initTestCase()
@@ -88,12 +89,17 @@ void TimerTest::test_timer_manual_checkpoint_preserves_ongoing_duration()
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
+    // D15/F1: deterministic clock so Start's segment_start_time and the
+    // checkpoint end below are guaranteed same-day -- see the house
+    // convention at test_timer_set_duration_type() above.
+    FakeClock clock(fixedNow());
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(100); // Ensure elapsed > 0
+    clock.advance(100); // Ensure elapsed > 0
 
     // Act
-    tracker.saveCheckpoint_locked_dbg(QDateTime::currentDateTime());
+    tracker.saveCheckpoint_locked_dbg(clock.now());
 
     // Assert: the checkpoint is actually written to the store (savedCheckpoints
     // is the real teeth here -- getOngoingDuration() alone depends only on
@@ -800,8 +806,8 @@ void TimerTest::test_addduration_appends_single_same_day_segment()
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
 
-    QDateTime start = QDateTime::currentDateTime().addSecs(-60);
-    QDateTime end = QDateTime::currentDateTime();
+    QDateTime start = fixedNow().addSecs(-60);
+    QDateTime end = fixedNow();
 
     // Act
     tracker.addDuration_dbg(DurationType::Activity, start, end);
@@ -2134,8 +2140,8 @@ void TimerTest::test_T2_replaceCurrentDurations_skips_checkpoint_while_dialog_op
     QTest::qWait(10);
 
     // Build a plausible ongoing segment for replaceCurrentDurations to adopt.
-    const QDateTime start = QDateTime::currentDateTime().addSecs(-60);
-    const QDateTime end   = QDateTime::currentDateTime();
+    const QDateTime start = fixedNow().addSecs(-60);
+    const QDateTime end   = fixedNow();
     TimeDuration ongoing = TimeDuration::fromLiveSession(DurationType::Activity, start, end, SegmentId::fromString("seg-001"));
 
     tracker.beginExclusiveEdit();
@@ -2168,8 +2174,8 @@ void TimerTest::test_C6_replaceCurrentDurations_writes_checkpoint_after_endExclu
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
 
-    const QDateTime start = QDateTime::currentDateTime().addSecs(-60);
-    const QDateTime end   = QDateTime::currentDateTime();
+    const QDateTime start = fixedNow().addSecs(-60);
+    const QDateTime end   = fixedNow();
     TimeDuration ongoing = TimeDuration::fromLiveSession(DurationType::Activity, start, end, SegmentId::fromString("seg-002"));
 
     tracker.beginExclusiveEdit();
@@ -2513,7 +2519,7 @@ void TimerTest::test_commitEditedTimeline_clears_anchor_when_no_ongoing()
     QVERIFY(tracker.isCheckpointTimerActive_dbg());
 
     // Build an edited timeline with completed segments but NO ongoing segment.
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     std::deque<TimeDuration> completed;
     auto seg = TimeDuration::create(DurationType::Activity, now.addSecs(-60), now);
     QVERIFY(seg.has_value());
@@ -2580,7 +2586,7 @@ void TimerTest::test_commitEditedTimeline_clears_anchor_when_no_ongoing_from_pau
     // could not fail once isPaused() is established above.)
 
     // Build an edited timeline with completed segments but NO ongoing segment.
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     std::deque<TimeDuration> completed;
     auto seg = TimeDuration::create(DurationType::Activity, now.addSecs(-60), now);
     QVERIFY(seg.has_value());

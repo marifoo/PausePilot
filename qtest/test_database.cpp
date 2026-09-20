@@ -7,6 +7,8 @@
 #endif
 
 using TestCommon::createSettingsFile;
+using TestCommon::fixedNow;
+using TestCommon::fixedNowUtc;
 using TestCommon::mk;
 
 void DatabaseTest::initTestCase()
@@ -32,7 +34,7 @@ void DatabaseTest::test_database_replaceAll_persists_durations_when_retention_en
     QVERIFY(manager.ensureOpen_dbg()); // no-op but should succeed
 
     std::deque<TimeDuration> durations;
-    QDateTime now = QDateTime::currentDateTimeUtc();
+    QDateTime now = fixedNowUtc();
     durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addDays(-3), now.addDays(-3).addSecs(60)));
     durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addDays(-1), now.addDays(-1).addSecs(60)));
     durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now, now.addSecs(60)));
@@ -62,7 +64,7 @@ void DatabaseTest::test_database_disabled_history_ignores_writes_and_returns_no_
     Settings disabled(createSettingsFile(tempDir.path(), 0));
     SqliteSessionStore managerDisabled(disabled);
     std::deque<TimeDuration> durations;
-    QDateTime now = QDateTime::currentDateTimeUtc();
+    QDateTime now = fixedNowUtc();
     durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now, now.addSecs(60)));
 
     // Act
@@ -348,7 +350,7 @@ void DatabaseTest::test_database_transaction_rollback_on_replace_failure()
     SqliteSessionStore manager(settings);
 
     // Create initial data
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     std::deque<TimeDuration> originalData;
     originalData.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-190)));
     originalData.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-180), now.addSecs(-170)));
@@ -385,7 +387,7 @@ void DatabaseTest::test_database_checkpoint_single_row_per_segment()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore manager(settings);
 
-    QDateTime start = QDateTime::currentDateTime();
+    QDateTime start = fixedNow();
     QDateTime end = start.addSecs(10);
     const SegmentId segmentId = SegmentId::mint();
 
@@ -417,7 +419,7 @@ void DatabaseTest::test_database_checkpoint_missing_segment_reinserts_same_segme
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore manager(settings);
 
-    QDateTime start = QDateTime::currentDateTime();
+    QDateTime start = fixedNow();
     QDateTime end = start.addSecs(10);
     const SegmentId segmentId = SegmentId::mint();
 
@@ -457,7 +459,7 @@ void DatabaseTest::test_database_checkpoint_preserves_start_time()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore manager(settings);
 
-    QDateTime originalStart = QDateTime::currentDateTime();
+    QDateTime originalStart = fixedNow();
     QDateTime firstEnd = originalStart.addSecs(10);
     const SegmentId checkpointSegmentId = SegmentId::mint();
 
@@ -489,7 +491,7 @@ void DatabaseTest::test_database_update_by_id_insert_mode()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore manager(settings);
 
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     std::deque<TimeDuration> durations;
     durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-90)));
     durations.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-80), now.addSecs(-70)));
@@ -509,7 +511,7 @@ void DatabaseTest::test_database_update_by_id_updates_existing_row_on_start_drif
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore manager(settings);
 
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     QDateTime start1 = now.addSecs(-100);
     QDateTime end1 = now.addSecs(-90);
     
@@ -544,7 +546,7 @@ void DatabaseTest::test_database_update_by_id_different_segments_same_start_both
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore manager(settings);
 
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     QDateTime start = now.addSecs(-100);
     
     // Insert Activity at same start time
@@ -692,7 +694,7 @@ void DatabaseTest::test_database_timezone_roundtrip()
     SqliteSessionStore manager(settings);
 
     // Create duration in local time
-    QDateTime localStart = QDateTime::currentDateTime();
+    QDateTime localStart = fixedNow();
     QDateTime localEnd = localStart.addSecs(60);
     
     std::deque<TimeDuration> durations;
@@ -950,7 +952,7 @@ void DatabaseTest::test_database_millisecond_precision()
     SqliteSessionStore manager(settings);
 
     // Create timestamps with millisecond precision
-    QDateTime start = QDateTime::currentDateTime();
+    QDateTime start = fixedNow();
     qint64 startMsec = start.toMSecsSinceEpoch();
     startMsec = (startMsec / 1000) * 1000 + 123; // Set milliseconds to 123
     start = QDateTime::fromMSecsSinceEpoch(startMsec);
@@ -1018,7 +1020,7 @@ void DatabaseTest::test_database_backup_file_creation()
     // replaceAll() is the only public write path that creates a backup
     // (D11: commitSession() never backs up -- see
     // test_W_backup_created_before_replaceAll_not_commitSession).
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     std::deque<TimeDuration> durations;
     durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-90)));
 
@@ -1038,7 +1040,7 @@ void DatabaseTest::test_database_backup_preserves_contents()
     SqliteSessionStore manager(settings);
 
     // Create data
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     std::deque<TimeDuration> original;
     original.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-90)));
     original.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-80), now.addSecs(-70)));
@@ -1080,7 +1082,7 @@ void DatabaseTest::test_database_backup_filenames_collision_free()
     QDir testDir(data_dir_.path());
     const int backupsBefore = testDir.entryList(QStringList() << "*.backup", QDir::Files).size();
 
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     std::deque<TimeDuration> durations;
     durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-90)));
 
@@ -1142,7 +1144,7 @@ void DatabaseTest::test_hasEntriesForDate_returns_yes_when_entries_exist()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore manager(settings);
 
-    QDateTime now = QDateTime::currentDateTimeUtc();
+    QDateTime now = fixedNowUtc();
     std::deque<TimeDuration> durations;
     durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-60), now));
     QVERIFY(manager.commitSession(Timeline(durations, std::nullopt)).ok());
@@ -1533,7 +1535,7 @@ void DatabaseTest::test_retention_cleanup_retries_after_failure()
 
     {
         SqliteSessionStore seed(settings);
-        QDateTime now = QDateTime::currentDateTimeUtc();
+        QDateTime now = fixedNowUtc();
         std::deque<TimeDuration> durations;
         durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addDays(-10), now.addDays(-10).addSecs(60)));
         durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-60), now));
@@ -1653,7 +1655,7 @@ void DatabaseTest::test_T_commitSession_upserts_by_segment_id()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore manager(settings);
 
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     SegmentId segId = SegmentId::mint();
     std::deque<TimeDuration> segs;
     segs.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-60), now, segId));
@@ -1686,7 +1688,7 @@ void DatabaseTest::test_U_commitSession_orphan_cleanup_is_internal()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore manager(settings);
 
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     SegmentId segA = SegmentId::mint();
     SegmentId segB = SegmentId::mint();
 
@@ -1740,7 +1742,7 @@ void DatabaseTest::test_V_replaceAll_wipes_and_rewrites()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore manager(settings);
 
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
 
     // Seed 3 rows
     std::deque<TimeDuration> initial;
@@ -1777,7 +1779,7 @@ void DatabaseTest::test_W_backup_created_before_replaceAll_not_commitSession()
     QDir appDir(data_dir_.path());
     QStringList before = appDir.entryList(QStringList() << "*.backup", QDir::Files);
 
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     std::deque<TimeDuration> segs;
     segs.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-60), now));
 
@@ -4058,7 +4060,7 @@ void DatabaseTest::test_C2_replaceAll_rolls_back_on_commit_failure()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore manager(settings);
 
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     std::deque<TimeDuration> original;
     original.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-300), now.addSecs(-200)));
     original.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-200), now.addSecs(-100)));
@@ -4200,7 +4202,7 @@ void DatabaseTest::test_C2_replaceAll_fails_on_commit_failure_with_empty_error_t
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore manager(settings);
 
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     std::deque<TimeDuration> original;
     original.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-300), now.addSecs(-200)));
     original.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-200), now.addSecs(-100)));
@@ -4257,7 +4259,7 @@ void DatabaseTest::test_C2_updateDurationsById_rolls_back_on_commit_failure()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore manager(settings);
 
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     std::deque<TimeDuration> original;
     original.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-300), now.addSecs(-200)));
     QVERIFY(manager.commitSession(Timeline(original, std::nullopt)).ok());
@@ -4314,7 +4316,7 @@ void DatabaseTest::test_C2_replaceAll_preserves_commit_error_when_rollback_also_
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore manager(settings);
 
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     std::deque<TimeDuration> original;
     original.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-300), now.addSecs(-200)));
     original.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-200), now.addSecs(-100)));

@@ -14,6 +14,7 @@
 #include "fakeclock.h"
 
 using TestCommon::createSettingsFile;
+using TestCommon::fixedNow;
 using TestCommon::mk;
 using TestCommon::sumDurations;
 
@@ -42,7 +43,7 @@ void HistoryDialogTest::test_historydialog_createPages_includes_current_db_ongoi
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore db(settings);
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     // FakeClock declared before TimeTracker so it outlives it (see the
     // outlives-tracker note at test_integration.cpp:614).
     FakeClock clock(now);
@@ -82,7 +83,7 @@ void HistoryDialogTest::test_historydialog_createPages_dedups_db_row_with_small_
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = fixedNow();
     const QDateTime memoryStart = now.addSecs(-40).addMSecs(2);
     const QDateTime memoryEnd = now.addSecs(-10);
     const SegmentId segmentId = SegmentId::mint();
@@ -178,7 +179,7 @@ void HistoryDialogTest::test_historydialog_checkbox_toggle_updates_pending_and_t
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
 
     HistoryDialog dialog(tracker, settings);
@@ -201,7 +202,7 @@ void HistoryDialogTest::test_historydialog_saveChanges_updates_timetracker_and_d
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-150)));
 
     std::deque<TimeDuration> dbDurations;
@@ -231,8 +232,8 @@ void HistoryDialogTest::test_historydialog_split_action_splits_row()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    QDateTime start = QDateTime::currentDateTime().addSecs(-10);
-    QDateTime end = QDateTime::currentDateTime().addSecs(-4);
+    QDateTime start = fixedNow().addSecs(-10);
+    QDateTime end = fixedNow().addSecs(-4);
     const TimeDuration seeded = TimeDuration::fromPersistedRow(DurationType::Activity, start, end);
     tracker.seedCompletedDuration_dbg(seeded);
     const SegmentId originalSegmentId = seeded.segment_id;
@@ -265,7 +266,7 @@ void HistoryDialogTest::test_historydialog_split_today_mixed_origins_routes_to_c
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = fixedNow();
     const QDateTime memStart = now.addSecs(-20);
     const QDateTime memEnd = now.addSecs(-12);
     const QDateTime dbStart = now.addSecs(-11);
@@ -367,7 +368,7 @@ void HistoryDialogTest::test_historydialog_save_unrelated_edit_preserves_row_and
     SqliteSessionStore db2(settings);
     // FakeClock declared before TimeTracker so it outlives it (see the
     // outlives-tracker note at test_integration.cpp:614).
-    FakeClock clock(QDateTime::currentDateTime());
+    FakeClock clock(fixedNow());
     TimeTracker tracker(settings, db2);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
@@ -454,7 +455,7 @@ void HistoryDialogTest::test_historydialog_pauses_checkpoint_timer_for_dialog_li
     SqliteSessionStore db2(settings);
     // FakeClock declared before TimeTracker so it outlives it (see the
     // outlives-tracker note at test_integration.cpp:614).
-    FakeClock clock(QDateTime::currentDateTime());
+    FakeClock clock(fixedNow());
     TimeTracker tracker(settings, db2);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
@@ -525,7 +526,7 @@ void HistoryDialogTest::test_historydialog_save_keeps_db_rows_for_history_plus_c
     historicalRows.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, historicalStart, historicalEnd));
     QVERIFY(tracker.replaceAll(Timeline(historicalRows, std::nullopt), Timeline({}, std::nullopt)).ok());
 
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = fixedNow();
     tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-30), now.addSecs(-20)));
     tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-20), now.addSecs(-10)));
 
@@ -581,7 +582,7 @@ void HistoryDialogTest::test_historydialog_save_then_crash_reopen_retains_curren
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-        const QDateTime now = QDateTime::currentDateTime();
+        const QDateTime now = fixedNow();
         tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-15), now.addSecs(-5)));
 
         HistoryDialog dialog(tracker, settings);
@@ -628,7 +629,7 @@ void HistoryDialogTest::test_historydialog_save_uses_ongoing_snapshot_endtime_af
     SqliteSessionStore db(settings);
     // FakeClock declared before TimeTracker so it outlives it (see the
     // outlives-tracker note at test_integration.cpp:614).
-    FakeClock clock(QDateTime::currentDateTime());
+    FakeClock clock(fixedNow());
     TimeTracker tracker(settings, db);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
@@ -690,7 +691,7 @@ void HistoryDialogTest::test_historydialog_save_failed_db_replace_keeps_runtime_
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = fixedNow();
     const QDateTime memStart = now.addSecs(-30);
     const QDateTime memEnd = now.addSecs(-20);
     const QDateTime dbStart = now.addSecs(-19);
@@ -858,7 +859,7 @@ void HistoryDialogTest::test_R_round_trip_type_toggle_via_accept()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = fixedNow();
     tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
 
@@ -892,7 +893,7 @@ void HistoryDialogTest::test_S_cancel_preserves_state()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = fixedNow();
     tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
 
@@ -1110,7 +1111,7 @@ void HistoryDialogTest::test_H3_ongoing_type_edit_preserved_when_engine_stops()
     SqliteSessionStore db(settings);
     // FakeClock declared before TimeTracker so it outlives it (see the
     // outlives-tracker note at test_integration.cpp:614).
-    FakeClock clock(QDateTime::currentDateTime());
+    FakeClock clock(fixedNow());
     TimeTracker tracker(settings, db);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
@@ -1355,7 +1356,7 @@ void HistoryDialogTest::test_H6_split_dialog_preset_from_source_row_type()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = fixedNow();
     // Row 0 is Pause, row 1 is Activity — exercise both directions of the preset.
     tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-20), now.addSecs(-14)));
@@ -1387,7 +1388,7 @@ void HistoryDialogTest::test_F1_saveChanges_refuses_when_history_load_failed()
     fakeDb.loadDurationsResult.status = SessionStoreResult::TransientError;
     TimeTracker tracker(settings, fakeDb);
 
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = fixedNow();
     tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
 
@@ -1434,7 +1435,7 @@ void HistoryDialogTest::test_C3_saveChanges_refuses_when_edit_creates_violation(
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
 
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = fixedNow();
     const SegmentId activityId = SegmentId::mint();
     const SegmentId pauseId = SegmentId::mint();
     // Originally non-overlapping.
@@ -1476,7 +1477,7 @@ void HistoryDialogTest::test_C3_saveChanges_drops_pre_existing_overlap_and_succe
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
 
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = fixedNow();
     // Pre-existing DB overlap: Activity 400-300s ago, Pause 350-250s ago.
     const SegmentId activityId = SegmentId::mint();
     const SegmentId pauseId = SegmentId::mint();
@@ -1534,8 +1535,8 @@ void HistoryDialogTest::test_R13_001_multiboundary_row_dropped_by_unrelated_save
     const QDateTime multiBoundaryEnd(QDate::currentDate(), QTime(1, 0, 0));
 
     // An ordinary same-day row the user will edit.
-    const QDateTime ordinaryStart = QDateTime::currentDateTime().addSecs(-100);
-    const QDateTime ordinaryEnd   = QDateTime::currentDateTime().addSecs(-50);
+    const QDateTime ordinaryStart = fixedNow().addSecs(-100);
+    const QDateTime ordinaryEnd   = fixedNow().addSecs(-50);
     tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, ordinaryStart, ordinaryEnd));
 
@@ -1620,8 +1621,8 @@ void HistoryDialogTest::test_C3_single_boundary_cross_midnight_dropped_by_unrela
     const QDateTime crossMidnightEnd(QDate::currentDate(), QTime(0, 10, 0));
 
     // An ordinary same-day row the user will edit.
-    const QDateTime ordinaryStart = QDateTime::currentDateTime().addSecs(-100);
-    const QDateTime ordinaryEnd   = QDateTime::currentDateTime().addSecs(-50);
+    const QDateTime ordinaryStart = fixedNow().addSecs(-100);
+    const QDateTime ordinaryEnd   = fixedNow().addSecs(-50);
     tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, ordinaryStart, ordinaryEnd));
 
@@ -1694,7 +1695,7 @@ void HistoryDialogTest::test_C4_historydialog_shows_own_critical_when_already_la
     tracker.replaceAll(Timeline({}, std::nullopt), Timeline({}, std::nullopt));
     QVERIFY(tracker.isFatalLatched());
 
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = fixedNow();
     tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
 
@@ -1722,7 +1723,7 @@ void HistoryDialogTest::test_C4_historydialog_suppresses_own_critical_when_this_
     // Arrange: NOT latched before this dialog's own save.
     QVERIFY(!tracker.isFatalLatched());
 
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = fixedNow();
     tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
 
@@ -1756,7 +1757,7 @@ void HistoryDialogTest::test_D5_dialog_opened_after_cancelShutdown_saves_success
     FakeSessionStore fakeDb;
     // FakeClock declared before TimeTracker so it outlives it (see the
     // outlives-tracker note at test_integration.cpp:614).
-    FakeClock clock(QDateTime::currentDateTime());
+    FakeClock clock(fixedNow());
     TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     ShutdownCoordinator coordinator(tracker, fakeDb);
@@ -1773,7 +1774,7 @@ void HistoryDialogTest::test_D5_dialog_opened_after_cancelShutdown_saves_success
     // A completed segment to edit -- withSegmentType(0, ...) below needs a
     // completed() entry at index 0. No new Start here: D5 requires History
     // to work immediately after cancellation, not after a fresh session.
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = fixedNow();
     tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-150)));
 
@@ -1800,7 +1801,7 @@ void HistoryDialogTest::test_D5_dialog_spanning_cancelled_shutdown_refuses_save(
     FakeSessionStore fakeDb;
     // FakeClock declared before TimeTracker so it outlives it (see the
     // outlives-tracker note at test_integration.cpp:614).
-    FakeClock clock(QDateTime::currentDateTime());
+    FakeClock clock(fixedNow());
     TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     ShutdownCoordinator coordinator(tracker, fakeDb);
@@ -1809,7 +1810,7 @@ void HistoryDialogTest::test_D5_dialog_spanning_cancelled_shutdown_refuses_save(
     clock.advance(20);
     // A completed segment to edit -- withSegmentType(0, ...) below needs a
     // completed() entry at index 0, not just the live ongoing segment.
-    const QDateTime now = QDateTime::currentDateTime();
+    const QDateTime now = fixedNow();
     tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-150)));
 
@@ -1851,8 +1852,8 @@ void HistoryDialogTest::test_D9_split_updates_table_rowcount_and_title_and_highl
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    QDateTime start = QDateTime::currentDateTime().addSecs(-10);
-    QDateTime end = QDateTime::currentDateTime().addSecs(-2);
+    QDateTime start = fixedNow().addSecs(-10);
+    QDateTime end = fixedNow().addSecs(-2);
     tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryDialog dialog(tracker, settings);
@@ -1887,7 +1888,7 @@ void HistoryDialogTest::test_D9_checkbox_toggle_highlights_row_and_marks_dirty()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
 
     HistoryDialog dialog(tracker, settings);
@@ -1913,7 +1914,7 @@ void HistoryDialogTest::test_D9_ongoing_toggle_highlights_row()
     SqliteSessionStore db(settings);
     // FakeClock declared before TimeTracker so it outlives it (see the
     // outlives-tracker note at test_integration.cpp:614).
-    FakeClock clock(QDateTime::currentDateTime());
+    FakeClock clock(fixedNow());
     TimeTracker tracker(settings, db);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
@@ -1981,8 +1982,8 @@ void HistoryDialogTest::test_D9_cancel_after_split_and_toggle_preserves_runtime_
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
 
-    QDateTime start = QDateTime::currentDateTime().addSecs(-10);
-    QDateTime end = QDateTime::currentDateTime().addSecs(-2);
+    QDateTime start = fixedNow().addSecs(-10);
+    QDateTime end = fixedNow().addSecs(-2);
     tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     {
@@ -2026,7 +2027,7 @@ void HistoryDialogTest::test_D9_toggle_off_then_on_clears_highlight_and_dirty_st
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
 
@@ -2052,7 +2053,7 @@ void HistoryDialogTest::test_D9_toggle_twice_clears_highlight()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    QDateTime now = QDateTime::currentDateTime();
+    QDateTime now = fixedNow();
     tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
 
@@ -2079,7 +2080,7 @@ void HistoryDialogTest::test_D9_ongoing_toggle_then_navigate_away_and_back_highl
     SqliteSessionStore db(settings);
     // FakeClock declared before TimeTracker so it outlives it (see the
     // outlives-tracker note at test_integration.cpp:614).
-    FakeClock clock(QDateTime::currentDateTime());
+    FakeClock clock(fixedNow());
     TimeTracker tracker(settings, db);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 

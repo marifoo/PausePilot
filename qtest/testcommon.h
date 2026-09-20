@@ -34,6 +34,28 @@ QString createSettingsFile(const QString& dirPath, int historyDays);
 // Sums all durations of a specific type from a deque
 qint64 sumDurations(const std::deque<TimeDuration>& d, DurationType type);
 
+/// D15 (F1): a stand-in for QDateTime::currentDateTime() in fixtures that
+/// only need "some recent instant" to build a duration via addSecs() offsets.
+/// Real wall-clock time crosses local midnight for roughly nine minutes a
+/// day; a fixture built from it then intermittently produces a cross-day
+/// interval, which Timeline's assertSameDayInvariant() (timeline.cpp) aborts
+/// the whole qtest binary over. Local noon is at least 9.5 hours from
+/// midnight in every real zone and never inside a DST transition, so it is
+/// safe for offsets much larger than any fixture here uses. Deliberately
+/// Qt::LocalTime, not Qt::UTC: a fixed UTC instant's local time-of-day still
+/// depends on the zone the test runs in and can itself land near midnight.
+/// The date component tracks QDate::currentDate() (only the time-of-day is
+/// pinned) so it stays "today" for fixtures that also do day-relative
+/// lookups (e.g. History's page-0-is-today grouping).
+QDateTime fixedNow();
+
+/// Same instant as fixedNow(), re-expressed with a Qt::UTC timeSpec, for
+/// fixtures that specifically exercise UTC storage/round-trip behavior and
+/// would otherwise call QDateTime::currentDateTimeUtc(). isCrossMidnight()
+/// compares the underlying instant regardless of timeSpec, so this remains
+/// exactly as midnight-safe as fixedNow() itself.
+QDateTime fixedNowUtc();
+
 /// D1 (R16-002/R08-004/R13-002/R04-004): one shared data table for day-
 /// membership/overlap semantics. Consumed directly by the primitive
 /// (test_dayvalidity.cpp, every row). The store's
