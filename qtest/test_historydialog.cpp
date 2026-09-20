@@ -2156,7 +2156,7 @@ void HistoryDialogTest::test_D9_split_too_short_row_does_not_open_modal()
     // would open a real modal under offscreen QPA and dlg.exec() below would
     // block this test forever. Auto-close any modal that appears so the
     // assertion fails cleanly instead of hanging the whole suite.
-    QTimer::singleShot(200, []() {
+    QTimer::singleShot(200, &dialog, []() {
         if (QWidget* w = QApplication::activeModalWidget())
             w->close();
     });

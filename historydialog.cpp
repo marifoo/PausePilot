@@ -188,14 +188,15 @@ bool HistoryDialog::saveChanges()
     // Step 3: Confirm if normalization merged overlapping segments.
     if (payload.needsMergeConfirmation) {
 #ifndef QT_NO_DEBUG
-        QMessageBox::StandardButton answer = QMessageBox::Yes;
+        // Default to No (abort the save) rather than exec()-ing a real
+        // QMessageBox::question() when a test hits this path without setting
+        // debugOverlapAnswer_ -- under offscreen QPA that dialog has nothing to
+        // dismiss it and would hang the run instead of failing the assertion on
+        // saveChanges()'s return value.
+        QMessageBox::StandardButton answer = QMessageBox::No;
         if (debugOverlapAnswer_.has_value()) {
             answer = *debugOverlapAnswer_;
             debugOverlapAnswer_ = std::nullopt;
-        } else {
-            answer = QMessageBox::question(this, "Overlapping Segments",
-                "Overlapping segments were detected and will be merged. Continue?",
-                QMessageBox::Yes | QMessageBox::No);
         }
 #else
         const auto answer = QMessageBox::question(this, "Overlapping Segments",

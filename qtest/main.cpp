@@ -27,6 +27,7 @@ class RenamesTest;
 class PersistenceContractTest;
 class ContractMatrixTest;
 class DayValidityTest;
+class SelfTestAggregateTest;
 
 // Include test class headers
 #include "test_logger.h"
@@ -47,6 +48,7 @@ class DayValidityTest;
 #include "test_persistence_contract.h"
 #include "test_contract_matrix.h"
 #include "test_dayvalidity.h"
+#include "test_selftest_aggregate.h"
 
 // ---------------------------------------------------------------------------
 // QWARN counter: pipe-based stdout tee (POSIX/Linux only)
@@ -139,6 +141,18 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     int status = 0;
 
+    // D13d: dedicated self-test child mode, used only by SelfTestAggregateTest
+    // (test_selftest_aggregate.cpp) to verify this file's own pass/fail/QWARN
+    // aggregation actually works. Never set during a normal run -- it is only
+    // ever passed by SelfTestAggregateTest launching this binary as a child
+    // process -- so it can never make the normal 19-suite run below execute a
+    // deliberately failing or QWARN-emitting suite.
+    const char* selfTestChildMode = nullptr;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--self-test-child=fail") == 0) selfTestChildMode = "fail";
+        else if (std::strcmp(argv[i], "--self-test-child=warn") == 0) selfTestChildMode = "warn";
+    }
+
     // Lambda to run a test suite and track failures
     auto runTest = [&](auto* test, const char* name) {
         qDebug() << "\n================" << name << "================";
@@ -150,25 +164,49 @@ int main(int argc, char *argv[])
         return result;
     };
 
-    // Run test suites
-    runTest(new LoggerTest, "LoggerTest");
-    runTest(new SettingsTest, "SettingsTest");
-    runTest(new HelpersTest, "HelpersTest");
-    runTest(new LockStateWatcherTest, "LockStateWatcherTest");
-    runTest(new CleanDurationsTest, "CleanDurationsTest");
-    runTest(new TimerTest, "TimerTest");
-    runTest(new DatabaseTest, "DatabaseTest");
-    runTest(new IntegrationTest, "IntegrationTest");
-    runTest(new HistoryDialogTest, "HistoryDialogTest");
-    runTest(new HistoryEditSessionTest, "HistoryEditSessionTest");
-    runTest(new HistoryCommitTest, "HistoryCommitTest");
-    runTest(new ShutdownCoordinatorTest, "ShutdownCoordinatorTest");
-    runTest(new HealthMonitorTest, "HealthMonitorTest");
-    runTest(new TimelineTest, "TimelineTest");
-    runTest(new RenamesTest, "RenamesTest");
-    runTest(new PersistenceContractTest, "PersistenceContractTest");
-    runTest(new ContractMatrixTest, "ContractMatrixTest");
-    runTest(new DayValidityTest, "DayValidityTest");
+    // Same as runTest, but without forwarding argc/argv: QTest::qExec()
+    // treats unrecognized arguments as test-function-name filters, and this
+    // process's own argv carries the --self-test-child= flag, which is not a
+    // test function.
+    auto runChildTest = [&](auto* test, const char* name) {
+        qDebug() << "\n================" << name << "================";
+        int result = QTest::qExec(test);
+        delete test;
+        if (result != 0) {
+            status = result;
+        }
+        return result;
+    };
+
+    if (selfTestChildMode) {
+        if (std::strcmp(selfTestChildMode, "fail") == 0) {
+            runChildTest(new SelfTestChildFailSuite, "SelfTestChildFailSuite");
+            runChildTest(new SelfTestChildPassSuite, "SelfTestChildPassSuite");
+        } else {
+            runChildTest(new SelfTestChildWarnSuite, "SelfTestChildWarnSuite");
+        }
+    } else {
+        // Run test suites
+        runTest(new LoggerTest, "LoggerTest");
+        runTest(new SettingsTest, "SettingsTest");
+        runTest(new HelpersTest, "HelpersTest");
+        runTest(new LockStateWatcherTest, "LockStateWatcherTest");
+        runTest(new CleanDurationsTest, "CleanDurationsTest");
+        runTest(new TimerTest, "TimerTest");
+        runTest(new DatabaseTest, "DatabaseTest");
+        runTest(new IntegrationTest, "IntegrationTest");
+        runTest(new HistoryDialogTest, "HistoryDialogTest");
+        runTest(new HistoryEditSessionTest, "HistoryEditSessionTest");
+        runTest(new HistoryCommitTest, "HistoryCommitTest");
+        runTest(new ShutdownCoordinatorTest, "ShutdownCoordinatorTest");
+        runTest(new HealthMonitorTest, "HealthMonitorTest");
+        runTest(new TimelineTest, "TimelineTest");
+        runTest(new RenamesTest, "RenamesTest");
+        runTest(new PersistenceContractTest, "PersistenceContractTest");
+        runTest(new ContractMatrixTest, "ContractMatrixTest");
+        runTest(new DayValidityTest, "DayValidityTest");
+        runTest(new SelfTestAggregateTest, "SelfTestAggregateTest");
+    }
 
     qDebug() << "\n================ All Tests Complete ================";
 

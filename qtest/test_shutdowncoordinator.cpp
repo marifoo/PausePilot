@@ -399,11 +399,12 @@ void ShutdownCoordinatorTest::test_A4_forced_shutdown_with_unresolved_discard_wr
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
+    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    // FakeClock declared before TimeTracker so it outlives it (see the
+    // ~TimeTracker() drain note in test_timer.cpp).
+    FakeClock clock(preMidnight);
     TimeTracker tracker(settings, fakeDb);
     ShutdownCoordinator coordinator(tracker, fakeDb);
-
-    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
-    FakeClock clock(preMidnight);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
 

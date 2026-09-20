@@ -35,6 +35,7 @@ SOURCES += \
     test_persistence_contract.cpp \
     test_contract_matrix.cpp \
     test_dayvalidity.cpp \
+    test_selftest_aggregate.cpp \
     $$PWD/../healthmonitor.cpp \
     $$PWD/../splitdialog.cpp \
     $$PWD/../historydialog.cpp \
@@ -70,6 +71,7 @@ HEADERS += \
     test_persistence_contract.h \
     test_contract_matrix.h \
     test_dayvalidity.h \
+    test_selftest_aggregate.h \
     $$PWD/../apppaths.h \
     $$PWD/../dayvalidity.h \
     $$PWD/../splitdialog.h \

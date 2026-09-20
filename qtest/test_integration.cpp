@@ -1565,9 +1565,9 @@ void IntegrationTest::test_D2_real_sqlite_backward_clock_stop_preserves_checkpoi
     // finalize the surviving checkpoint as real recovered time.
     Settings settings(settingsPath);
     SqliteSessionStore db2(settings);
-    TimeTracker reopened(settings, db2);
-    // reopened never transitions (mode_ stays None), so ~TimeTracker never reads now_provider_(): reopenClock may follow it.
+    // FakeClock declared before TimeTracker: see outlives-tracker note above
     FakeClock reopenClock(checkpointEnd.addSecs(60));
+    TimeTracker reopened(settings, db2);
     reopened.setNowProvider_dbg([&reopenClock]() { return reopenClock.now(); });
     reopened.initializeFromStore();
 
