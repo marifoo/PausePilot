@@ -11,23 +11,14 @@ using TestCommon::mk;
 
 void DatabaseTest::initTestCase()
 {
-    db_path_ = QDir(QCoreApplication::applicationDirPath()).filePath("uTimer.sqlite");
-    if (QFile::exists(db_path_)) {
-        db_backup_path_ = db_path_ + ".bak_test";
-        QFile::remove(db_backup_path_);
-        QVERIFY(QFile::rename(db_path_, db_backup_path_));
-    }
+    QVERIFY(data_dir_.isValid());
+    TestCommon::setDataDirOverride(data_dir_.path());
+    db_path_ = QDir(data_dir_.path()).filePath("uTimer.sqlite");
 }
 
 void DatabaseTest::cleanupTestCase()
 {
-    if (!db_path_.isEmpty()) {
-        QFile::remove(db_path_);
-    }
-    if (!db_backup_path_.isEmpty()) {
-        QFile::remove(db_path_);
-        QVERIFY(QFile::rename(db_backup_path_, db_path_));
-    }
+    TestCommon::clearDataDirOverride();
 }
 
 void DatabaseTest::test_database_backups_and_retention_and_disable()
@@ -997,7 +988,7 @@ void DatabaseTest::test_database_backup_file_creation()
     SqliteSessionStore manager(settings);
 
     // Snapshot existing artifacts so stale files from prior runs don't mask failures
-    QDir testDir(QCoreApplication::applicationDirPath());
+    QDir testDir(data_dir_.path());
     const int backupsBefore = testDir.entryList(QStringList() << "*.backup", QDir::Files).size();
     const int txtBefore     = testDir.entryList(QStringList() << "*.durations.txt", QDir::Files).size();
 
@@ -1029,10 +1020,6 @@ void DatabaseTest::test_database_backup_preserves_contents()
     original.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-90)));
     original.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-80), now.addSecs(-70)));
     
-    QDir testDir(QCoreApplication::applicationDirPath());
-    QStringList backupsBeforeList = testDir.entryList(QStringList() << "*.backup", QDir::Files);
-    QSet<QString> backupsBefore(backupsBeforeList.begin(), backupsBeforeList.end());
-
     QVERIFY(manager.commitSession(Timeline(original, std::nullopt)).ok());
 
     // Trigger backup via replaceAll — creates a backup of the 2-row DB, then writes 1 row
@@ -1040,17 +1027,10 @@ void DatabaseTest::test_database_backup_preserves_contents()
     replacement.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-50), now.addSecs(-40)));
     QVERIFY(manager.replaceAll(Timeline(replacement, std::nullopt), Timeline()).ok());
 
-    // Find backup files created by this test (delta from snapshot), sorted newest-first
-    QStringList allBackups = testDir.entryList(QStringList() << "*.backup", QDir::Files, QDir::Time);
-    QString newBackup;
-    for (const QString& f : allBackups) {
-        if (!backupsBefore.contains(f)) {
-            newBackup = f;
-            break; // newest new backup = the Replace backup containing 2 rows
-        }
-    }
-    QVERIFY2(!newBackup.isEmpty(), "No new backup file was created by this test");
-    QString backupPath = testDir.filePath(newBackup);
+    // Identify the exact backup replaceAll() wrote instead of scanning the
+    // data directory (mtime-ordered scans tie at millisecond granularity).
+    QString backupPath = manager.lastBackupPath_dbg();
+    QVERIFY2(!backupPath.isEmpty(), "No new backup file was created by this test");
 
     // Restore from backup and verify it has original data
     QFile::remove(db_path_);
@@ -1074,7 +1054,7 @@ void DatabaseTest::test_database_backup_filenames_collision_free()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore manager(settings);
 
-    QDir testDir(QCoreApplication::applicationDirPath());
+    QDir testDir(data_dir_.path());
     const int backupsBefore = testDir.entryList(QStringList() << "*.backup", QDir::Files).size();
 
     QDateTime now = QDateTime::currentDateTime();
@@ -1771,7 +1751,7 @@ void DatabaseTest::test_W_backup_created_before_replaceAll_not_commitSession()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore manager(settings);
 
-    QDir appDir(QCoreApplication::applicationDirPath());
+    QDir appDir(data_dir_.path());
     QStringList before = appDir.entryList(QStringList() << "*.backup", QDir::Files);
 
     QDateTime now = QDateTime::currentDateTime();

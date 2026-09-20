@@ -7,6 +7,11 @@
 void LoggerTest::initTestCase()
 {
     QVERIFY(settingsDir_.isValid());
+    // D13a: point AppPaths::logFile() (and thus Logger's process-wide
+    // singleton, opened lazily on the first enabled Log() call below) at our
+    // own temp dir instead of applicationDirPath() -- otherwise this suite
+    // leaves a uTimer.log artifact next to the qtest binary.
+    TestCommon::setDataDirOverride(settingsDir_.path());
 
     // settingsOff_: defaults — logToFile is false by default (verified in test_settings)
     settingsOff_ = new Settings(settingsDir_.filePath("off.ini"));
@@ -35,6 +40,7 @@ void LoggerTest::cleanupTestCase()
     delete settingsOn_;
     settingsOff_ = nullptr;
     settingsOn_  = nullptr;
+    TestCommon::clearDataDirOverride();
 }
 
 // Test A: with logToFile = false, 100 Log() calls must not create or grow the log file.

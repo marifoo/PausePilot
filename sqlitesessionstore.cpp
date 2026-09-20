@@ -834,6 +834,7 @@ BackupResult SqliteSessionStore::createBackup(const std::deque<TimeDuration>& du
         Logger::Log("[DB] Error: Failed to create backup of database");
     } else {
         Logger::Log("[DB] Created database backup: " + backupName);
+        lastBackupPath_ = backupName;
     }
 
     // Write durations to text file

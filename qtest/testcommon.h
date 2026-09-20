@@ -63,6 +63,15 @@ struct DayOverlapRow {
 
 std::vector<DayOverlapRow> dayOverlapRows();
 
+/// D13a: points AppPaths::dataDirectory() (via the UTIMER_DATA_DIR override
+/// apppaths.h already honors for C1's subprocess tests) at dirPath, so a
+/// suite's SqliteSessionStore/Logger calls use a private database file that
+/// cannot collide with another suite's. Call from initTestCase() with a
+/// QTemporaryDir member's path(); call clearDataDirOverride() from
+/// cleanupTestCase().
+void setDataDirOverride(const QString& dirPath);
+void clearDataDirOverride();
+
 } // namespace TestCommon
 
 /// Normalizes the duration list in-place (merging adjacent same-type segments)

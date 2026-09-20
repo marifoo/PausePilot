@@ -10,23 +10,14 @@ using TestCommon::sumDurations;
 
 void TimerTest::initTestCase()
 {
-    db_path_ = QDir(QCoreApplication::applicationDirPath()).filePath("uTimer.sqlite");
-    if (QFile::exists(db_path_)) {
-        db_backup_path_ = db_path_ + ".bak_test";
-        QFile::remove(db_backup_path_);
-        QVERIFY(QFile::rename(db_path_, db_backup_path_));
-    }
+    QVERIFY(data_dir_.isValid());
+    TestCommon::setDataDirOverride(data_dir_.path());
+    db_path_ = QDir(data_dir_.path()).filePath("uTimer.sqlite");
 }
 
 void TimerTest::cleanupTestCase()
 {
-    if (!db_path_.isEmpty()) {
-        QFile::remove(db_path_);
-    }
-    if (!db_backup_path_.isEmpty()) {
-        QFile::remove(db_path_);
-        QVERIFY(QFile::rename(db_backup_path_, db_path_));
-    }
+    TestCommon::clearDataDirOverride();
 }
 
 void TimerTest::test_timer_start_pause_resume_stop_and_checkpoints()

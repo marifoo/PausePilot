@@ -37,6 +37,16 @@ qint64 sumDurations(const std::deque<TimeDuration>& d, DurationType type)
     return total;
 }
 
+void setDataDirOverride(const QString& dirPath)
+{
+    qputenv("UTIMER_DATA_DIR", dirPath.toUtf8());
+}
+
+void clearDataDirOverride()
+{
+    qunsetenv("UTIMER_DATA_DIR");
+}
+
 std::vector<DayOverlapRow> dayOverlapRows()
 {
     return {

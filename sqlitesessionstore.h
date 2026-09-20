@@ -213,6 +213,11 @@ private:
     // (distinct from "table empty").
     std::optional<std::vector<SegmentId>> loadDiscardIntents();
     BackupResult createBackup(const std::deque<TimeDuration>& durations, TransactionMode mode);
+    // Path of the most recent successful createBackup() copy; empty if none
+    // has run yet. Set for test observability (lastBackupPath_dbg() below)
+    // so a test can assert against the exact file createBackup() wrote
+    // instead of scanning the data directory.
+    QString lastBackupPath_;
     void performRetentionCleanup();
     void pruneOldBackups(int keepCount = 5);
     bool insertRows(QSqlQuery& query, const std::deque<TimeDuration>& rows);
@@ -335,6 +340,11 @@ public:
         return result;
     }
     QString dbConnectionName_dbg() const { return db.connectionName(); }
+
+    /// The path createBackup() last copied to on success; empty if no backup
+    /// has been written yet. Lets a test identify the exact backup file
+    /// instead of scanning the data directory for one.
+    QString lastBackupPath_dbg() const { return lastBackupPath_; }
 
     /// Exposes the private marker-write step directly for tests that need to
     /// exercise ITS OWN Success/Disabled/TransientError contract, without

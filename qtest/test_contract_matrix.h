@@ -30,7 +30,7 @@ class ContractMatrixTest : public QObject
 
 private:
     QString db_path_;
-    QString db_backup_path_;
+    QTemporaryDir data_dir_;
 
     void resetDatabaseFile() const {
         if (QFile::exists(db_path_))

@@ -9,22 +9,14 @@ using TestCommon::createSettingsFile;
 
 void PersistenceContractTest::initTestCase()
 {
-    db_path_ = QDir(QCoreApplication::applicationDirPath()).filePath("uTimer.sqlite");
-    if (QFile::exists(db_path_)) {
-        db_backup_path_ = db_path_ + ".bak_contract_test";
-        QFile::remove(db_backup_path_);
-        QVERIFY(QFile::rename(db_path_, db_backup_path_));
-    }
+    QVERIFY(data_dir_.isValid());
+    TestCommon::setDataDirOverride(data_dir_.path());
+    db_path_ = QDir(data_dir_.path()).filePath("uTimer.sqlite");
 }
 
 void PersistenceContractTest::cleanupTestCase()
 {
-    if (!db_path_.isEmpty())
-        QFile::remove(db_path_);
-    if (!db_backup_path_.isEmpty()) {
-        QFile::remove(db_path_);
-        QVERIFY(QFile::rename(db_backup_path_, db_path_));
-    }
+    TestCommon::clearDataDirOverride();
 }
 
 // ---------------------------------------------------------------------------
