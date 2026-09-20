@@ -597,8 +597,13 @@ void TimelineTest::test_normalized_isIdempotent()
 void TimelineTest::test_Q_groupByDate()
 {
     // Day 1: 2024-01-10
-    const QDateTime day1Start(QDate(2024, 1, 10), QTime(9, 0, 0), Qt::UTC);
-    const QDateTime day1End(QDate(2024, 1, 10), QTime(10, 0, 0), Qt::UTC);
+    // Qt::LocalTime, not Qt::UTC: a 09:00-10:00 UTC row is 23:30-00:30 local
+    // under Pacific/Marquesas (UTC-9:30), which straddles local midnight and
+    // trips Timeline's assertSameDayInvariant() Q_ASSERT -- the same defect
+    // fixed in test_database.cpp's test_A4_... (commit 4c54044). Local time
+    // has no UTC->local conversion left to cross a boundary.
+    const QDateTime day1Start(QDate(2024, 1, 10), QTime(9, 0, 0), Qt::LocalTime);
+    const QDateTime day1End(QDate(2024, 1, 10), QTime(10, 0, 0), Qt::LocalTime);
     // Day 2: 2024-01-11
     const QDateTime day2Start(QDate(2024, 1, 11), QTime(14, 0, 0), Qt::UTC);
     const QDateTime day2End(QDate(2024, 1, 11), QTime(15, 30, 0), Qt::UTC);

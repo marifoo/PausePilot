@@ -59,10 +59,19 @@ QString disabledSettings(const QTemporaryDir& dir) {
 }
 
 // One finalized row for today.
+//
+// Qt::LocalTime, not Qt::UTC: pairing the local QDate::currentDate() with a
+// Qt::UTC time spec names a different local day than the date field says at
+// any nonzero offset (e.g. Pacific/Kiritimati, UTC+14, turns "today 10:00
+// UTC" into local midnight the next day) -- the same local/UTC field-mixing
+// fixed in test_historyeditsession.cpp's helpers (commit 4c54044). That
+// mismatch makes hasEntriesForDate(QDate::currentDate()) return No for a row
+// this function just committed for "today". Qt::LocalTime leaves nothing to
+// convert.
 std::deque<TimeDuration> oneRow() {
     const QDate today = QDate::currentDate();
-    const QDateTime t0(today, QTime(10, 0, 0), Qt::UTC);
-    const QDateTime t1(today, QTime(10, 30, 0), Qt::UTC);
+    const QDateTime t0(today, QTime(10, 0, 0), Qt::LocalTime);
+    const QDateTime t1(today, QTime(10, 30, 0), Qt::LocalTime);
     std::deque<TimeDuration> rows;
     rows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, t0, t1));
     return rows;
