@@ -46,8 +46,8 @@ make
 ./uTimer
 ```
 
-Lock detection on Linux uses D-Bus — systemd-logind, GNOME, KDE, or the
-generic freedesktop screensaver, whichever responds first.
+Lock detection on Linux uses D-Bus — systemd-logind, the generic freedesktop
+screensaver, GNOME, or KDE, whichever responds first.
 
 ## Using it
 

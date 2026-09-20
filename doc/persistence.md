@@ -7,8 +7,10 @@ writes it. The schema is checked at startup via `checkSchemaOnStartup()`,
 which returns a `SchemaStatus` enum (`Ready`, `Created`, `Outdated`, or
 `Inaccessible`). If the result is `Outdated` or `Inaccessible`, the
 application refuses to start and asks the user to delete or rename the file.
-Only on `Ready` or `Created` does `main.cpp` call `TimeTracker::initializeFromStore()`
-to consume the clean-shutdown marker and reconcile orphan checkpoints.
+Only on `Ready` or `Created` does `main.cpp` call `runStartupRecovery()`, which
+drives `TimeTracker::initializeFromStore()` (retrying on a modal Retry/Quit
+choice if it fails) to consume the clean-shutdown marker and reconcile orphan
+checkpoints.
 
 This document is the storage model. For the seam it sits behind, see the
 `SessionStore` section in `architecture.md`.
@@ -54,7 +56,7 @@ exits.
 ## Checkpoints
 
 A checkpoint is a periodic save of the **in-progress** Activity segment.
-The cadence is `checkpoint_interval_min_` from settings (5 minutes by
+The cadence is `checkpoint_interval_msec_` from settings (5 minutes by
 default; `0` disables checkpoints entirely). On each tick of
 `TimeTracker::checkpointTimer_`, the engine calls
 `SessionStore::saveCheckpoint(...)` with the current `segment_id`. The store
@@ -74,7 +76,7 @@ Checkpoints exist for crash recovery: if the process dies between
 checkpoint-and-finalize, the next startup can recover most of the
 in-progress segment from the unfinalized row. They are deliberately cheap —
 `saveCheckpoint` does not create the `.backup` / `.durations.txt` snapshot
-that `saveDurations`/`replaceAll` produce, because at a 5-minute cadence
+that `replaceAll` produces, because at a 5-minute cadence
 that would generate hundreds of files per day.
 
 ## Orphan reconciliation on startup
@@ -86,22 +88,44 @@ does all of the reconciliation internally (see `sqlitesessionstore.cpp`
 `recoverStartupCheckpoints`), in three steps:
 
 1. **Load** — every row with `is_finalized = 0` is loaded, in id order.
-2. **Decide** — for each orphan, decide whether to **finalize** it (treat
-   the last known endpoint as the segment's true end and recover the time)
-   or **drop** it (delete it without crediting any time). Today the
-   decision is:
+2. **Decide** — for each orphan not already claimed by a durable discard
+   intent (see below), decide whether to **finalize** it (treat the last
+   known endpoint as the segment's true end and recover the time) or
+   **drop** it (delete it without crediting any time). The decision is:
       - Drop if `duration < 1 second` — too short to be a real session.
       - Drop if `endTime` is more than 24 hours old — too stale to trust.
-      - Otherwise finalize.
-3. **Apply** — the drop list is `DELETE`d in a single transaction, then each
-   remaining orphan is finalized individually via `finalizeIfNoOverlap`, each
-   in its own transaction. An orphan is finalized (`UPDATE … SET
-   is_finalized = 1`) only if no already-finalized row overlaps its
-   `[start_utc, end_utc)` interval; overlapping orphans are left untouched.
+      - Drop if `endTime` is more than `kOrphanFutureSlackMs` (1 minute)
+        ahead of `now` — a backward wall-clock jump could otherwise
+        resurrect a future-dated checkpoint.
+      - Drop if `[startTime, endTime)` crosses a local-day boundary — a
+        cross-day row is well-formed but outside the supported contract
+        (MUST-FIX4/C3); it is policy-dropped rather than finalized.
+      - Otherwise finalize, subject to the overlap check below.
+   An orphan whose `segment_id` matches a durable discard-intent tombstone
+   (recorded when the engine deliberately discarded that checkpoint, e.g.
+   the cross-midnight watchdog — see `discardCheckpoint` in
+   `sessionstore.h`) is force-dropped outright, bypassing all of the above,
+   and never contributes to `recovered_msec` or the notification.
+3. **Apply** — malformed-row deletes, policy drops, discard-intent
+   resolution, marker consumption, and each remaining orphan's
+   finalize-or-delete-on-overlap all run as steps inside **one** transaction
+   opened by `recoverStartupCheckpoints` (`sqlitesessionstore.cpp:2249`,
+   `reconcileUnfinalizedCheckpoints`); a failure at any step rolls back the
+   *entire* disposition, so recovery is all-or-nothing, never partially
+   applied. The per-row overlap check itself
+   (`finalizeOrOverlapWithinOpenTransaction`) finalizes a row
+   (`UPDATE … SET is_finalized = 1`) only if no already-finalized row
+   overlaps its `[start_utc, end_utc)` interval; an overlapping orphan is
+   not left untouched — it is deleted transactionally as part of the same
+   disposition and counted as a policy drop (R08-002), so it cannot recur
+   on every future launch. (`finalizeIfNoOverlap` is a separate,
+   self-transacting wrapper around the same overlap check, kept only for
+   its own unit tests — recovery does not call it.)
 
 `TimeTracker` receives only domain facts back via `StartupRecoveryResult`
-(`recovered_seconds`, `notify_user`) — row ids and the finalize/drop
-mechanics never cross the `SessionStore` interface.
+(`recovered_msec`, `finalized_count`, `policy_dropped_count`, `notify_user`)
+— row ids and the finalize/drop mechanics never cross the `SessionStore`
+interface.
 
 The **clean-shutdown marker** controls whether the user sees a recovery
 notification afterwards. It is written only by `SqliteSessionStore::markCleanShutdown()`,
@@ -117,10 +141,12 @@ Exit-Anyway termination or a failed OS-forced shutdown never reaches this
 operation at all -- no marker, no barrier. On the next startup,
 `recoverStartupCheckpoints()` reads and consumes the marker
 internally (it is deleted on read once reconciliation succeeds). If the
-marker is at or after the oldest finalized orphan's end time, that means the
-orphan was already covered by a clean stop and the user does not need a
-"recovered N seconds" notification — only genuinely-crashed recoveries
-surface in the UI.
+marker is at or after the *newest* finalized orphan's end time, that means
+every recovered orphan was already covered by a clean stop and the user does
+not need a "recovered N seconds" notification — only genuinely-crashed
+recoveries surface in the UI. Using the oldest orphan instead would wrongly
+suppress the notification when an older orphan is covered by the marker but
+a newer one is not.
 
 ```mermaid
 flowchart TD
@@ -128,14 +154,18 @@ flowchart TD
     B --> C{rows?}
     C -- no --> Z[done]
     C -- yes --> D[For each orphan]
-    D --> E{too short<br/>or stale?}
-    E -- yes --> F[dropIds]
-    E -- no --> G[finalizeIds<br/>recovered += duration]
-    F --> H[reconcileUnfinalizedCheckpoints]
+    D --> DI{discard-intent<br/>tombstone?}
+    DI -- yes --> F[force drop]
+    DI -- no --> E{too short, stale,<br/>future-dated, or<br/>cross-day?}
+    E -- yes --> F
+    E -- no --> OV{overlaps a<br/>finalized row?}
+    OV -- yes --> F
+    OV -- no --> G[finalize<br/>recovered_msec += duration]
+    F --> H["one transaction:<br/>drops + finalizes + discard-intent<br/>resolution + marker consumption<br/>(all-or-nothing)"]
     G --> H
     H --> I{consume clean-shutdown marker}
-    I -- marker covers oldest --> J[no notification]
-    I -- otherwise --> K[notify user 'recovered N seconds']
+    I -- marker covers newest finalized orphan --> J[no notification]
+    I -- otherwise --> K[notify user 'recovered N msec']
     J --> Z
     K --> Z
 ```
@@ -145,9 +175,12 @@ flowchart TD
 Everything in this document — the SQL, the transactions, the
 `is_finalized` flag, the orphan-id bookkeeping, the backup files, retention
 cleanup, schema migrations — lives **inside** `SqliteSessionStore`. None of
-it crosses the interface defined in `sessionstore.h`. `TimeTracker` only sees
-`commitSession`, `saveCheckpoint`, `loadDurations`,
-`recoverStartupCheckpoints`, `setLastCleanShutdownMarker`, `flushToDisc`,
-and `checkSchemaOnStartup`. That is what makes `FakeSessionStore` in
-`qtest/` viable: it can re-implement the interface in pure C++ data
-structures and the engine code is none the wiser.
+it crosses the interface defined in `sessionstore.h`. `TimeTracker` calls
+`commitSession`, `replaceAll`, `loadDurations`, `hasEntriesForDate`,
+`saveCheckpoint`, `discardCheckpoint`, `recoverStartupCheckpoints`, and
+`checkSchemaOnStartup`; `flushToDisc` and `markCleanShutdown` (the sole
+owner of writing the clean-shutdown marker) are called only by
+`ShutdownCoordinator` as part of the shutdown sequence, not by `TimeTracker`
+itself. That is what makes `FakeSessionStore` in `qtest/` viable: it can
+re-implement the interface in pure C++ data structures and the engine code
+is none the wiser.

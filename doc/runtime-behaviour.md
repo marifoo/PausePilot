@@ -15,23 +15,31 @@ Transitions are driven by user buttons, lock events from
 stateDiagram-v2
     [*] --> None
 
-    None --> Activity : Button::Start
+    None --> Activity : Button.Start
 
-    Activity --> Pause : Button::Pause<br/>LockEvent::LongOngoingLock
-    Pause --> Activity : Button::Start<br/>LockEvent::Unlock<br/>(if was active before autopause)
+    Activity --> Pause : Button.Pause / LockEvent.LongOngoingLock
+    Pause --> Activity : Button.Start / LockEvent.Unlock (if was active before autopause)
 
-    Activity --> None : Button::Stop<br/>DayBoundaryWatcher (scheduled / watchdog)
-    Pause --> None : Button::Stop<br/>DayBoundaryWatcher (scheduled / watchdog)
+    Activity --> None : Button.Stop / DayBoundaryWatcher (scheduled or watchdog)
+    Pause --> None : Button.Stop / DayBoundaryWatcher (scheduled or watchdog)
 ```
 
-Two enums on `TimeTracker` annotate the transitions so the GUI can react without
-keeping its own state:
+`TimeTracker` carries the reason for a transition, not just the transition
+itself, so the GUI can react without keeping its own state:
 
-- `TimeTracker::StopReason` (`ButtonStop`, `MidnightScheduled`, `MidnightWatchdog`,
-  `Shutdown`, `EditApplied`) — carried by `stopped()`.
-- `TimeTracker::PauseCause` (`UserAction`, `LockAutopause`, `LockResume`) —
-  carried by `modeChanged()`. Lets `MainWin` distinguish user-driven pauses
-  from lock-driven autopause.
+- `TimeTracker::transitioned(Transition)` — the one cause-carrying event for
+  every real mode change, button/lock/midnight/edit/shutdown-driven alike.
+  `Transition` holds `from`, `to`, and a `TransitionCause` (`ButtonStart`,
+  `ButtonPause`, `ButtonStop`, `LockAutopause`, `LockResume`,
+  `MidnightScheduled`, `MidnightWatchdog`, `Shutdown`, `EditApplied`,
+  `FatalStoreError`). `ContentWidget::onTransitioned` reduces it to a GUI
+  update; there is no separate per-cause signal for each transition kind
+  the way there used to be.
+- `TimeTracker::stopped(StopReason)` — kept as a separate terminal-only
+  event (`ButtonStop`, `MidnightScheduled`, `MidnightWatchdog`, `Shutdown`,
+  `EditApplied`, `FatalStoreError`), derived from the same emission point as
+  `transitioned()`, for observers that only care "did tracking stop, and
+  why" (today just `HealthMonitor::reset`).
 
 `Lock` (without "Long") does **not** transition the engine on its own; it
 suspends checkpoints (so checkpoints do not move while the user is away) and
@@ -43,7 +51,7 @@ crosses the threshold and triggers autopause inside `TimeTracker`.
 A single `QTimer` in `main.cpp` ticks every 100 ms. Three slots are wired to
 its `timeout()` signal:
 
-1. **`MainWin::update`** — refreshes the time labels and tooltips by reading
+1. **`MainWin::onTick`** — refreshes the time labels and tooltips by reading
    the current snapshot from `TimeTracker`.
 2. **`TimeTracker::onTick`** — calls `DayBoundaryWatcher::tick` (the cross-midnight
    watchdog). This is the *only* path that runs `TimeTracker` code from the
@@ -64,8 +72,9 @@ not to register on a CPU profile.
 worth quoting rather than restating: previously these fields were scattered
 as raw members, making it easy for code paths to mutate them as side-effects.
 Grouping them into a struct with explicit, named transition methods
-(`beginNewSegment`, `clearSegment`, `markUnsaved`, …) ensures every mutation
-is logged at debug level and is therefore traceable in the log output.
+(`beginNewSegment`, `clearSegment`, `updateSegmentStartTime`,
+`resetForNewSession`, `adoptOngoingSegment`) ensures every mutation is
+logged at debug level and is therefore traceable in the log output.
 
 The struct is owned by `TimeTracker` and is not exposed to callers — `Timeline`
 is the read-only view that `MainWin` and `HistoryDialog` consume via
@@ -74,8 +83,10 @@ is the read-only view that `MainWin` and `HistoryDialog` consume via
 ## Cross-midnight handling
 
 A session must never contain a segment that spans two dates: the persistence
-layer indexes by `start_date` and `end_date`, and downstream UI groups by
-date. `TimeTracker` enforces this with a single dedicated subsystem:
+layer stores `start_utc`/`end_utc` timestamps (see `persistence.md`), and
+downstream UI groups rows by the local date those timestamps convert to, not
+by a stored date column. `TimeTracker` enforces this with a single dedicated
+subsystem:
 `DayBoundaryWatcher`. It uses two mechanisms together:
 
 1. **Scheduled stop** — a single-shot `QTimer` armed for **23:59:59.500**
@@ -97,14 +108,22 @@ any other stop.
 
 ## Shutdown flow
 
-The shutdown sequence is owned by `ShutdownCoordinator`. It can be triggered
-from three places:
+The shutdown sequence is owned by `ShutdownCoordinator`. `MainWin::shutdown(ShutdownMode)`
+is the single entry point into it, reached from three places:
 
-- Normal close (`MainWin::closeEvent`, tray-menu Quit) →
-  `MainWin::onAboutToQuit` (wired to `QCoreApplication::aboutToQuit`).
+- Normal close (`MainWin::closeEvent`, tray-menu Quit) calls
+  `shutdown(ShutdownMode::DrainEvents)` directly; `QCoreApplication::aboutToQuit`
+  → `MainWin::onAboutToQuit` calls it again once the last window closes. Both
+  reach the same idempotent `ShutdownCoordinator::run`, so a normal quit
+  always runs the sequence twice, harmlessly.
 - Windows session end (`WM_QUERYENDSESSION` / `WM_ENDSESSION` handled in
-  `MainWin::nativeEvent`) → `MainWin::shutdown(true)` with the
-  `force_direct` path so the event loop is not relied on.
+  `MainWin::nativeEvent`) → `shutdown(ShutdownMode::Direct)`, which skips the
+  event-loop pump since the OS event loop is restricted during this path.
+  A `WM_ENDSESSION` with `wParam == 0` means the shutdown was *cancelled*:
+  `MainWin::nativeEvent` calls `ShutdownCoordinator::cancelShutdown()`
+  instead, which clears the `run()` guard and `TimeTracker`'s shutdown-latch
+  so the application returns to an ordinary, fully usable stopped state and
+  the next real shutdown (or History save) runs the full path again.
 - Linux signal (`SIGTERM` / `SIGINT` / `SIGHUP`) → `MainWin::onAboutToQuit`
   via the signal-handling pattern described below.
 
@@ -116,19 +135,25 @@ sequenceDiagram
     participant T as TimeTracker
     participant S as SessionStore
 
-    Caller->>MW: onAboutToQuit() / shutdown(force_direct)
-    MW->>SC: run(force_direct)
+    Caller->>MW: onAboutToQuit() / shutdown(mode)
+    MW->>SC: run(mode)
     SC->>T: drainForShutdown()
-    Note over SC: pump event loop ~150 ms<br/>(skipped when force_direct=true)
+    Note over SC: pump event loop ~150 ms<br/>(skipped when mode == Direct)
     alt drain clean
         SC->>S: markCleanShutdown()
         Note over S: writes marker, then (only on success)<br/>runs the FULL durability barrier
+    else drain incomplete
+        SC->>S: flushToDisc()
+        Note over S: best-effort durability barrier only,<br/>no clean marker
     end
-    SC-->>MW: returns
+    SC-->>MW: returns DrainResult
 ```
 
 `ShutdownCoordinator::run` is idempotent (`shutdown_completed_` guard) so
-multiple triggers fire it exactly once. The clean-shutdown marker is written
+multiple triggers fire it exactly once (until `cancelShutdown()` re-arms it).
+On a `DrainEvents` failure `MainWin::shutdown` shows a modal Retry / Exit
+Anyway choice; each Retry calls `ShutdownCoordinator::retryDrain()` for one
+new attempt. The clean-shutdown marker is written
 by exactly one owner, `SqliteSessionStore::markCleanShutdown()`, and only
 when `TimeTracker::drainForShutdown()` reports the whole drain (commit and
 any pending checkpoint-discard intent) resolved — this is what lets the next
@@ -141,12 +166,14 @@ left checkpoints behind because we shut down before flushing"; see
 Signal handlers may only call async-signal-safe functions, so the handler in
 `main.cpp` does the bare minimum: it writes the signal number to one end of
 a `socketpair`. A `QSocketNotifier` watches the other end and, inside the
-event loop, reads the byte and calls `MainWin::onAboutToQuit` followed by
+event loop, calls `UnixSignalBridge::drainPending()` — which coalesces
+however many signals arrived between two event-loop turns into one shutdown
+invocation — then calls `MainWin::onAboutToQuit` followed by
 `QCoreApplication::quit`. This is the standard Qt pattern for
 signal-to-event-loop bridging; it lives in `main.cpp` because it has to be
 installed *before* `QApplication` is constructed. On Windows the same role
 is filled by the `WM_QUERYENDSESSION` / `WM_ENDSESSION` path in
-`MainWin::nativeEvent`, which calls `shutdown(true)` directly.
+`MainWin::nativeEvent`, which calls `shutdown(ShutdownMode::Direct)` directly.
 
 This is the one place where the platform difference matters for runtime
 behaviour — the rest of the code is portable.

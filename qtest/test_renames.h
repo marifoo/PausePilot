@@ -9,6 +9,7 @@ class RenamesTest : public QObject
 
 private slots:
     void test_no_old_names_in_production_headers();
+    void test_no_stale_identifiers_in_docs();
 };
 
 #endif // TEST_RENAMES_H
