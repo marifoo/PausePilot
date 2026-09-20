@@ -356,27 +356,21 @@ void TimeTracker::checkDurationInvariants() const
 
 /**
  * Cross-layer invariant: for each persisted segment, the DB must contain
- * either no row (not yet committed, or a test double whose loadDurations()
- * is not wired to mirror commitSession()) or exactly one finalized row with a
- * matching segment_id. Called after every okOrDisabled() commitSession() in
- * updateDurationsInDB() to catch divergence between memory and storage.
+ * exactly one finalized row with matching fields after a Success
+ * commitSession(); no requirement is imposed after a Disabled one (history
+ * storage off means the write was a deliberate no-op, so this checker has
+ * nothing to verify against). Called after every okOrDisabled()
+ * commitSession() in updateDurationsInDB() to catch divergence between
+ * memory and storage.
  *
- * D11/R09-002: zero matches is accepted unconditionally rather than only for
- * Disabled history, because FakeSessionStore (the store double most of the
- * test suite runs against) does not automatically populate loadDurations()
- * from commitSession() -- tightening this to "exactly one" after a real
- * Success turns nearly every fake-store test into a QWARN failure. Making
- * this a precise persistence-truth check would require either updating
- * FakeSessionStore's loadDurations() to mirror commitSession() by default
- * (a broader test-infrastructure change) or gating the strict check to only
- * run against the real SqliteSessionStore -- both out of D11's surgical
- * scope. This checker therefore still only catches actual duplication
- * (matchCount > 1) and field mismatches, not a silently missing row.
- * Deferred to D13 (review/implementation-plan-v2.md), which owns making
- * FakeSessionStore::loadDurations() mirror committed state and then
- * tightening this check.
+ * D13e (deferred from D11/R09-002): the "exactly one" requirement below is
+ * only enforced for Success, since FakeSessionStore::loadDurations() now
+ * (D13e) projects storedDurations so the double mirrors committed state --
+ * previously it never did, so this had to accept zero matches
+ * unconditionally to avoid failing ~165 fake-store tests whose loaded state
+ * never reflected what commitSession() had just written.
  */
-void TimeTracker::checkCrossLayerInvariants() const
+void TimeTracker::checkCrossLayerInvariants(const SessionStoreResult& commitResult) const
 {
     if (session_.durations.empty()) {
         return;
@@ -391,6 +385,8 @@ void TimeTracker::checkCrossLayerInvariants() const
 
     // Load the current DB state once.
     LoadResult dbResult = db_.loadDurations();
+
+    const bool expectPersisted = (commitResult.category == SessionStoreResult::Success);
 
     for (const auto& seg : persisted) {
         if (seg.segment_id.isEmpty()) {
@@ -420,6 +416,10 @@ void TimeTracker::checkCrossLayerInvariants() const
         if (matchCount > 1) {
             qWarning("[CROSS-LAYER] Segment %s: expected 0 or 1 DB rows, found %d",
                      qPrintable(seg.segment_id.toString()), matchCount);
+        } else if (expectPersisted && matchCount == 0) {
+            qWarning("[CROSS-LAYER] Segment %s: committed via Success commitSession() but "
+                     "no matching DB row found",
+                     qPrintable(seg.segment_id.toString()));
         }
     }
 }
@@ -1423,7 +1423,7 @@ SessionStoreResult TimeTracker::updateDurationsInDB()
     // we don't retain bogus unsaved data or skip the clean-shutdown marker.
 #ifndef QT_NO_DEBUG
     if (result.okOrDisabled()) {
-        checkCrossLayerInvariants();
+        checkCrossLayerInvariants(result);
     }
 #endif
     return result;

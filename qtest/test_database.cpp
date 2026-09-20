@@ -4214,6 +4214,59 @@ void DatabaseTest::test_C2_replaceAll_fails_on_commit_failure_with_empty_error_t
 }
 
 /**
+ * D13e (routed-in from D11 part 1 review): updateDurationsById() is
+ * commitSession()'s commit site -- the dominant production write path --
+ * but unlike replaceAll()/saveCheckpoint() it called db.commit()/
+ * db.rollback() directly instead of going through commitOrRollback(). That
+ * meant a failed COMMIT there had no closeConnection() recovery when the
+ * rollback also failed (C2/R07-001), and force_commit_failure_dbg_ (which
+ * only fires on the NEXT commitOrRollback() call) could never reach this
+ * path at all -- so this exact scenario had zero coverage. Same C2 standard
+ * as the replaceAll/saveCheckpoint tests above, exercised via
+ * commitSession() since that is updateDurationsById()'s only caller.
+ */
+void DatabaseTest::test_C2_updateDurationsById_rolls_back_on_commit_failure()
+{
+    // Arrange: one already-committed baseline row.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QDateTime now = QDateTime::currentDateTime();
+    std::deque<TimeDuration> original;
+    original.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-300), now.addSecs(-200)));
+    QVERIFY(manager.commitSession(Timeline(original, std::nullopt)).ok());
+
+    // Act: inject a COMMIT failure for a second commitSession() call.
+    manager.setForceCommitFailure_dbg(true);
+    std::deque<TimeDuration> addition;
+    addition.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-100), now.addSecs(-50)));
+    const SessionStoreResult result = manager.commitSession(Timeline(addition, std::nullopt));
+
+    // Assert: the failure is reported as TransientError, not Success.
+    QCOMPARE(result.category, SessionStoreResult::TransientError);
+
+    // Assert: raw state is still just the ORIGINAL row -- the INSERT for
+    // the second row was rolled back, not left partially committed.
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery count(manager.rawDb_dbg());
+    QVERIFY(count.exec("SELECT COUNT(*) FROM durations"));
+    QVERIFY(count.next());
+    QCOMPARE(count.value(0).toInt(), 1);
+
+    // Assert: the connection recovers -- a second (non-injected) commit succeeds.
+    QVERIFY(manager.commitSession(Timeline(addition, std::nullopt)).ok());
+    QSqlQuery count2(manager.rawDb_dbg());
+    QVERIFY(count2.exec("SELECT COUNT(*) FROM durations"));
+    QVERIFY(count2.next());
+    QCOMPARE(count2.value(0).toInt(), 2);
+
+    manager.closeConnection_dbg();
+}
+
+/**
  * Rollback-failure diagnostic (R07-001's proposed direction): if the
  * rollback that follows a failed COMMIT ALSO fails, the primary commit
  * error must still be what the caller sees -- not silently overwritten or

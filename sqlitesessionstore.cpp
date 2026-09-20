@@ -1615,11 +1615,13 @@ SessionStoreResult SqliteSessionStore::updateDurationsById(const std::deque<Time
         count++;
     }
 
-    if (!db.commit()) {
-        const QString errMsg = db.lastError().text();
-        Logger::Log("[DB] Error committing update transaction: " + errMsg);
-        db.rollback();
-        return SessionStoreResult::transient("Failed to commit update transaction: " + errMsg);
+    // C2 (R07-001, D13e): route through commitOrRollback() like every other
+    // commit site -- a bare db.rollback() here does not check whether the
+    // rollback itself failed, which would leave the connection stuck inside
+    // an open transaction with no closeConnection() recovery.
+    const CommitOutcome commitResult = commitOrRollback("Error committing update transaction");
+    if (!commitResult.committed) {
+        return SessionStoreResult::transient("Failed to commit update transaction: " + commitResult.errorMessage);
     }
 
     Logger::Log(QString("[DB] Upserted %1 durations").arg(count));

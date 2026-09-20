@@ -1359,9 +1359,7 @@ void TimerTest::test_E_boot_time_inmemory_start_date_skips_boot_time()
  * X: Stop persists state via commitSession only.
  *
  * After a start→stop cycle, the FakeSessionStore's callLog must contain
- * "commitSession" for the stop write, and must NOT contain "saveDurations"
- * or "updateDurationsById" as write paths (those are no longer in the
- * interface; any occurrence would indicate a regression to the old paths).
+ * "commitSession" for the stop write.
  */
 void TimerTest::test_X_stop_persists_via_commitSession_only()
 {
@@ -1382,12 +1380,6 @@ void TimerTest::test_X_stop_persists_via_commitSession_only()
     // Assert: commitSession was called
     QVERIFY2(fakeDb.callLog.contains("commitSession"),
              "Stop must call commitSession to persist the session");
-
-    // Assert: old direct-write methods were NOT called via the interface
-    QVERIFY2(!fakeDb.callLog.contains("saveDurations"),
-             "saveDurations must not be called; commitSession is the write path");
-    QVERIFY2(!fakeDb.callLog.contains("updateDurationsById"),
-             "updateDurationsById must not be called; commitSession is the write path");
 }
 
 // Issue 3 Layer A: while dialog is open, LongOngoingLock must not call backpauseTimer.
@@ -3163,16 +3155,19 @@ void TimerTest::test_A1_unrelated_history_edit_preserved_during_deferred_midnigh
     tracker.endExclusiveEdit();
 
     QVERIFY(tracker.isStopped());
-    bool foundEditedSegment = false, foundOriginalPause = false, foundFinalActivity = false;
+    // D13e: the edited first segment (now Pause) and the untouched second
+    // segment (already Pause) are adjacent same-type segments, so committing
+    // them normalizes -- like a real database would -- into ONE merged row
+    // spanning t0..20:35 under the edited segment's identity. This is not
+    // data loss: finding this exact merged row proves both that the edit
+    // (type flip) stuck and that the untouched segment's endTime survived
+    // intact into the merge.
+    bool foundMergedPause = false, foundFinalActivity = false;
     for (const auto& seg : fakeDb.storedDurations) {
-        if (seg.startTime == t0 && seg.endTime == QDateTime(QDate(2025, 6, 1), QTime(20, 30, 0), Qt::LocalTime)) {
-            QCOMPARE(seg.type, DurationType::Pause); // edit preserved
-            foundEditedSegment = true;
-        }
         if (seg.type == DurationType::Pause
-            && seg.startTime == QDateTime(QDate(2025, 6, 1), QTime(20, 30, 0), Qt::LocalTime)
+            && seg.startTime == t0
             && seg.endTime == QDateTime(QDate(2025, 6, 1), QTime(20, 35, 0), Qt::LocalTime)) {
-            foundOriginalPause = true;
+            foundMergedPause = true;
         }
         if (seg.type == DurationType::Activity
             && seg.startTime == QDateTime(QDate(2025, 6, 1), QTime(20, 35, 0), Qt::LocalTime)
@@ -3180,8 +3175,8 @@ void TimerTest::test_A1_unrelated_history_edit_preserved_during_deferred_midnigh
             foundFinalActivity = true;
         }
     }
-    QVERIFY2(foundEditedSegment, "Edited segment (type flipped) must survive replay");
-    QVERIFY2(foundOriginalPause, "Unrelated Pause segment must survive replay unchanged");
+    QVERIFY2(foundMergedPause,
+             "Edited segment and the unrelated adjacent Pause segment must merge into one row spanning t0..20:35");
     QVERIFY2(foundFinalActivity, "Ongoing segment must be credited exactly through the cutoff");
 }
 

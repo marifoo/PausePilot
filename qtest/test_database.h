@@ -199,6 +199,12 @@ private slots:
     // success because the old contract inferred success from message
     // emptiness.
     void test_C2_replaceAll_fails_on_commit_failure_with_empty_error_text();
+    // D13e: updateDurationsById() (commitSession's commit site, the
+    // dominant production write path) did not call commitOrRollback(), so a
+    // failed COMMIT there could leave the connection inside an open
+    // transaction with no closeConnection() recovery. Same C2 standard as
+    // the tests above.
+    void test_C2_updateDurationsById_rolls_back_on_commit_failure();
 
     // C3 (R13-001/R14-001): the day-validity/overlap payload guard rejects
     // an invalid payload before mutation at every uTimer write boundary, and

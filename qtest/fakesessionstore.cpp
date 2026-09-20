@@ -1,11 +1,14 @@
 /**
  * FakeSessionStore -- spy test double for SessionStore.
  *
- * Records every call made to it (callLog) and stores raw segments
- * passed to commitSession/replaceAll so tests can inspect what was
- * written.  No normalization, upsert, or overlap logic is duplicated
- * here; those behaviors are verified against the real SqliteSessionStore
- * in test_persistence_contract.cpp.
+ * Records every call made to it (callLog) and stores segments passed to
+ * commitSession/replaceAll so tests can inspect what was written. No
+ * overlap or reconcile POLICY is duplicated here; that behavior is verified
+ * against the real SqliteSessionStore in test_persistence_contract.cpp.
+ * D13e: commitSession() DOES mirror the real store's identity mechanics --
+ * normalizing (merging adjacent same-type segments) and upserting by
+ * segment_id -- since those determine the physical shape storedDurations
+ * must have for loadDurations() to be a truthful mirror of committed state.
  *
  * Return values come from the configurable *Result members set by the test.
  */
@@ -43,11 +46,33 @@ SessionStoreResult FakeSessionStore::commitSession(const Timeline& session)
         return SessionStoreResult::callerBug("commitSession: duplicate segment_id in payload");
     }
     if (commitSessionResult.ok()) {
-        // Spy: record the segments as submitted, without normalization or upsert policy.
-        // Tests that need normalization semantics should use SqliteSessionStore directly.
-        for (const auto& d : session.completed()) {
+        // D13e: mirror SqliteSessionStore::commitSession()'s own pipeline --
+        // normalize (merging adjacent same-type segments extends the
+        // survivor's endTime and merges away the other segment_id), delete
+        // rows for merged-away ids, then upsert the normalized rows by
+        // segment_id. Without this, storedDurations would keep raw,
+        // unmerged rows that no real database would ever hold, and
+        // TimeTracker::checkCrossLayerInvariants() (which compares against
+        // the normalized view, matching what the real store persists) would
+        // report a false field mismatch or missing row.
+        const auto [normed, removedIds] = session.normalizedWithRemovedIds();
+        for (const auto& id : removedIds) {
+            storedDurations.erase(
+                std::remove_if(storedDurations.begin(), storedDurations.end(),
+                                [&](const TimeDuration& row) { return row.segment_id.toString() == id; }),
+                storedDurations.end());
+        }
+        for (const auto& d : normed.completed()) {
             committedSegmentIds.insert(d.segment_id.toString());
-            storedDurations.push_back(d);
+            auto existing = std::find_if(storedDurations.begin(), storedDurations.end(),
+                                          [&](const TimeDuration& row) {
+                                              return row.segment_id.toString() == d.segment_id.toString();
+                                          });
+            if (existing != storedDurations.end()) {
+                *existing = d;
+            } else {
+                storedDurations.push_back(d);
+            }
         }
     }
     return commitSessionResult;
@@ -69,6 +94,17 @@ SessionStoreResult FakeSessionStore::replaceAll(const Timeline& history, const T
     if (replaceDurationsResult.ok()) {
         storedDurations.clear();
         committedSegmentIds.clear();
+        // D13e (M1, review): the real store writes history rows with
+        // is_finalized = 1 and session rows with is_finalized = 0
+        // (sqlitesessionstore.cpp), and loadDurations() there only selects
+        // is_finalized = 1 rows -- so a real replaceAll() with a non-empty
+        // session Timeline is NOT fully visible to a later loadDurations().
+        // This fake has no is_finalized notion and stores/projects both
+        // buckets alike. Currently safe: no fake replaceAll() call site
+        // reaches this mutation block with a non-empty session Timeline
+        // (the one that passes a non-empty session, test_contract_matrix.cpp:757,
+        // returns CallerBug above first), so the two buckets never actually
+        // diverge in practice.
         for (const auto& d : history.completed()) {
             storedDurations.push_back(d);
             committedSegmentIds.insert(d.segment_id.toString());
@@ -84,7 +120,44 @@ SessionStoreResult FakeSessionStore::replaceAll(const Timeline& history, const T
 LoadResult FakeSessionStore::loadDurations()
 {
     callLog.append("loadDurations");
-    return loadDurationsResult;
+    // D13e: project storedDurations (what commitSession/replaceAll actually
+    // committed) so the double mirrors real persisted state instead of only
+    // ever returning what a test manually preset. A non-Success status is a
+    // test simulating a failed/disabled load: durations is cleared here,
+    // matching the real store, which always returns empty durations on
+    // Disabled and on every error path (sqlitesessionstore.cpp).
+    if (loadDurationsResult.status != SessionStoreResult::Success) {
+        LoadResult result;
+        result.status = loadDurationsResult.status;
+        return result;
+    }
+    // D13e (M2, review): loadDurationsResult.durations models pre-existing
+    // rows a read-only fixture seeds before constructing TimeTracker (e.g.
+    // HistoryDialog/HistoryEditSession tests) -- replaceAll()'s
+    // storedDurations.clear() above deliberately does not touch this preset.
+    // Some of those fixtures DO go on to call replaceAll() on the same
+    // fakeDb, so a preset row that replaceAll() would have deleted can
+    // linger here uncleared; that is safe only because those fixtures never
+    // call loadDurations() again after the replaceAll() to observe it.
+    // Dedupe on segment_id with storedDurations winning: a preset row
+    // sharing an id with a later-committed row must not appear twice here --
+    // the real store upserts such a row to one, so two rows would be an
+    // impossible state that falsely trips TimeTracker::checkCrossLayerInvariants()'s
+    // matchCount > 1 check.
+    LoadResult result;
+    result.status = SessionStoreResult::Success;
+    for (const auto& d : loadDurationsResult.durations) {
+        const bool supersededByStored =
+            std::any_of(storedDurations.begin(), storedDurations.end(),
+                        [&](const TimeDuration& row) {
+                            return row.segment_id.toString() == d.segment_id.toString();
+                        });
+        if (!supersededByStored) {
+            result.durations.push_back(d);
+        }
+    }
+    result.durations.insert(result.durations.end(), storedDurations.begin(), storedDurations.end());
+    return result;
 }
 
 EntriesForDateResult FakeSessionStore::hasEntriesForDate(const QDate& /*date*/)

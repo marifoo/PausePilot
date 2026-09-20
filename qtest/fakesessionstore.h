@@ -87,7 +87,11 @@ public:
     /// Populated on success for cross-path uniqueness checks in saveCheckpoint.
     QSet<QString> committedSegmentIds;
 
-    /// Pre-loaded durations returned by loadDurations(). Tests populate this.
+    /// Pre-existing durations to seed loadDurations() with, on top of
+    /// whatever storedDurations already holds from commitSession/replaceAll
+    /// (D13e: loadDurations() merges the two). Set .status to a non-Success
+    /// category to simulate a failed/disabled load instead (durations is
+    /// then ignored and the result is always empty).
     LoadResult loadDurationsResult;
 
     /// Result returned by hasEntriesForDate(). Default: No entries.

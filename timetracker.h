@@ -536,10 +536,12 @@ private:
     void checkDurationInvariants() const;
 
     /// Cross-layer invariant check: for each segment in session_.durations,
-    /// queries the DB and asserts either no row exists for that segment_id, or
-    /// exactly one finalized row with matching fields. Called after successful
-    /// db_.commitSession() calls in updateDurationsInDB().
-    void checkCrossLayerInvariants() const;
+    /// queries the DB and asserts exactly one finalized row with matching
+    /// fields after a Success commitSession(); no requirement is imposed
+    /// after a Disabled one. Called after every okOrDisabled()
+    /// db_.commitSession() in updateDurationsInDB(), passing that call's own
+    /// result.
+    void checkCrossLayerInvariants(const SessionStoreResult& commitResult) const;
 #endif // QT_NO_DEBUG
 
 public:

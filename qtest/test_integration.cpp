@@ -407,15 +407,15 @@ void IntegrationTest::test_integration_empty_database_operations()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     SqliteSessionStore manager(settings);
 
-    // Operations on empty database should succeed
-    QVERIFY(manager.commitSession(Timeline()).ok());
+    // Operations on empty database should succeed. commitSession() with an
+    // empty Timeline early-outs before touching the DB (its result is
+    // unconditionally Success, so asserting .ok() on it proves nothing --
+    // D13e), so this only checks that a query against a genuinely empty
+    // database reports the correct empty state.
     auto loaded = manager.loadDurations();
     QCOMPARE(loaded.size(), (size_t)0);
-    
+
     QCOMPARE(manager.hasEntriesForDate(QDate::currentDate()), EntriesForDateResult::No);
-    
-    std::deque<TimeDuration> empty;
-    QVERIFY(manager.commitSession(Timeline(empty, std::nullopt)).ok());
 }
 
 // ============================================================================
