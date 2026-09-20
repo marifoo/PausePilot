@@ -56,7 +56,7 @@ void HistoryEditSessionTest::test_build_today_page_only_from_memory()
 
     const QDateTime start = todayUTC(10, 0);
     const QDateTime end   = todayUTC(10, 30);
-    tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
+    tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryEditSession session;
     session.buildFromTimer(tracker, QDate::currentDate());
@@ -88,7 +88,7 @@ void HistoryEditSessionTest::test_build_today_page_memory_plus_db()
     // Memory row (different time, different segment_id)
     const QDateTime memStart = todayUTC(9, 0);
     const QDateTime memEnd   = todayUTC(9, 30);
-    tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
+    tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
 
     HistoryEditSession session;
     session.buildFromTimer(tracker, QDate::currentDate());
@@ -139,7 +139,7 @@ void HistoryEditSessionTest::test_build_deduplicates_db_row_matching_memory_segm
 
     // Memory row with sharedId
     TimeTracker tracker(settings, fakeDb);
-    tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, start, end, sharedId));
+    tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, start, end, sharedId));
 
     // DB row with the same segment_id — should be deduped out.
     fakeDb.loadDurationsResult.durations.push_back(
@@ -167,7 +167,7 @@ void HistoryEditSessionTest::test_origin_memory_rows_marked_true()
 
     const QDateTime start = todayUTC(10, 0);
     const QDateTime end   = todayUTC(10, 30);
-    tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
+    tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryEditSession session;
     session.buildFromTimer(tracker, QDate::currentDate());
@@ -211,7 +211,7 @@ void HistoryEditSessionTest::test_split_registers_child_with_same_origin()
 
     const QDateTime start = todayUTC(10, 0);
     const QDateTime end   = todayUTC(10, 0, 8); // 8-second segment
-    tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
+    tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryEditSession session;
     session.buildFromTimer(tracker, QDate::currentDate());
@@ -281,7 +281,7 @@ void HistoryEditSessionTest::test_type_toggle_updates_pending_timeline()
 
     const QDateTime start = todayUTC(10, 0);
     const QDateTime end   = todayUTC(10, 30);
-    tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
+    tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryEditSession session;
     session.buildFromTimer(tracker, QDate::currentDate());
@@ -313,7 +313,7 @@ void HistoryEditSessionTest::test_no_merge_needed_for_non_overlapping()
 
     const QDateTime memStart = todayUTC(9, 0);
     const QDateTime memEnd   = todayUTC(9, 30);
-    tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
+    tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
 
     HistoryEditSession session;
     session.buildFromTimer(tracker, QDate::currentDate());
@@ -339,7 +339,7 @@ void HistoryEditSessionTest::test_merge_needed_for_overlapping_rows()
 
     const QDateTime memStart = todayUTC(10, 15);
     const QDateTime memEnd   = todayUTC(10, 45);
-    tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
+    tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
 
     HistoryEditSession session;
     session.buildFromTimer(tracker, QDate::currentDate());
@@ -645,7 +645,7 @@ void HistoryEditSessionTest::test_payload_history_vs_session_buckets()
 
     const QDateTime memStart = todayUTC(9, 0);
     const QDateTime memEnd   = todayUTC(9, 30);
-    tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
+    tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
 
     HistoryEditSession session;
     session.buildFromTimer(tracker, QDate::currentDate());
@@ -681,7 +681,7 @@ void HistoryEditSessionTest::test_payload_memory_timeline_for_commit()
     // Memory row today.
     const QDateTime memStart = todayUTC(9, 0);
     const QDateTime memEnd   = todayUTC(9, 30);
-    tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
+    tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
 
     HistoryEditSession session;
     session.buildFromTimer(tracker, QDate::currentDate());
@@ -717,7 +717,7 @@ void HistoryEditSessionTest::test_payload_memory_absorbs_merged_memory_row()
     // Memory Activity row 10:15–10:45 (overlaps DB row)
     const QDateTime memStart = todayUTC(10, 15);
     const QDateTime memEnd   = todayUTC(10, 45);
-    tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
+    tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
 
     HistoryEditSession session;
     session.buildFromTimer(tracker, QDate::currentDate());
@@ -873,7 +873,7 @@ void HistoryEditSessionTest::test_C3_payload_violation_none_for_ordinary_edit()
         TimeDuration::fromPersistedRow(DurationType::Pause, todayUTC(8, 0), todayUTC(8, 30)));
 
     TimeTracker tracker(settings, fakeDb);
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, todayUTC(9, 0), todayUTC(9, 30)));
 
     HistoryEditSession session;
@@ -953,7 +953,7 @@ void HistoryEditSessionTest::test_C3_payload_flags_memory_origin_overlap_instead
 
     TimeTracker tracker(settings, fakeDb);
     const SegmentId pauseId = SegmentId::mint();
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Pause, todayUTC(10, 15), todayUTC(10, 45), pauseId));
 
     HistoryEditSession session;
@@ -1105,7 +1105,7 @@ void HistoryEditSessionTest::test_D2_buildFromTimer_uses_explicit_today_not_real
     const QDate pinnedDate(2019, 3, 15);
     const QDateTime start(pinnedDate, QTime(10, 0), Qt::UTC);
     const QDateTime end(pinnedDate, QTime(10, 30), Qt::UTC);
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryEditSession session;
@@ -1170,7 +1170,7 @@ void HistoryEditSessionTest::test_D9_displayCount_reflects_split_immediately()
 
     const QDateTime start = todayUTC(10, 0);
     const QDateTime end   = todayUTC(10, 0, 8);
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryEditSession session;
@@ -1195,7 +1195,7 @@ void HistoryEditSessionTest::test_D9_pageTitle_reflects_dynamic_count()
 
     const QDateTime start = todayUTC(10, 0);
     const QDateTime end   = todayUTC(10, 0, 8);
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryEditSession session;
@@ -1219,7 +1219,7 @@ void HistoryEditSessionTest::test_D9_splitRow_registers_origin_and_returns_ids()
     const QDateTime start = todayUTC(10, 0);
     const QDateTime end   = todayUTC(10, 0, 8);
     const SegmentId origId = SegmentId::mint();
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, start, end, origId));
 
     HistoryEditSession session;
@@ -1268,7 +1268,7 @@ void HistoryEditSessionTest::test_D9_setCompletedType_updates_type_and_marks_pag
     const QDateTime start = todayUTC(10, 0);
     const QDateTime end   = todayUTC(10, 30);
     const SegmentId segId = SegmentId::mint();
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, start, end, segId));
 
     HistoryEditSession session;
@@ -1293,7 +1293,7 @@ void HistoryEditSessionTest::test_D9_setCompletedType_unknown_id_returns_false()
 
     const QDateTime start = todayUTC(10, 0);
     const QDateTime end   = todayUTC(10, 30);
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryEditSession session;
@@ -1436,7 +1436,7 @@ void HistoryEditSessionTest::test_D9_splitRow_rejects_source_row_under_3_seconds
 
     const QDateTime start = todayUTC(10, 0, 0);
     const QDateTime end = start.addMSecs(2999); // just under the 3s minimum
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryEditSession session;
@@ -1459,7 +1459,7 @@ void HistoryEditSessionTest::test_D9_splitRow_accepts_source_row_at_exactly_3_se
 
     const QDateTime start = todayUTC(10, 0, 0);
     const QDateTime end = start.addMSecs(3000); // exactly at the 3s minimum
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryEditSession session;
@@ -1482,7 +1482,7 @@ void HistoryEditSessionTest::test_D9_splitRow_rejects_first_half_under_1_second_
 
     const QDateTime start = todayUTC(10, 0, 0);
     const QDateTime end = start.addMSecs(5000);
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryEditSession session;
@@ -1506,7 +1506,7 @@ void HistoryEditSessionTest::test_D9_splitRow_rejects_second_half_under_1_second
 
     const QDateTime start = todayUTC(10, 0, 0);
     const QDateTime end = start.addMSecs(5000);
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryEditSession session;
@@ -1530,7 +1530,7 @@ void HistoryEditSessionTest::test_D9_splitRow_accepts_first_half_at_exactly_1_se
 
     const QDateTime start = todayUTC(10, 0, 0);
     const QDateTime end = start.addMSecs(3000);
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryEditSession session;
@@ -1557,7 +1557,7 @@ void HistoryEditSessionTest::test_D9_splitRow_accepts_second_half_at_exactly_1_s
 
     const QDateTime start = todayUTC(10, 0, 0);
     const QDateTime end = start.addMSecs(3000);
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
 
     HistoryEditSession session;
@@ -1590,7 +1590,7 @@ void HistoryEditSessionTest::test_D9_splitRejection_none_for_valid_row()
     TimeTracker tracker(settings, fakeDb);
 
     const QDateTime start = todayUTC(10, 0, 0);
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, start, start.addMSecs(3000)));
 
     HistoryEditSession session;
@@ -1608,7 +1608,7 @@ void HistoryEditSessionTest::test_D9_splitRejection_TooShort_for_short_row()
     TimeTracker tracker(settings, fakeDb);
 
     const QDateTime start = todayUTC(10, 0, 0);
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, start, start.addMSecs(2999)));
 
     HistoryEditSession session;

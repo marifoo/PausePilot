@@ -1,6 +1,7 @@
 #include "test_history_commit.h"
 #include <QtTest>
 #include <QMessageBox>
+#include <algorithm>
 
 #include "../historydialog.h"
 #include "../historyeditsession.h"
@@ -47,8 +48,9 @@ void HistoryCommitTest::test_accept_stays_open_on_db_failure()
     TimeTracker tracker(settings, db);
 
     const QDateTime now = QDateTime::currentDateTime();
-    tracker.sessionState_dbg().durations.push_back(
-        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-30), now.addSecs(-20)));
+    const TimeDuration seeded =
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-30), now.addSecs(-20));
+    tracker.seedCompletedDuration_dbg(seeded);
 
     std::deque<TimeDuration> dbDurations;
     dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-19), now.addSecs(-10)));
@@ -85,8 +87,12 @@ void HistoryCommitTest::test_accept_stays_open_on_db_failure()
     QVERIFY(dialog.result() != QDialog::Accepted);
 
     // TimeTracker state must be unchanged.
-    QCOMPARE(tracker.sessionState_dbg().durations.size(), static_cast<size_t>(1));
-    QCOMPARE(tracker.sessionState_dbg().durations[0].type, DurationType::Activity);
+    const auto completedAfterFailedAccept = tracker.completedTimeline();
+    QCOMPARE(completedAfterFailedAccept.completed().size(), static_cast<size_t>(1));
+    const auto& rowAfterFailedAccept = *std::find_if(
+        completedAfterFailedAccept.completed().begin(), completedAfterFailedAccept.completed().end(),
+        [&](const TimeDuration& d) { return d.segment_id == seeded.segment_id; });
+    QCOMPARE(rowAfterFailedAccept.type, DurationType::Activity);
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +117,7 @@ void HistoryCommitTest::test_accept_stays_open_on_merge_decline()
     std::deque<TimeDuration> dbDurations;
     dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, dbStart, dbEnd));
     QVERIFY(tracker.replaceAll(Timeline(dbDurations, std::nullopt), Timeline({}, std::nullopt)).ok());
-    tracker.sessionState_dbg().durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
+    tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
 
     HistoryDialog dialog(tracker, settings);
 
@@ -129,7 +135,7 @@ void HistoryCommitTest::test_accept_stays_open_on_merge_decline()
     QVERIFY(dialog.result() != QDialog::Accepted);
 
     // TimeTracker session unchanged.
-    QCOMPARE(tracker.sessionState_dbg().durations.size(), static_cast<size_t>(1));
+    QCOMPARE(tracker.completedTimeline().completed().size(), static_cast<size_t>(1));
 }
 
 // ---------------------------------------------------------------------------
@@ -146,7 +152,7 @@ void HistoryCommitTest::test_accept_closes_on_success()
     TimeTracker tracker(settings, db);
 
     const QDateTime now = QDateTime::currentDateTime();
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-30), now.addSecs(-10)));
 
     HistoryDialog dialog(tracker, settings);
@@ -295,7 +301,7 @@ void HistoryCommitTest::test_merge_save_survives_late_crash_recovery()
     // An in-memory session row 10:15–10:45 that overlaps the DB row → merge.
     const QDateTime memStart(today, QTime(10, 15, 0), Qt::UTC);
     const QDateTime memEnd(today, QTime(10, 45, 0), Qt::UTC);
-    tracker.sessionState_dbg().durations.push_back(
+    tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
 
     // Build the save payload (normalization merges the two rows) and persist it,
