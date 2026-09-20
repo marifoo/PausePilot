@@ -85,6 +85,35 @@ private slots:
     // here (not in qtest) because qtest's aggregate never links
     // contentwidget.cpp/mainwin.cpp.
     void test_D10_lock_resume_updates_button_exactly_once();
+
+    // D13f: button-to-tracker-to-widget composition, driven by a REAL
+    // QTest::mouseClick on the actual QPushButton -- not a hand-invoked call
+    // to ContentWidget::pressedStartPauseButton()/pressedStopButton() or
+    // TimeTracker::useTimerViaButton(). Proves the whole chain (button
+    // clicked() -> ContentWidget slot -> startPausePressed()/stopPressed()
+    // -> MainWin's connect() -> TimeTracker::onStartPausePressed()/
+    // onStopPressed() -> transitioned() -> ContentWidget::onTransitioned())
+    // is actually wired, not merely that each link works in isolation.
+    void test_start_button_click_starts_tracker_and_updates_widget();
+    void test_stop_button_click_stops_tracker_and_updates_widget();
+
+    // D13f: quit/shutdown composition through the REAL application entry
+    // point (main.cpp), not the narrowed MainWin/ShutdownCoordinator seam
+    // above. A real SIGTERM exercises the full chain UnixSignalBridge's
+    // signal handler -> self-pipe -> QSocketNotifier::activated (a real Qt
+    // signal fired by the real event loop, not a hand-invoked slot call) ->
+    // main.cpp's lambda -> MainWin::onAboutToQuit() -> shutdown() ->
+    // ShutdownCoordinator -> SqliteSessionStore -> QCoreApplication::quit().
+    void test_production_sigterm_drains_and_writes_clean_shutdown_marker();
+
+    // D13f (F3, R02-001 follow-up): the mainwin.cpp:48 connect(&timetracker_,
+    // &TimeTracker::stopped, health_monitor_, &HealthMonitor::reset) wiring,
+    // compiled through the REAL MainWin owner instead of
+    // qtest/test_healthmonitor.cpp's hand-rolled duplicate of the same
+    // connect() (its own comment says it exists only because "MainWin is
+    // GUI/not in the test build" -- apptest links mainwin.cpp, so that
+    // workaround is no longer necessary here).
+    void test_mainwin_stopped_rearms_health_monitor_through_real_wiring();
 };
 
 #endif // TEST_APPSHELL_H

@@ -1,6 +1,7 @@
 #include "test_appshell.h"
 #include "fakesessionstore.h"
 #include "fakeclock.h"
+#include "healthmonitor.h"
 #include "mainwin.h"
 #include "shutdowncoordinator.h"
 #include "timetracker.h"
@@ -20,6 +21,9 @@
 #include <QProcessEnvironment>
 #include <QPushButton>
 #include <QSocketNotifier>
+#include <QSqlDatabase>
+#include <QSqlError>
+#include <QSqlQuery>
 #include <QTimer>
 #include <functional>
 #include <memory>
@@ -1221,4 +1225,236 @@ void AppShellTest::test_D10_lock_resume_updates_button_exactly_once()
     // discard, shutdown, or fatal latch.
     tracker.useTimerViaButton(Button::Stop);
     QCOMPARE(startPauseButton->text(), QString("START"));
+}
+
+// ============================================================================
+// D13f: button-to-tracker-to-widget, driven by a real QTest::mouseClick
+// rather than a hand-invoked call to the button's slot or to
+// TimeTracker::useTimerViaButton(). The stop button carries no objectName
+// (unlike startPauseButton, wired for D10), so it is located by its fixed
+// label text, matching how a real user would find it.
+// ============================================================================
+
+namespace {
+
+QPushButton* findButtonByText(QWidget* root, const QString& text)
+{
+    for (QPushButton* button : root->findChildren<QPushButton*>()) {
+        if (button->text() == text)
+            return button;
+    }
+    return nullptr;
+}
+
+} // namespace
+
+void AppShellTest::test_start_button_click_starts_tracker_and_updates_widget()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+    MainWin mainWin(settings, tracker, fakeDb, coordinator);
+
+    QPushButton* startPauseButton = mainWin.findChild<QPushButton*>("startPauseButton");
+    QVERIFY2(startPauseButton, "ContentWidget's start/pause button must be reachable via objectName");
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(startPauseButton->text(), QString("START"));
+
+    // Act: a real click, not tracker.useTimerViaButton() or
+    // ContentWidget::pressedStartPauseButton() called directly. This only
+    // reaches TimeTracker through MainWin::setupCentralWidget()'s
+    // connect(content_widget_, &ContentWidget::startPausePressed, &timetracker,
+    // &TimeTracker::onStartPausePressed).
+    QTest::mouseClick(startPauseButton, Qt::LeftButton);
+
+    // Assert: the tracker actually transitioned, and the label update came
+    // back through the real transitioned() -> ContentWidget::onTransitioned()
+    // connection, not merely from the click handler's own bookkeeping.
+    QVERIFY2(tracker.isActive(), "clicking Start must actually start the tracker through the real wiring");
+    QCOMPARE(startPauseButton->text(), QString("PAUSE"));
+
+    // Cleanup
+    tracker.useTimerViaButton(Button::Stop);
+}
+
+void AppShellTest::test_stop_button_click_stops_tracker_and_updates_widget()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+    MainWin mainWin(settings, tracker, fakeDb, coordinator);
+
+    QPushButton* startPauseButton = mainWin.findChild<QPushButton*>("startPauseButton");
+    QVERIFY2(startPauseButton, "ContentWidget's start/pause button must be reachable via objectName");
+    QPushButton* stopButton = findButtonByText(&mainWin, "STOP");
+    QVERIFY2(stopButton, "ContentWidget's stop button must be reachable by its label");
+
+    QTest::mouseClick(startPauseButton, Qt::LeftButton);
+    QVERIFY(tracker.isActive());
+
+    // Act: a real click on the stop button. This only reaches TimeTracker
+    // through MainWin::setupCentralWidget()'s connect(content_widget_,
+    // &ContentWidget::stopPressed, &timetracker, &TimeTracker::onStopPressed).
+    QTest::mouseClick(stopButton, Qt::LeftButton);
+
+    // Assert
+    QVERIFY2(tracker.isStopped(), "clicking Stop must actually stop the tracker through the real wiring");
+    QCOMPARE(startPauseButton->text(), QString("START"));
+}
+
+// ============================================================================
+// D13f: quit/shutdown composition through the real application entry point.
+// Unlike every test above (which builds MainWin/ShutdownCoordinator/
+// TimeTracker directly inside this process), this spawns the actual
+// production binary so main.cpp's own construction order and wiring --
+// UnixSignalBridge's self-pipe, the QSocketNotifier it is wired to, and the
+// lambda that calls MainWin::onAboutToQuit() then QCoreApplication::quit()
+// -- all run for real. A hand-invoked mainWin.onAboutToQuit() call (as the
+// A3 tests above use) cannot exercise any of that: it does not exist in
+// apptest's own process at all, since apptest never links main.cpp.
+// ============================================================================
+
+void AppShellTest::test_production_sigterm_drains_and_writes_clean_shutdown_marker()
+{
+    // Arrange: autostart disabled (see the comment on
+    // test_production_active_owner_survives_old_lock_timestamp) so the
+    // tracker is provably in Mode::None and the drain this test cares about
+    // is the unconditional "already-stopped, no pending payload" path -- not
+    // dependent on the host's desktop-lock state.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString dbPath = QDir(tempDir.path()).filePath("uTimer.sqlite");
+    QSettings ownerSettings(createSettingsFile(tempDir.path(), 7), QSettings::IniFormat);
+    ownerSettings.setValue("uTimer/press_start_button_on_app_start", false);
+    ownerSettings.sync();
+
+    ProcessGuard production;
+    QVERIFY2(startProduction(production.process, tempDir.path()),
+             qPrintable(startFailureMessage(production.process)));
+    QVERIFY2(waitForFile(dbPath, 5000), "production did not initialize the database");
+    QTest::qWait(100);
+
+    // Act: a real SIGTERM, delivered by the kernel to the production
+    // process's real signal handler -- not a call to any uTimer function.
+    production.process.terminate();
+    const bool finished = production.process.waitForFinished(5000);
+
+    // Assert: the process actually quit (a severed
+    // UnixSignalBridge/QSocketNotifier wiring leaves the signal masked by
+    // the handler with nothing draining it, so the process would hang here
+    // instead -- this is what proves the assertion has teeth). The
+    // diagnostics are folded into the failure message precisely because
+    // they are wanted exactly when `finished` is false.
+    const QByteArray diagnostics = production.process.readAllStandardError()
+        + production.process.readAllStandardOutput();
+    QVERIFY2(finished, qPrintable(QString(
+        "production did not quit after SIGTERM (see UnixSignalBridge wiring in main.cpp): %1")
+        .arg(QString::fromLocal8Bit(diagnostics))));
+    QCOMPARE(production.process.exitStatus(), QProcess::NormalExit);
+    QCOMPARE(production.process.exitCode(), 0);
+
+    const QString markerConnName = "sigterm_marker_check";
+    {
+        QSqlDatabase markerDb = QSqlDatabase::addDatabase("QSQLITE", markerConnName);
+        markerDb.setDatabaseName(dbPath);
+        QVERIFY2(markerDb.open(), qPrintable(markerDb.lastError().text()));
+        QSqlQuery query(markerDb);
+        QVERIFY(query.exec("SELECT value FROM app_settings WHERE key = 'last_clean_shutdown'"));
+        QVERIFY2(query.next(), "SIGTERM must drain and write the clean-shutdown marker");
+        QVERIFY(!query.value(0).toString().isEmpty());
+        markerDb.close();
+    }
+    QSqlDatabase::removeDatabase(markerConnName);
+}
+
+// ============================================================================
+// D13f (F3): mainwin.cpp:48's connect(&timetracker_, &TimeTracker::stopped,
+// health_monitor_, &HealthMonitor::reset) -- a real signal/slot connection
+// made by MainWin itself, exercised here through the actual owner instead of
+// qtest/test_healthmonitor.cpp's hand-rolled duplicate of the same connect().
+// health_monitor_ is reachable via findChild<HealthMonitor*>() because
+// MainWin constructs it as `new HealthMonitor(settings, this)` -- a QObject
+// child, not a private value member.
+// ============================================================================
+
+void AppShellTest::test_mainwin_stopped_rearms_health_monitor_through_real_wiring()
+{
+    // Arrange: enable only the too-much-activity warning (fixed threshold,
+    // 9h45m -- Settings does not expose it as configurable) so exactly one
+    // warning fires per crossing, and a FakeClock anchored at local 00:30 on
+    // a fixed date so two ~9h46m advances both land well before the next
+    // local midnight in every gate timezone (never a real-time wait).
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/show_warning_after_9h45min_activity", true);
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+    // FakeClock declared before TimeTracker so it outlives it (see
+    // qtest/test_timer.cpp:76-77): TimeTracker captures it by reference as
+    // its now-provider, and ~TimeTracker() -> drainForShutdown() ->
+    // now_provider_() can still run at scope exit.
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(0, 30, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+    MainWin mainWin(settings, tracker, fakeDb, coordinator);
+
+    HealthMonitor* healthMonitor = mainWin.findChild<HealthMonitor*>();
+    QVERIFY2(healthMonitor, "MainWin's HealthMonitor child must be reachable via findChild");
+    // HealthMonitor's constructor arms both warning kinds unconditionally;
+    // only reset() applies the per-setting suppression (shown_ = !enabled).
+    // Production reaches this via MainWin::start(); call it directly here to
+    // establish the same baseline without start()'s unrelated side effects
+    // (autostart button press, window placement).
+    healthMonitor->reset();
+
+    // Detach only the modal-showing connection (MainWin::showMsgBox opens a
+    // real QMessageBox::exec(), which would hang under offscreen QPA with
+    // nothing to dismiss it) -- the connect() under test
+    // (TimeTracker::stopped -> HealthMonitor::reset) is left untouched.
+    QObject::disconnect(healthMonitor, &HealthMonitor::warningTriggered, &mainWin, nullptr);
+    QSignalSpy warningSpy(healthMonitor, &HealthMonitor::warningTriggered);
+
+    constexpr qint64 kThresholdMsec = (9 * 60 + 45) * 60000LL; // 9h45m, fixed in Settings.
+    constexpr qint64 kAdvanceMsec = kThresholdMsec + 60000; // +1 minute margin.
+
+    // Act/Assert, session 1: cross the threshold -- the warning fires once
+    // through the real onTick() -> HealthMonitor::check() path (mirroring
+    // production's 100ms QTimer, which apptest does not link).
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(kAdvanceMsec);
+    mainWin.onTick();
+    QCOMPARE(warningSpy.count(), 1);
+
+    // Act: stop the session. This is the real signal under test -- if
+    // mainwin.cpp:48's connect() were missing, HealthMonitor would never be
+    // told to re-arm. Note: this assumes mainwin.cpp:48 is a direct
+    // connection -- no event loop is spun here, so a legitimate change to
+    // Qt::QueuedConnection would fail this test for a reason other than a
+    // missing/broken connection.
+    tracker.useTimerViaButton(Button::Stop);
+
+    // Act/Assert, session 2: cross the threshold again from a fresh start.
+    // If the connection above actually fired, the warning fires again; if
+    // it did not, HealthMonitor::activity_warning_shown_ is still latched
+    // from session 1 and this stays silent forever (once-per-application-
+    // lifetime instead of once-per-session).
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(kAdvanceMsec);
+    mainWin.onTick();
+    QCOMPARE(warningSpy.count(), 2);
+
+    // Cleanup
+    tracker.useTimerViaButton(Button::Stop);
 }
