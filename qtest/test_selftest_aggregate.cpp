@@ -19,6 +19,11 @@ void SelfTestChildWarnSuite::test_deliberateWarn()
     qWarning("deliberate self-test QWARN (D13d aggregate self-test)");
 }
 
+void SelfTestChildAbortSuite::test_deliberateAbort()
+{
+    qFatal("deliberate self-test abort (D15 truncation self-test)");
+}
+
 namespace {
 
 struct ChildRun {
@@ -65,4 +70,16 @@ void SelfTestAggregateTest::test_warnChildSuite_makesAggregateNonzero()
     QVERIFY2(run.exitCode != 0, "a QWARN-emitting child suite must make the aggregate exit nonzero");
     QVERIFY2(run.output.contains("unexpected QWARN"),
         qPrintable("the QWARN must actually be counted, not swallowed:\n" + run.output));
+}
+
+void SelfTestAggregateTest::test_abortChildSuite_reportsTruncation()
+{
+    const ChildRun run = runSelfTestChild(QStringLiteral("abort"));
+    QVERIFY2(run.exitCode != 0, "an aborting child suite must make the aggregate exit nonzero");
+    QVERIFY2(run.output.contains("QFATAL"),
+        qPrintable("the fatal diagnostic must survive the abort, not be lost in the buffered pipe:\n" + run.output));
+    QVERIFY2(run.output.contains("TRUNCATED"),
+        qPrintable("a truncated run must say plainly that it was truncated:\n" + run.output));
+    QVERIFY2(run.output.contains("SelfTestChildPassSuite"),
+        qPrintable("the suite that completed before the abort must still be accounted for:\n" + run.output));
 }

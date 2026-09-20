@@ -1,6 +1,7 @@
 #include <QApplication>
 #include <QtTest>
 #include <atomic>
+#include <csignal>
 #include <cstring>
 #include <string>
 #ifndef _WIN32
@@ -66,6 +67,45 @@ class SelfTestAggregateTest;
 // ---------------------------------------------------------------------------
 
 static std::atomic<int> g_unexpectedWarnings{0};
+
+// ---------------------------------------------------------------------------
+// D15 part 1: truncation detection.
+//
+// A Q_ASSERT (or any qFatal) inside a suite calls abort() and never returns
+// to runTest()/runChildTest() -- the normal nonzero-status latch never runs,
+// and (before this fix) the fully-buffered stdout pipe from the QWARN tee
+// above discarded whatever QFATAL/FAIL! diagnostics had already been queued.
+// A SIGABRT handler is the only place that reliably runs at the moment of
+// abort: it reports how many suites had completed and which one was running,
+// written directly to the real (pre-dup2) stdout fd so the message survives
+// even if the tee thread dies mid-drain.
+// ---------------------------------------------------------------------------
+
+static int g_realStdoutFd = -1;
+static std::atomic<int> g_suitesCompleted{0};
+static std::atomic<int> g_expectedSuiteCount{19};
+static const char* g_currentSuiteName = "<none>";
+
+#ifndef _WIN32
+
+static void abortDiagnosticHandler(int sig)
+{
+    char buf[256];
+    const int n = snprintf(buf, sizeof(buf),
+        "\nTRUNCATED: qtest aborted after %d of %d suite(s) completed "
+        "(last started: %s) -- see QFATAL/FAIL! diagnostics above for cause\n",
+        g_suitesCompleted.load(), g_expectedSuiteCount.load(), g_currentSuiteName);
+    if (n > 0 && g_realStdoutFd >= 0)
+        write(g_realStdoutFd, buf, static_cast<size_t>(n));
+
+    // Restore the default handler and re-raise so the process still
+    // terminates via SIGABRT (rc=134) exactly as it would have without this
+    // handler -- we only add the diagnostic, not new exit semantics.
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+#endif // !_WIN32
 
 #ifndef _WIN32
 
@@ -133,6 +173,17 @@ int main(int argc, char *argv[])
     dup2(pipefd[1], STDOUT_FILENO);
     close(pipefd[1]);
 
+    // D15 part 1: the redirected stdout above is a pipe, so the C library
+    // defaults it to fully buffered. QTest's own PASS/FAIL/QFATAL diagnostics
+    // are written through this same stdout FILE*; a Q_ASSERT's abort() never
+    // flushes that buffer, so a fatal message queued just before the abort
+    // was silently discarded. Line-buffering makes every diagnostic line hit
+    // the pipe (and the tee thread) as soon as it is printed.
+    setvbuf(stdout, nullptr, _IOLBF, 0);
+
+    g_realStdoutFd = realStdout;
+    signal(SIGABRT, abortDiagnosticHandler);
+
     TeeCtx teeCtx = { pipefd[0], realStdout };
     pthread_t tid;
     pthread_create(&tid, nullptr, teeThread, &teeCtx);
@@ -151,16 +202,19 @@ int main(int argc, char *argv[])
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--self-test-child=fail") == 0) selfTestChildMode = "fail";
         else if (std::strcmp(argv[i], "--self-test-child=warn") == 0) selfTestChildMode = "warn";
+        else if (std::strcmp(argv[i], "--self-test-child=abort") == 0) selfTestChildMode = "abort";
     }
 
     // Lambda to run a test suite and track failures
     auto runTest = [&](auto* test, const char* name) {
+        g_currentSuiteName = name;
         qDebug() << "\n================" << name << "================";
         int result = QTest::qExec(test, argc, argv);
         delete test;
         if (result != 0) {
             status = result;
         }
+        g_suitesCompleted.fetch_add(1);
         return result;
     };
 
@@ -169,20 +223,31 @@ int main(int argc, char *argv[])
     // process's own argv carries the --self-test-child= flag, which is not a
     // test function.
     auto runChildTest = [&](auto* test, const char* name) {
+        g_currentSuiteName = name;
         qDebug() << "\n================" << name << "================";
         int result = QTest::qExec(test);
         delete test;
         if (result != 0) {
             status = result;
         }
+        g_suitesCompleted.fetch_add(1);
         return result;
     };
 
     if (selfTestChildMode) {
         if (std::strcmp(selfTestChildMode, "fail") == 0) {
+            g_expectedSuiteCount = 2;
             runChildTest(new SelfTestChildFailSuite, "SelfTestChildFailSuite");
             runChildTest(new SelfTestChildPassSuite, "SelfTestChildPassSuite");
+        } else if (std::strcmp(selfTestChildMode, "abort") == 0) {
+            // D15 part 1: pins the truncation detector itself. The abort
+            // suite never returns from qExec(), so g_suitesCompleted stays
+            // at 1 and the SIGABRT handler above reports exactly that.
+            g_expectedSuiteCount = 2;
+            runChildTest(new SelfTestChildPassSuite, "SelfTestChildPassSuite");
+            runChildTest(new SelfTestChildAbortSuite, "SelfTestChildAbortSuite");
         } else {
+            g_expectedSuiteCount = 1;
             runChildTest(new SelfTestChildWarnSuite, "SelfTestChildWarnSuite");
         }
     } else {
@@ -206,6 +271,17 @@ int main(int argc, char *argv[])
         runTest(new ContractMatrixTest, "ContractMatrixTest");
         runTest(new DayValidityTest, "DayValidityTest");
         runTest(new SelfTestAggregateTest, "SelfTestAggregateTest");
+    }
+
+    // D15 part 1: defensive check that the suite loop above actually reached
+    // its expected suite count. This is unreachable on a real abort -- the
+    // process dies via SIGABRT before returning here; abortDiagnosticHandler
+    // above is what reports that case -- it only catches a suite silently
+    // dropped from the loop without aborting.
+    if (g_suitesCompleted.load() != g_expectedSuiteCount.load()) {
+        fprintf(stdout, "TRUNCATED: only %d of %d suite(s) completed\n",
+                g_suitesCompleted.load(), g_expectedSuiteCount.load());
+        if (status == 0) status = 1;
     }
 
     qDebug() << "\n================ All Tests Complete ================";

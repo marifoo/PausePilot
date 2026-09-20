@@ -16,6 +16,7 @@ class SelfTestAggregateTest : public QObject
 private slots:
     void test_failingChildSuite_makesAggregateNonzero_andLaterSuiteStillRuns();
     void test_warnChildSuite_makesAggregateNonzero();
+    void test_abortChildSuite_reportsTruncation();
 };
 
 // --- Child-mode-only fixtures ------------------------------------------------
@@ -47,6 +48,17 @@ class SelfTestChildWarnSuite : public QObject
     Q_OBJECT
 private slots:
     void test_deliberateWarn();
+};
+
+/// Deliberately aborts (qFatal) mid-run, to exercise D15's truncation
+/// detection: main.cpp's SIGABRT handler must report how many suites
+/// completed before the abort, and the fatal diagnostic must survive the
+/// now-line-buffered stdout pipe instead of being lost with the tee thread.
+class SelfTestChildAbortSuite : public QObject
+{
+    Q_OBJECT
+private slots:
+    void test_deliberateAbort();
 };
 
 #endif // TEST_SELFTEST_AGGREGATE_H
