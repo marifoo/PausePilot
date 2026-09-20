@@ -48,8 +48,8 @@ int main(int argc, char *argv[])
 	// Set up the Unix signal bridge before creating QApplication. On
 	// failure, continue startup without UI, a fallback signal mechanism, or
 	// a degraded-mode flag (D4, section 2 "Application shell and
-	// diagnostics"); Logger::Log() is a silent no-op until Settings is
-	// registered below, which is exactly "if available" at this point.
+	// diagnostics"); Logger::Log() is a silent no-op until Logger is
+	// configured below, which is exactly "if available" at this point.
 	UnixSignalBridge signal_bridge;
 	if (!signal_bridge.setup()) {
 		const QString msg = "Failed to set up Unix signal bridge; graceful shutdown on SIGTERM/SIGINT/SIGHUP will not work";
@@ -100,7 +100,7 @@ int main(int argc, char *argv[])
 	QTimer timer;
 
 	Settings settings(AppPaths::settingsFile());
-	Logger::registerSettings(&settings);
+	Logger::configure(settings.logToFile());
 	LockStateWatcher lockstate_watcher(settings);
 	SqliteSessionStore session_store(settings);
 	TimeTracker time_tracker(settings, session_store);

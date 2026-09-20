@@ -38,6 +38,12 @@ private slots:
     // established, while QLockFile still recovers a stale lock.
     void test_lock_decision_maps_all_tryLock_failures();
     void test_production_permission_failure_fails_closed();
+    // D12-3 item 5: an unwritable log path must disable Logger with exactly
+    // one stderr diagnostic and no crash -- exercised via a fresh production
+    // process because Logger's file handle is a process-wide singleton
+    // opened once, and qtest's own process already spends that one open on
+    // the success path.
+    void test_production_unwritable_log_path_disables_logging_once();
     void test_production_start_reclaims_stale_lock();
     void test_production_active_owner_survives_old_lock_timestamp();
     void test_production_loser_cannot_mutate_database_with_active_owner();

@@ -1,22 +1,29 @@
 #include "logger.h"
 #include "apppaths.h"
-#include "settings.h"
 #include <QDateTime>
 #include <QFile>
 #include <QTextStream>
+#include <cstdio>
 
-const Settings* Logger::s_settings_ = nullptr;
+bool Logger::s_log_to_file_ = false;
+bool Logger::s_disabled_ = false;
+#ifndef QT_NO_DEBUG
+bool Logger::s_force_write_failure_dbg_ = false;
+#endif
 
-void Logger::registerSettings(const Settings* s)
+void Logger::configure(bool logToFile)
 {
-    s_settings_ = s;
+    s_log_to_file_ = logToFile;
 }
 
 Logger::Logger()
 {
     logfile_ = new QFile();
     logfile_->setFileName(AppPaths::logFile());
-    logfile_->open(QIODevice::ReadWrite | QIODevice::Append | QIODevice::Text);
+    if (!logfile_->open(QIODevice::ReadWrite | QIODevice::Append | QIODevice::Text)) {
+        reportFailure("open");
+        return;
+    }
 
     // Rotate on startup rather than in the destructor: the destructor never runs
     // on a crash or a Windows WM_ENDSESSION termination, which would otherwise
@@ -30,15 +37,17 @@ Logger::Logger()
     }
     if (lines.size() > max_lines_) {
         lines = lines.mid(lines.size() - max_lines_);
-        logfile_->resize(0);
-        logfile_->seek(0);
-        QTextStream out(logfile_);
-        out.setCodec("UTF-8");
-        for (const QString& l : lines) {
-            out << l << "\n";
+        const QByteArray rotated = (lines.join("\n") + "\n").toUtf8();
+        if (!logfile_->resize(0)) {
+            reportFailure("rotate");
+            return;
         }
-        out.flush();
-        logfile_->flush();
+        logfile_->seek(0);
+        const qint64 written = logfile_->write(rotated);
+        if (written != rotated.size() || !logfile_->flush()) {
+            reportFailure("rotate");
+            return;
+        }
     }
 
     log("uTimer Startup >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
@@ -46,7 +55,7 @@ Logger::Logger()
 
 void Logger::Log(const QString &text)
 {
-    if (!s_settings_ || !s_settings_->logToFile()) return;
+    if (!s_log_to_file_ || s_disabled_) return;
     static Logger instance;
     instance.log(text);
 }
@@ -58,21 +67,51 @@ QString Logger::logFilePath()
 
 void Logger::log(const QString &text)
 {
+    if (s_disabled_) return;
+
     const QString msg = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz: ") + text + "\n";
-    QTextStream out(logfile_);
-    out.setCodec("UTF-8");
-    out << msg;
-    out.flush();
-    logfile_->flush();
+    const QByteArray bytes = msg.toUtf8();
+
+#ifndef QT_NO_DEBUG
+    if (s_force_write_failure_dbg_) {
+        s_force_write_failure_dbg_ = false;
+        reportFailure("write");
+        return;
+    }
+#endif
+
+    const qint64 written = logfile_->write(bytes);
+    if (written != bytes.size() || !logfile_->flush()) {
+        reportFailure(written != bytes.size() ? "write" : "flush");
+        return;
+    }
 }
+
+void Logger::reportFailure(const char* what)
+{
+    // Only the process's first logging failure is reported; every later one
+    // is silent -- logging is already off, and re-reporting would just be
+    // repeated stderr noise for the same underlying condition.
+    if (s_disabled_) return;
+    s_disabled_ = true;
+    std::fprintf(stderr, "[Logger] disabling file logging after %s failure (%s)\n",
+                 what, qPrintable(logfile_ ? logfile_->fileName() : QString()));
+    std::fflush(stderr);
+}
+
+#ifndef QT_NO_DEBUG
+void Logger::forceWriteFailure_dbg(bool fail)
+{
+    s_force_write_failure_dbg_ = fail;
+}
+#endif
 
 Logger::~Logger()
 {
-    log("uTimer Shutdown <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
+    log("uTimer Shutdown <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
 
     if (logfile_ != nullptr) {
         logfile_->flush();
         logfile_->close();
     }
 }
-

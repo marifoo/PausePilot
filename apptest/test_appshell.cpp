@@ -596,6 +596,44 @@ void AppShellTest::test_production_permission_failure_fails_closed()
 #endif
 }
 
+void AppShellTest::test_production_unwritable_log_path_disables_logging_once()
+{
+#ifndef Q_OS_UNIX
+    QSKIP("directory-as-log-file open-failure simulation relies on POSIX file semantics");
+#else
+    // Arrange: logging enabled, but the log file's path is occupied by a
+    // directory, so Logger's QFile::open() fails while the database,
+    // settings and lock files (different names, same writable directory)
+    // are unaffected.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QSettings settings(createSettingsFile(tempDir.path(), 7), QSettings::IniFormat);
+    settings.setValue("uTimer/debug_log_to_file", true);
+    settings.sync();
+    QVERIFY(QDir(tempDir.path()).mkdir("uTimer.log"));
+
+    // Act
+    ProcessGuard production;
+    QVERIFY2(startProduction(production.process, tempDir.path()),
+             qPrintable(startFailureMessage(production.process)));
+    // LockStateWatcher's constructor issues the first-ever Logger::Log()
+    // call in this process; the database is opened right after it, so its
+    // appearance proves that first call (and Logger's open() failure) has
+    // already happened.
+    QVERIFY2(waitForFile(QDir(tempDir.path()).filePath("uTimer.sqlite"), 5000),
+             "production did not get past LockStateWatcher's startup log call");
+    QTest::qWait(100);
+
+    // Assert
+    const QByteArray diagnostics = production.process.readAllStandardError();
+    QCOMPARE(production.process.state(), QProcess::Running);
+    QVERIFY2(diagnostics.contains("[Logger]"), diagnostics.constData());
+    QCOMPARE(diagnostics.count(QByteArray("[Logger]")), 1);
+    QVERIFY2(QFileInfo(QDir(tempDir.path()).filePath("uTimer.log")).isDir(),
+             "the unwritable log path must be left untouched");
+#endif
+}
+
 void AppShellTest::test_production_start_reclaims_stale_lock()
 {
     // Arrange
