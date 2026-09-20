@@ -195,16 +195,24 @@ qint64 Settings::getExcessiveActivityThresholdMsec() const
 	return convMinToMsec(warning_activity_min_);
 }
 
-void Settings::setAutopauseState(const bool autopause_enabled)
+QSettings::Status Settings::setAutopauseState(const bool autopause_enabled)
 {
+	const bool prev = autopause_enabled_;
 	autopause_enabled_ = autopause_enabled;
 	writeAndSync();
+	if (last_sync_status_ != QSettings::NoError)
+		autopause_enabled_ = prev;
+	return last_sync_status_;
 }
 
-void Settings::setPinToTopState(const bool pinned_to_top)
+QSettings::Status Settings::setPinToTopState(const bool pinned_to_top)
 {
+	const bool prev = start_pinned_to_top_;
 	start_pinned_to_top_ = pinned_to_top;
 	writeAndSync();
+	if (last_sync_status_ != QSettings::NoError)
+		start_pinned_to_top_ = prev;
+	return last_sync_status_;
 }
 
 unsigned int Settings::getBootTimeSec() const

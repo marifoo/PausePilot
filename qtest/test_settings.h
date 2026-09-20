@@ -20,6 +20,12 @@ private slots:
     // documented default instead of silently becoming 0/false.
     void test_settings_malformed_int_uses_default();
     void test_settings_malformed_bool_uses_default();
+    // D12-3: setAutopauseState()/setPinToTopState() persist first and only
+    // update in-memory state on success; on a write failure they report the
+    // failure and retain the prior value.
+    void test_settings_setAutopauseState_success_updates_value();
+    void test_settings_setAutopauseState_write_failure_retains_prior_value();
+    void test_settings_setPinToTopState_write_failure_retains_prior_value();
 };
 
 #endif // TEST_SETTINGS_H

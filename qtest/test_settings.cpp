@@ -140,3 +140,81 @@ void SettingsTest::test_settings_malformed_bool_uses_default()
     Settings s(settingsPath);
     QCOMPARE(s.logToFile(), false);
 }
+
+// D12-3: on a successful write, setAutopauseState() reports NoError and the
+// new value is visible via isAutopauseEnabled(). Falsified by corrupting
+// settings.cpp's post-writeAndSync() success branch (i.e. leaving
+// autopause_enabled_ reverted, or returning the pre-write status).
+void SettingsTest::test_settings_setAutopauseState_success_updates_value()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = QDir(tempDir.path()).filePath("user-settings.ini");
+
+    Settings s(settingsPath);
+    const bool prior = s.isAutopauseEnabled();
+    QCOMPARE(s.setAutopauseState(!prior), QSettings::NoError);
+    QCOMPARE(s.isAutopauseEnabled(), !prior);
+}
+
+// D12-3: a write failure must be reported and must NOT change the in-memory
+// value. Falsified by corrupting settings.cpp's Settings::setAutopauseState()
+// revert-on-failure line (autopause_enabled_ = prev;) -- without it the
+// setter would keep the new value even though the file write failed.
+void SettingsTest::test_settings_setAutopauseState_write_failure_retains_prior_value()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = QDir(tempDir.path()).filePath("user-settings.ini");
+
+    // Construct successfully first (file is writable), then make the file
+    // read-only. The permission check happens at open(), so this must
+    // happen AFTER construction's writeAndSync() and BEFORE the mutator's
+    // own writeAndSync() reopens the file -- an fd opened before chmod
+    // would stay writable and the test would not reproduce the failure.
+    Settings s(settingsPath);
+    const bool prior = s.isAutopauseEnabled();
+    QFile::setPermissions(settingsPath, QFile::ReadOwner | QFile::ReadUser);
+
+    // Skip this test if we are root (root ignores read-only permissions).
+    if (QFile(settingsPath).open(QIODevice::WriteOnly)) {
+        QFile::setPermissions(settingsPath,
+            QFile::ReadOwner | QFile::WriteOwner | QFile::ReadUser | QFile::WriteUser);
+        QSKIP("Running as root — read-only file permission test not meaningful");
+    }
+
+    const QSettings::Status status = s.setAutopauseState(!prior);
+    QVERIFY2(status != QSettings::NoError, "setAutopauseState() must report the write failure");
+    QCOMPARE(s.isAutopauseEnabled(), prior);
+
+    // Restore write permission for temp dir cleanup.
+    QFile::setPermissions(settingsPath,
+        QFile::ReadOwner | QFile::WriteOwner | QFile::ReadUser | QFile::WriteUser);
+}
+
+// D12-3: same guarantee for setPinToTopState() -- falsified by corrupting
+// settings.cpp's Settings::setPinToTopState() revert-on-failure line
+// (start_pinned_to_top_ = prev;).
+void SettingsTest::test_settings_setPinToTopState_write_failure_retains_prior_value()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = QDir(tempDir.path()).filePath("user-settings.ini");
+
+    Settings s(settingsPath);
+    const bool prior = s.isPinnedStartEnabled();
+    QFile::setPermissions(settingsPath, QFile::ReadOwner | QFile::ReadUser);
+
+    if (QFile(settingsPath).open(QIODevice::WriteOnly)) {
+        QFile::setPermissions(settingsPath,
+            QFile::ReadOwner | QFile::WriteOwner | QFile::ReadUser | QFile::WriteUser);
+        QSKIP("Running as root — read-only file permission test not meaningful");
+    }
+
+    const QSettings::Status status = s.setPinToTopState(!prior);
+    QVERIFY2(status != QSettings::NoError, "setPinToTopState() must report the write failure");
+    QCOMPARE(s.isPinnedStartEnabled(), prior);
+
+    QFile::setPermissions(settingsPath,
+        QFile::ReadOwner | QFile::WriteOwner | QFile::ReadUser | QFile::WriteUser);
+}

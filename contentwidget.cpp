@@ -24,6 +24,8 @@
 #include <QCheckBox>
 #include "timeformat.h"
 #include "historydialog.h"
+#include "logger.h"
+#include <QMessageBox>
 
 static void toggleButtonColor(QPushButton* const button, const QColor& color)
 {
@@ -173,15 +175,25 @@ void ContentWidget::pressedMinToTrayButton()
 
 void ContentWidget::pressedPinToTopButton()
 {
+	const QSettings::Status status = settings_.setPinToTopState(!settings_.isPinnedStartEnabled());
+	if (status != QSettings::NoError) {
+		Logger::Log("ContentWidget: failed to persist pin-to-top setting (QSettings::Status=" + QString::number(status) + ")");
+		QMessageBox::warning(this, "Settings Not Saved", "Could not save the pin-to-top setting.");
+		return;
+	}
 	toggleButtonColor(pintotop_button_, button_hold_color_);
-	settings_.setPinToTopState(!settings_.isPinnedStartEnabled());
 	emit toggleAlwaysOnTop();
 }
 
 void ContentWidget::pressedAutoPauseButton()
 {
+	const QSettings::Status status = settings_.setAutopauseState(!settings_.isAutopauseEnabled());
+	if (status != QSettings::NoError) {
+		Logger::Log("ContentWidget: failed to persist autopause setting (QSettings::Status=" + QString::number(status) + ")");
+		QMessageBox::warning(this, "Settings Not Saved", "Could not save the autopause setting.");
+		return;
+	}
 	toggleButtonColor(autopause_button_, button_hold_color_);
-	settings_.setAutopauseState(!settings_.isAutopauseEnabled());
 	autopause_button_->setToolTip(settings_.getAutopauseThresholdMinString() + autopause_tooltip1_ + settings_.getAutopauseThresholdMinString() + autopause_tooltip2_);
 }
 

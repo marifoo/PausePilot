@@ -46,8 +46,11 @@ public:
 	qint64 getExcessiveActivityThresholdMsec() const;
 	unsigned int getBootTimeSec() const;
 	qint64 getCheckpointIntervalMsec() const;
-	void setAutopauseState(const bool autopause_enabled);
-	void setPinToTopState(const bool pinned_to_top);
+	/// Persists the new state, then applies it in-memory only if the write
+	/// succeeded. Returns the resulting syncStatus() (NoError on success);
+	/// on failure the setting keeps its prior value.
+	QSettings::Status setAutopauseState(const bool autopause_enabled);
+	QSettings::Status setPinToTopState(const bool pinned_to_top);
 };
 
 #endif // SETTINGS_H
