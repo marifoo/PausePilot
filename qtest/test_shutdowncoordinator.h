@@ -3,12 +3,30 @@
 
 #include <QObject>
 #include "testcommon.h"
+#include "fakeclock.h"
 
 class ShutdownCoordinatorTest : public QObject
 {
     Q_OBJECT
 
+private:
+    // D15 part 4: fixture-owned clock, pinned to TestCommon::fixedNow()
+    // (local noon) so Start()'s real armScheduledStop() QTimer
+    // (timetracker.cpp:654) is armed ~12 real hours out and cannot fire
+    // during any test's run, regardless of when the real wall clock crosses
+    // local midnight -- see test_shutdowncoordinator.cpp's file-header
+    // comment for the class-wide mechanism this closes. Allocated in init()
+    // and destroyed in cleanup(), which QtTest runs immediately before/after
+    // every test function -- so clock_ always outlives every TimeTracker a
+    // test constructs as a local (stack) variable within its own body,
+    // satisfying the outlives-tracker declaration-order guarantee
+    // automatically, including for tests added later without special care.
+    FakeClock* clock_ = nullptr;
+
 private slots:
+    void init();
+    void cleanup();
+
     // Test G: happy path — stop, flush, marker
     void test_G_happy_path_stop_flush_marker();
 

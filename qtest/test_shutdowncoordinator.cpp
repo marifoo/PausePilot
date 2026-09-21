@@ -8,6 +8,39 @@ using TestCommon::createSettingsFile;
 using TestCommon::fixedNow;
 
 // ============================================================================
+// D15/F1 (part 3 + part 4, B2): Start() arms a real QTimer for the scheduled
+// midnight stop at 23:59:59.500 relative to "now" (timetracker.cpp:654). On
+// the real clock, this test binary takes ~32s to run, and this suite occupies
+// roughly its last three seconds (t+29.0s..t+31.8s) -- so a run started in
+// the last ~35s of the day puts real local midnight inside that band, the
+// real QTimer fires, and whichever test happens to be live loses its ongoing
+// segment or its clean() state out from under assumptions made a few
+// statements earlier. Which test goes red varies with sub-second scheduling
+// drift -- a class defect, not a defect in any one named test (part 3 pinned
+// only the two instances a reviewer had measured red; that was insufficient).
+//
+// Fix: every test that calls Start() gets clock_, a fixture-owned FakeClock
+// pinned to fixedNow() (local noon), via init()/cleanup() below -- so a test
+// added later is pinned by default instead of needing to remember to opt in.
+// Pinning moves the real armScheduledStop() QTimer to ~12 real hours out,
+// where it cannot fire during any test's run. The one deliberate exception,
+// test_A4_forced_shutdown_with_unresolved_discard_writes_no_marker(), pins
+// its own pre-midnight anchor on purpose (it tests the cross-midnight
+// watchdog itself) and does not use clock_.
+// ============================================================================
+
+void ShutdownCoordinatorTest::init()
+{
+    clock_ = new FakeClock(fixedNow());
+}
+
+void ShutdownCoordinatorTest::cleanup()
+{
+    delete clock_;
+    clock_ = nullptr;
+}
+
+// ============================================================================
 // Test G — happy path: stop, flush, marker
 // ============================================================================
 
@@ -17,21 +50,12 @@ void ShutdownCoordinatorTest::test_G_happy_path_stop_flush_marker()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    // D15/F1 (part 3, B2): Start() arms a real QTimer for the scheduled
-    // midnight stop at 23:59:59.500 relative to "now" (timetracker.cpp:654).
-    // On the real clock, if actual local midnight arrives mid-test that
-    // timer can fire and stop the tracker out from under this test's
-    // assumptions. Pinning to fixedNow() (local noon) arms it ~12 real
-    // hours out, so it cannot fire during this test's brief run. FakeClock
-    // declared before TimeTracker so it outlives it (see the
-    // outlives-tracker note at test_integration.cpp:614).
-    FakeClock clock(fixedNow());
     TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
-    clock.advance(20);
+    clock_->advance(20);
     QVERIFY(tracker.getOngoingDuration().has_value());
 
     fakeDb.callLog.clear();
@@ -60,10 +84,11 @@ void ShutdownCoordinatorTest::test_H_idempotent_second_run_is_noop()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock_->advance(20);
 
     coordinator.run(ShutdownMode::DrainEvents);
 
@@ -109,10 +134,11 @@ void ShutdownCoordinatorTest::test_I_force_direct_skips_retry_loop()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock_->advance(20);
     QVERIFY(tracker.getOngoingDuration().has_value());
 
     fakeDb.callLog.clear();
@@ -147,10 +173,11 @@ void ShutdownCoordinatorTest::test_K_cancelShutdown_allows_second_shutdown()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock_->advance(20);
 
     coordinator.run(ShutdownMode::DrainEvents);
     QVERIFY(fakeDb.callLog.contains("flushToDisc"));
@@ -162,7 +189,7 @@ void ShutdownCoordinatorTest::test_K_cancelShutdown_allows_second_shutdown()
 
     // User keeps working: a fresh session starts.
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock_->advance(20);
 
     fakeDb.callLog.clear();
     coordinator.run(ShutdownMode::DrainEvents);
@@ -182,10 +209,11 @@ void ShutdownCoordinatorTest::test_L_nested_run_during_pump_flushes_once()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock_->advance(20);
 
     fakeDb.callLog.clear();
 
@@ -239,10 +267,11 @@ void ShutdownCoordinatorTest::test_N_restart_during_pump_is_restopped()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock_->advance(20);
 
     // Queue a START click that fires inside pumpEvents(150), after shutdown().
     QTimer::singleShot(0, [&tracker]() {
@@ -267,10 +296,11 @@ void ShutdownCoordinatorTest::test_A3_run_incomplete_then_retryDrain_succeeds()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock_->advance(20);
 
     // Act: the store fails, so run()'s own drain is incomplete.
     fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
@@ -296,10 +326,11 @@ void ShutdownCoordinatorTest::test_A3_run_incomplete_then_retryDrain_fails()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock_->advance(20);
 
     fakeDb.commitSessionResult = SessionStoreResult::transient("still failing");
     const DrainResult first = coordinator.run(ShutdownMode::DrainEvents);
@@ -342,17 +373,19 @@ void ShutdownCoordinatorTest::test_A3_direct_and_drainevents_modes_produce_same_
 
     FakeSessionStore fakeDbDrainEvents;
     TimeTracker trackerDrainEvents(settings, fakeDbDrainEvents);
+    trackerDrainEvents.setNowProvider_dbg([this]() { return clock_->now(); });
     ShutdownCoordinator coordinatorDrainEvents(trackerDrainEvents, fakeDbDrainEvents);
     trackerDrainEvents.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock_->advance(20);
     fakeDbDrainEvents.commitSessionResult = SessionStoreResult::transient("injected failure");
     const DrainResult drainEventsResult = coordinatorDrainEvents.run(ShutdownMode::DrainEvents);
 
     FakeSessionStore fakeDbDirect;
     TimeTracker trackerDirect(settings, fakeDbDirect);
+    trackerDirect.setNowProvider_dbg([this]() { return clock_->now(); });
     ShutdownCoordinator coordinatorDirect(trackerDirect, fakeDbDirect);
     trackerDirect.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock_->advance(20);
     fakeDbDirect.commitSessionResult = SessionStoreResult::transient("injected failure");
     const DrainResult directResult = coordinatorDirect.run(ShutdownMode::Direct);
 
@@ -376,11 +409,12 @@ void ShutdownCoordinatorTest::test_A3_direct_mode_failure_emits_no_warning_and_n
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
     ShutdownCoordinator coordinator(tracker, fakeDb);
     QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
 
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock_->advance(20);
 
     // Act: OS-forced shutdown; the store fails. Per policy, a forced
     // shutdown attempts once and exits with no warning and no clean marker.
@@ -456,11 +490,12 @@ void ShutdownCoordinatorTest::test_D5_cancelShutdown_makes_history_available_wit
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     // Arrange: an active session shut down as if by WM_QUERYENDSESSION.
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock_->advance(20);
     coordinator.run(ShutdownMode::Direct);
     QVERIFY(tracker.wasShutDown());
 
@@ -491,10 +526,11 @@ void ShutdownCoordinatorTest::test_D6_incomplete_drain_skips_marker_but_still_ba
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock_->advance(20);
 
     fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
     fakeDb.callLog.clear();
@@ -526,10 +562,11 @@ void ShutdownCoordinatorTest::test_D6_marker_failure_is_not_clean_and_skips_barr
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock_->advance(20);
 
     fakeDb.setMarkerResult = SessionStoreResult::transient("injected marker failure");
     fakeDb.callLog.clear();
@@ -561,10 +598,11 @@ void ShutdownCoordinatorTest::test_D6_barrier_failure_after_successful_marker_is
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock_->advance(20);
 
     fakeDb.flushToDiscResult = SessionStoreResult::transient("injected barrier failure");
     fakeDb.callLog.clear();
@@ -593,10 +631,11 @@ void ShutdownCoordinatorTest::test_D6_disabled_history_marker_keeps_drain_clean(
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock_->advance(20);
     fakeDb.setMarkerResult = SessionStoreResult::disabled();
     fakeDb.callLog.clear();
 

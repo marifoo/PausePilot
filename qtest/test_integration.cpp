@@ -471,12 +471,21 @@ void IntegrationTest::test_F_shutdown_sequence_stop_flush_marker()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
+    // D15/F1 (part 4, B2 class): coordinator.run() below calls
+    // ShutdownCoordinator's real pumpEvents(150) -- the same
+    // Start()+real-armScheduledStop()+real-event-pump shape that made
+    // ShutdownCoordinatorTest's suite dangerous (see that file's header
+    // comment). Pinned for the same reason, even though this one test's own
+    // window is sub-second. FakeClock declared before TimeTracker so it
+    // outlives it (see the outlives-tracker note at test_integration.cpp:614).
+    FakeClock clock(fixedNow());
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     // Start the timer so there is something to stop.
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(20);
+    clock.advance(20);
     QVERIFY(tracker.isActive());
 
     // Clear the call log so the assertion only sees the shutdown sequence.
