@@ -133,6 +133,10 @@ private slots:
     void test_D9_splitRejection_none_for_valid_row();
     void test_D9_splitRejection_TooShort_for_short_row();
     void test_D9_splitRejection_OutOfRange_for_bad_indices();
+
+    // M3: an ordinary timezone change can turn a valid same-day UTC row into
+    // a single-boundary cross-midnight row on reload.
+    void test_M3_timezone_change_makes_row_single_boundary_cross_midnight();
 };
 
 #endif // TEST_HISTORYEDITSESSION_H

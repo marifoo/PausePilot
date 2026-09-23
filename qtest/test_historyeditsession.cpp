@@ -8,6 +8,9 @@
 #include "fakesessionstore.h"
 #include "fakeclock.h"
 #include "testcommon.h"
+#ifdef Q_OS_UNIX
+#include <time.h>
+#endif
 
 using TestCommon::createSettingsFile;
 using TestCommon::mk;
@@ -979,6 +982,8 @@ void HistoryEditSessionTest::test_C3_payload_drops_pre_existing_cross_type_overl
     // completely unaffected by the drop.
     QCOMPARE(payload.memoryTimeline.completed().size(), static_cast<size_t>(0));
     QVERIFY(!payload.memoryTimeline.ongoing().has_value());
+    // M3: the drop count is published for HistoryDialog's Step 2.6 confirmation.
+    QCOMPARE(payload.preExistingOverlapDrops, 1);
 }
 
 void HistoryEditSessionTest::test_C3_payload_flags_memory_origin_overlap_instead_of_dropping()
@@ -1678,4 +1683,88 @@ void HistoryEditSessionTest::test_D9_splitRejection_OutOfRange_for_bad_indices()
     // No rows on page 0.
     QCOMPARE(session.splitRejection(0, 0), HistoryEditSession::SplitError::OutOfRange);
     QCOMPARE(session.splitRejection(5, 0), HistoryEditSession::SplitError::OutOfRange);
+}
+
+void HistoryEditSessionTest::test_M3_timezone_change_makes_row_single_boundary_cross_midnight()
+{
+    // M3: buildSavePayload()'s header comment names timezone reinterpretation
+    // as an ordinary generator of the single-boundary cross-midnight
+    // category. This demonstrates it: a row stored (and originally valid,
+    // same-day) in UTC becomes a single-boundary cross-midnight row once
+    // reloaded under a timezone shifted +01:00 -- no edit, no DST, no manual
+    // DB tampering involved.
+#ifndef Q_OS_UNIX
+    QSKIP("tzset()-based TZ switching is Unix-specific");
+#else
+    // Function-local RAII guard: saves TZ, restores it (and calls tzset())
+    // on destruction, so this test cannot leak its timezone into any test
+    // that runs after it.
+    struct TzGuard {
+        std::optional<QByteArray> saved;
+        TzGuard() {
+            const char* tz = getenv("TZ");
+            saved = tz ? std::make_optional(QByteArray(tz)) : std::nullopt;
+        }
+        void set(const QByteArray& tz) {
+            qputenv("TZ", tz);
+            tzset();
+        }
+        ~TzGuard() {
+            if (saved)
+                qputenv("TZ", *saved);
+            else
+                qunsetenv("TZ");
+            tzset();
+        }
+    } tzGuard;
+
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const SegmentId rowId = SegmentId::mint();
+    const QDateTime start(QDate(2025, 6, 14), QTime(22, 30, 0), Qt::UTC);
+    const QDateTime end(QDate(2025, 6, 14), QTime(23, 30, 0), Qt::UTC);
+    fakeDb.loadDurationsResult.durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, start, end, rowId));
+
+    tzGuard.set("UTC");
+    {
+        // Optional sanity check: under UTC, this is an ordinary same-day
+        // pending row, not display-only.
+        TimeTracker tracker(settings, fakeDb);
+        HistoryEditSession session;
+        session.buildFromTimer(tracker, QDate(2025, 6, 14));
+        bool foundPending = false;
+        for (const auto& tl : session.pendingTimelines())
+            for (const auto& d : tl.completed())
+                if (d.segment_id == rowId) foundPending = true;
+        QVERIFY(foundPending);
+    }
+
+    // POSIX sign inversion: the "Etc/GMT-1" (and "UTC-1") zone names mean
+    // +01:00, not -01:00 -- POSIX TZ offsets are inverted from the
+    // conventional UTC+/-N naming. Never write "UTC+1" for this zone.
+    tzGuard.set("Etc/GMT-1");
+    {
+        // 22:30Z -> 23:30 local (14th); 23:30Z -> 00:30 local (15th): a
+        // single-boundary cross-midnight row under this offset.
+        TimeTracker tracker(settings, fakeDb);
+        HistoryEditSession session;
+        session.buildFromTimer(tracker, QDate(2025, 6, 15));
+
+        int crossMidnightCount = 0;
+        for (const auto& page : session.pages())
+            for (const auto& d : page.crossMidnight)
+                if (d.segment_id == rowId) ++crossMidnightCount;
+        QCOMPARE(crossMidnightCount, 1);
+
+        int pendingCount = 0;
+        for (const auto& tl : session.pendingTimelines())
+            for (const auto& d : tl.completed())
+                if (d.segment_id == rowId) ++pendingCount;
+        QCOMPARE(pendingCount, 0);
+    }
+#endif
 }

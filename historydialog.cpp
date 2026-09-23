@@ -110,6 +110,8 @@ void HistoryDialog::accept()
  * 1. Check result() — return false if Rejected (cancel path).
  * 2. Refresh ongoing end-time from engine (preserving any user type edit).
  * 3. Delegate payload construction (normalization, origin re-split) to session_.
+ * 3a. If the save would replace the DB and drop a display-only cross-midnight
+ *     row or a pre-existing overlap row, ask for confirmation; abort on No.
  * 4. If a merge will occur, ask for confirmation; abort on No.
  * 5. Persist via replaceAll().
  * 6. Update TimeTracker runtime state via commitEditedTimeline() — only after persistence succeeds.
@@ -183,6 +185,52 @@ bool HistoryDialog::saveChanges()
             "This change cannot be saved because it contains an invalid time entry.");
 #endif
         return false;
+    }
+
+    // Step 2.6 (M3): replaceAll() below is a whole-table replace that can
+    // silently remove rows the user never touched -- a single-boundary
+    // cross-midnight row (display-only, never carried into the payload; see
+    // buildSavePayload()) or a pre-existing Activity/Pause overlap between two
+    // persisted, unedited rows (category 3, payload.preExistingOverlapDrops).
+    // Ask before either loss, but only when the save will actually call
+    // replaceAll() (same predicate as Step 4 below).
+    int crossMidnightDrops = 0;
+    for (const auto& page : session_.pages())
+        crossMidnightDrops += static_cast<int>(page.crossMidnight.size());
+    const int overlapDrops = payload.preExistingOverlapDrops;
+    const bool willReplace = !payload.historyTimeline.completed().empty() ||
+        !payload.sessionTimeline.completed().empty();
+
+    if (willReplace && (crossMidnightDrops > 0 || overlapDrops > 0)) {
+        QString dropText;
+        if (crossMidnightDrops > 0)
+            dropText += QString("%1 entries spanning midnight will be removed.").arg(crossMidnightDrops);
+        if (overlapDrops > 0) {
+            if (!dropText.isEmpty())
+                dropText += " ";
+            dropText += QString("%1 pre-existing overlapping entries will be removed.").arg(overlapDrops);
+        }
+        dropText += " Continue saving?";
+
+#ifndef QT_NO_DEBUG
+        debugDropPromptText_ = dropText;
+        // Default to No (abort the save) rather than exec()-ing a real
+        // QMessageBox::question() when a test hits this path without setting
+        // debugDropAnswer_ -- under offscreen QPA that dialog has nothing to
+        // dismiss it and would hang the run instead of failing the assertion on
+        // saveChanges()'s return value.
+        QMessageBox::StandardButton dropAnswer = QMessageBox::No;
+        if (debugDropAnswer_.has_value()) {
+            dropAnswer = *debugDropAnswer_;
+            debugDropAnswer_ = std::nullopt;
+        }
+#else
+        const auto dropAnswer = QMessageBox::question(this, "Entries Will Be Removed",
+            dropText, QMessageBox::Yes | QMessageBox::No);
+#endif
+        if (dropAnswer != QMessageBox::Yes) {
+            return false;
+        }
     }
 
     // Step 3: Confirm if normalization merged overlapping segments.

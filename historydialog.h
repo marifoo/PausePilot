@@ -135,6 +135,17 @@ public:
     /// for the overlap confirmation.  Reset to nullopt after each saveChanges() call.
     std::optional<QMessageBox::StandardButton> debugOverlapAnswer_;
 
+    /// M3: if set, saveChanges() uses this answer instead of showing
+    /// QMessageBox::question() for the display-only-row/pre-existing-overlap
+    /// drop confirmation (Step 2.6). Defaults to No under offscreen QPA when
+    /// unset -- that dialog has nothing to dismiss it and would hang the test
+    /// run instead of failing the assertion on saveChanges()'s return value.
+    /// Reset to nullopt after each saveChanges() call.
+    std::optional<QMessageBox::StandardButton> debugDropAnswer_;
+    /// M3: the composed Step 2.6 prompt text, captured for tests to inspect
+    /// which clauses (cross-midnight/overlap) were included.
+    QString debugDropPromptText_;
+
     /// If true, saveChanges() skips QMessageBox::critical() on DB failure (still returns false).
     /// Defaults to true: under offscreen QPA a real QMessageBox::critical() has nothing to
     /// dismiss it, so an unexpected failure would hang the test run instead of failing the

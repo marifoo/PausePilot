@@ -259,6 +259,7 @@ HistoryEditSession::SavePayload HistoryEditSession::buildSavePayload() const
 {
     std::optional<TimeDuration> ongoingDurationForSave;
     std::deque<TimeDuration> unifiedCompleted;
+    int preExistingOverlapDrops = 0;
 
     for (size_t i = 0; i < pages_.size(); ++i) {
         const auto& comp = pendingTimelines_[i].completed();
@@ -366,6 +367,8 @@ HistoryEditSession::SavePayload HistoryEditSession::buildSavePayload() const
             }
         }
 
+        preExistingOverlapDrops = droppedIds.size();
+
         if (!droppedIds.empty()) {
             std::deque<TimeDuration> kept;
             for (const auto& d : unifiedCompleted)
@@ -459,6 +462,7 @@ HistoryEditSession::SavePayload HistoryEditSession::buildSavePayload() const
         Timeline(currentSessionDurations, std::nullopt),
         Timeline(currentMemoryDurations, ongoingDurationForSave),
         needsMergeConfirmation,
+        preExistingOverlapDrops,
         violation
     };
 }

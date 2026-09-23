@@ -1589,6 +1589,9 @@ void HistoryDialogTest::test_C3_saveChanges_drops_pre_existing_overlap_and_succe
     dialog.debugSkipCritical_ = true;
     dialog.done(QDialog::Accepted);
 
+    // M3 Step 2.6 also asks before this save, since it drops a pre-existing
+    // overlap row; answer Yes so the save proceeds as before.
+    dialog.debugDropAnswer_ = QMessageBox::Yes;
     QVERIFY(dialog.saveChanges());
     QCOMPARE(fakeDb.callLog.count("replaceAll"), 1);
     // The earlier-starting Activity row survives; the later-starting Pause
@@ -1754,6 +1757,9 @@ void HistoryDialogTest::test_C3_single_boundary_cross_midnight_dropped_by_unrela
     dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
 
     dialog.done(QDialog::Accepted);
+    // M3 Step 2.6 also asks before this save, since it drops a display-only
+    // cross-midnight row; answer Yes so the save proceeds as before.
+    dialog.debugDropAnswer_ = QMessageBox::Yes;
     QVERIFY(dialog.saveChanges());
 
     // Assert: after a genuine close and reopen, the single-boundary row is
@@ -2326,4 +2332,233 @@ void HistoryDialogTest::test_M2_saveChanges_silent_when_backup_present()
     QCOMPARE(dialog.debugBackupWarningShownCount_, 0);
     QCOMPARE(dialog.debugCriticalShownCount_, 0);
     QCOMPARE(fakeDb.callLog.count("replaceAll"), 1);
+}
+
+// ========================================================================
+// M3: a destructive History save that would silently drop a display-only
+// cross-midnight row or a pre-existing overlap row must ask first.
+// ========================================================================
+
+void HistoryDialogTest::test_M3_saveChanges_decline_cross_midnight_drop_preserves_rows()
+{
+    // Same real-store fixture as
+    // test_C3_single_boundary_cross_midnight_dropped_by_unrelated_save(),
+    // but declining the new Step 2.6 confirmation this time: the save must
+    // abort before any DB write, leaving the cross-midnight row in place.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore db(settings);
+    TimeTracker tracker(settings, db);
+
+    // A single-boundary cross-midnight row: yesterday 23:50 -> today 00:10.
+    const QDate yesterday = QDate::currentDate().addDays(-1);
+    const QDateTime crossMidnightStart(yesterday, QTime(23, 50, 0));
+    const QDateTime crossMidnightEnd(QDate::currentDate(), QTime(0, 10, 0));
+
+    // An ordinary same-day row the user will edit.
+    const QDateTime ordinaryStart = fixedNow().addSecs(-100);
+    const QDateTime ordinaryEnd   = fixedNow().addSecs(-50);
+    tracker.seedCompletedDuration_dbg(
+        TimeDuration::fromPersistedRow(DurationType::Activity, ordinaryStart, ordinaryEnd));
+
+    // Insert the cross-midnight row directly via SQL (bypassing the same-day
+    // invariant every uTimer write path enforces).
+    SegmentId crossMidnightId;
+    {
+        const QString connName = QString("test_m3_singleboundary_decline_%1").arg(
+            reinterpret_cast<quintptr>(&db));
+        QSqlDatabase rawDb = QSqlDatabase::addDatabase("QSQLITE", connName);
+        rawDb.setDatabaseName(db_path_);
+        QVERIFY(rawDb.open());
+        crossMidnightId = TimeDuration::createSegmentId();
+        QSqlQuery q(rawDb);
+        q.prepare(
+            "INSERT INTO durations "
+            "(segment_id, type, start_utc, end_utc, is_finalized) "
+            "VALUES (:sid, 0, :start_utc, :end_utc, 1)"
+        );
+        q.bindValue(":sid", crossMidnightId.toString());
+        q.bindValue(":start_utc", crossMidnightStart.toUTC().toString(Qt::ISODateWithMs));
+        q.bindValue(":end_utc", crossMidnightEnd.toUTC().toString(Qt::ISODateWithMs));
+        QVERIFY(q.exec());
+        rawDb.close();
+        rawDb = QSqlDatabase();
+        QSqlDatabase::removeDatabase(connName);
+    }
+
+    HistoryDialog dialog(tracker, settings);
+
+    // Edit the unrelated ordinary row.
+    dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+
+    dialog.done(QDialog::Accepted);
+    dialog.debugDropAnswer_ = QMessageBox::No;
+
+    QVERIFY(!dialog.saveChanges());
+
+    // The DB was never touched: the cross-midnight row still exists (count 1)
+    // and no other row was written.
+    SqliteSessionStore db2(settings);
+    QVERIFY(db2.ensureOpen_dbg());
+    QSqlQuery check(db2.rawDb_dbg());
+    check.prepare("SELECT COUNT(*) FROM durations WHERE segment_id = :sid");
+    check.bindValue(":sid", crossMidnightId.toString());
+    QVERIFY(check.exec());
+    QVERIFY(check.next());
+    QCOMPARE(check.value(0).toInt(), 1);
+
+    QSqlQuery totalCheck(db2.rawDb_dbg());
+    totalCheck.prepare("SELECT COUNT(*) FROM durations");
+    QVERIFY(totalCheck.exec());
+    QVERIFY(totalCheck.next());
+    QCOMPARE(totalCheck.value(0).toInt(), 1);
+    db2.closeConnection_dbg();
+}
+
+void HistoryDialogTest::test_M3_saveChanges_decline_pre_existing_overlap_preserves_rows()
+{
+    // Same FakeSessionStore fixture as
+    // test_C3_saveChanges_drops_pre_existing_overlap_and_succeeds(), but
+    // declining the new Step 2.6 confirmation: replaceAll() must never be
+    // called and both original rows must remain.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime now = fixedNow();
+    const SegmentId activityId = SegmentId::mint();
+    const SegmentId pauseId = SegmentId::mint();
+    fakeDb.loadDurationsResult.durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-400), now.addSecs(-300), activityId));
+    fakeDb.loadDurationsResult.durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-350), now.addSecs(-250), pauseId));
+
+    TimeTracker tracker(settings, fakeDb);
+    tracker.seedCompletedDuration_dbg(
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
+
+    HistoryDialog dialog(tracker, settings);
+    dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+
+    fakeDb.callLog.clear();
+    dialog.debugSkipCritical_ = true;
+    dialog.done(QDialog::Accepted);
+    dialog.debugDropAnswer_ = QMessageBox::No;
+
+    QVERIFY(!dialog.saveChanges());
+    QCOMPARE(fakeDb.callLog.count("replaceAll"), 0);
+
+    // replaceAll() was never called, so loadDurations() still projects the
+    // preset rows unchanged -- both survive.
+    const auto reload = fakeDb.loadDurations();
+    bool activityPresent = false;
+    bool pausePresent = false;
+    for (const auto& d : reload.durations) {
+        if (d.segment_id == activityId) activityPresent = true;
+        if (d.segment_id == pauseId) pausePresent = true;
+    }
+    QVERIFY(activityPresent);
+    QVERIFY(pausePresent);
+}
+
+void HistoryDialogTest::test_M3_saveChanges_combined_drop_causes_single_prompt()
+{
+    // Both category-2 (single-boundary cross-midnight) and category-3
+    // (pre-existing overlap) drops occur in the same save, alongside an
+    // unrelated edited row. Exactly one confirmation is asked, and its text
+    // carries both clauses.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDate today = QDate::currentDate();
+    const QDate yesterday = today.addDays(-1);
+
+    // One single-boundary cross-midnight row: yesterday 23:50 -> today 00:10.
+    fakeDb.loadDurationsResult.durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity,
+            QDateTime(yesterday, QTime(23, 50, 0)), QDateTime(today, QTime(0, 10, 0))));
+
+    // One pre-existing Activity/Pause overlap pair, both persisted+unedited.
+    const QDateTime now = fixedNow();
+    const SegmentId activityId = SegmentId::mint();
+    const SegmentId pauseId = SegmentId::mint();
+    fakeDb.loadDurationsResult.durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-400), now.addSecs(-300), activityId));
+    fakeDb.loadDurationsResult.durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-350), now.addSecs(-250), pauseId));
+
+    TimeTracker tracker(settings, fakeDb);
+    // An unrelated row the user edits.
+    tracker.seedCompletedDuration_dbg(
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
+
+    HistoryDialog dialog(tracker, settings);
+    dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+
+    fakeDb.callLog.clear();
+    dialog.debugSkipCritical_ = true;
+    dialog.done(QDialog::Accepted);
+    dialog.debugDropAnswer_ = QMessageBox::Yes;
+
+    QVERIFY(dialog.saveChanges());
+    QVERIFY(!dialog.debugDropAnswer_.has_value());
+    QVERIFY(dialog.debugDropPromptText_.contains("1 entries spanning midnight"));
+    QVERIFY(dialog.debugDropPromptText_.contains("1 pre-existing overlapping"));
+    QCOMPARE(fakeDb.callLog.count("replaceAll"), 1);
+}
+
+void HistoryDialogTest::test_M3_saveChanges_no_prompt_when_nothing_is_replaced()
+{
+    // Both save buckets can be empty (nothing will actually be replaced)
+    // while hasEdits() is still true and a display-only cross-midnight row
+    // exists -- the Step 2.6 prompt must not fire a false "will be removed"
+    // claim, and must not consume the debug answer seam.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDate today = QDate::currentDate();
+    const QDate yesterday = today.addDays(-1);
+    // A display-only cross-midnight row (never enters either save bucket).
+    fakeDb.loadDurationsResult.durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity,
+            QDateTime(yesterday, QTime(23, 50, 0)), QDateTime(today, QTime(0, 10, 0))));
+
+    // FakeClock declared before TimeTracker so it outlives it (see the
+    // outlives-tracker note at test_integration.cpp:614).
+    FakeClock clock(fixedNow());
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(30000); // positive-length ongoing at dialog-open
+
+    HistoryDialog dialog(tracker, settings);
+    QVERIFY(dialog.editSession_dbg().pendingTimelines()[0].ongoing().has_value());
+
+    // A8 shape: toggle the ongoing row's type (a real edit), then jump the
+    // clock backward past the segment start. saveChanges()'s refreshOngoing()
+    // then re-anchors it to a zero-length row that enters neither save
+    // bucket -- so hasEdits() is true but willReplace ends up false.
+    QVERIFY(dialog.editSession_dbg().setOngoingType(0, DurationType::Pause));
+    clock.advance(-120000);
+
+    fakeDb.callLog.clear();
+    dialog.debugSkipCritical_ = true;
+    dialog.done(QDialog::Accepted);
+    dialog.debugDropAnswer_ = QMessageBox::No;
+
+    QVERIFY(dialog.saveChanges());
+    QVERIFY(dialog.debugDropAnswer_.has_value()); // not consumed -- prompt never shown
+    QVERIFY(dialog.debugDropPromptText_.isEmpty());
+    QCOMPARE(fakeDb.callLog.count("replaceAll"), 0);
+
+    // Cleanup: restore the clock ahead of the segment start before stopping.
+    clock.setNow(fixedNow().addSecs(300));
+    tracker.useTimerViaButton(Button::Stop);
 }

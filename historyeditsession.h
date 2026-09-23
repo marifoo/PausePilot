@@ -60,6 +60,9 @@ public:
         Timeline sessionTimeline;        ///< rows to save to DB as unfinalized (ongoing only)
         Timeline memoryTimeline;         ///< rows to commit into TimeTracker's live session (current-session + ongoing)
         bool needsMergeConfirmation;     ///< true iff normalization merged overlapping rows
+        /// Count of persisted, unedited completed rows removed by the
+        /// category-3 pre-existing-overlap tie-break in buildSavePayload().
+        int preExistingOverlapDrops = 0;
         /// C3 (R13-001/R14-001): non-None means split/type-change/ongoing-conversion
         /// produced (or left in place) an unsupported row -- invalid/non-positive/
         /// cross-day interval, duplicate id, or an Activity/Pause overlap the user's
@@ -95,10 +98,13 @@ public:
     /// Two categories of out-of-contract data loaded unmodified from the
     /// database are silently dropped here rather than surfacing a violation
     /// (plan C3 step 5: this loss is explicitly accepted for out-of-contract
-    /// data, however it arose -- manual database modification, or uTimer's
-    /// own recording across a wall-clock step (in either direction), e.g. an
-    /// NTP correction or a DST transition; D2 owns removing the generating
-    /// condition, not this method):
+    /// data, however it arose -- manual database modification, uTimer's own
+    /// recording across a wall-clock step (in either direction), e.g. an NTP
+    /// correction or a DST transition, or an ordinary timezone change that
+    /// reinterprets a stored UTC row as spanning a local midnight on reload;
+    /// D2 owns removing the generating condition only for new tracker
+    /// recordings across wall-clock steps -- it cannot stop an old UTC row
+    /// from being reinterpreted in another timezone, not this method):
     ///   - a legacy single-boundary cross-midnight row (buildFromTimer() already
     ///     drops a row spanning more than one boundary; this drops the
     ///     supported one-boundary case too, instead of carrying it forward);

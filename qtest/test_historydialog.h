@@ -145,6 +145,15 @@ private slots:
     // ========================================================================
     void test_M2_saveChanges_warns_when_backup_missing();
     void test_M2_saveChanges_silent_when_backup_present();
+
+    // ========================================================================
+    // M3: a destructive History save that would silently drop a display-only
+    // cross-midnight row or a pre-existing overlap row must ask first.
+    // ========================================================================
+    void test_M3_saveChanges_decline_cross_midnight_drop_preserves_rows();
+    void test_M3_saveChanges_decline_pre_existing_overlap_preserves_rows();
+    void test_M3_saveChanges_combined_drop_causes_single_prompt();
+    void test_M3_saveChanges_no_prompt_when_nothing_is_replaced();
 };
 
 #endif // TEST_HISTORYDIALOG_H
