@@ -84,6 +84,12 @@ void SettingsTest::test_settings_defaults_and_bounds()
     writer.sync();
     Settings capped(settingsPath);
     QCOMPARE(capped.getCheckpointIntervalMsec(), convMinToMsec(60));
+
+    // Zero is a valid sentinel value meaning "disabled"
+    writer.setValue("uTimer/checkpoint_interval_minutes", 0);
+    writer.sync();
+    Settings disabled(settingsPath);
+    QCOMPARE(disabled.getCheckpointIntervalMsec(), 0LL);
 }
 
 // A14: boot_time_sec_ is the only numeric key without a qBound; a garbage/huge

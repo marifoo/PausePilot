@@ -1189,7 +1189,9 @@ TimeTracker::EditCommitResult TimeTracker::commitEditedTimeline(const Timeline& 
             const Mode from = mode_;
             mode_ = desired;
             if (desired == Mode::Activity) {
-                checkpointTimer_.start();   // checkpoints run only in Activity
+                if (checkpoint_interval_msec_ > 0 && !is_locked_ && !dialog_open_) {
+                    checkpointTimer_.start();   // checkpoints run only in Activity and only while enabled and not suspended
+                }
             } else {
                 checkpointTimer_.stop();
             }

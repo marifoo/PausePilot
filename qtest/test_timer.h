@@ -156,6 +156,10 @@ private slots:
     void test_commitEditedTimeline_mode_aligns_with_edited_ongoing_type();
     void test_D10_editApplied_pause_to_activity_emits_transitioned();
 
+    // M7: zero checkpoint interval and exclusive-edit guards
+    void test_M7_zero_checkpoint_interval_edit_to_activity_does_not_arm_timer();
+    void test_M7_edit_to_activity_during_exclusive_edit_does_not_arm_timer();
+
     // Disabled history is a no-op, not a save/checkpoint failure
     void test_disabled_history_stop_keeps_clean_state_no_warning();
     void test_disabled_history_commitEditedTimeline_succeeds();

@@ -2613,6 +2613,85 @@ void TimerTest::test_D10_editApplied_pause_to_activity_emits_transitioned()
     QCOMPARE(t.cause, TimeTracker::TransitionCause::EditApplied);
 }
 
+// M7: checkpoint interval 0 disables checkpoints; edit must not arm a zero-interval timer
+void TimerTest::test_M7_zero_checkpoint_interval_edit_to_activity_does_not_arm_timer()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+
+    // Set checkpoint interval to 0 (disabled)
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/checkpoint_interval_minutes", 0);
+    writer.sync();
+
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(10);
+    tracker.useTimerViaButton(Button::Pause);
+    QVERIFY(tracker.isPaused());
+    QVERIFY(!tracker.isCheckpointTimerActive_dbg());
+
+    auto liveOngoing = tracker.getOngoingDuration();
+    QVERIFY(liveOngoing.has_value());
+    QCOMPARE(liveOngoing->type, DurationType::Pause);
+    TimeDuration editedOngoing = TimeDuration::fromLiveSession(
+        DurationType::Activity,
+        liveOngoing->startTime,
+        QDateTime::currentDateTime(),
+        liveOngoing->segment_id);
+
+    const auto result = tracker.commitEditedTimeline(Timeline({}, editedOngoing));
+
+    QVERIFY(result.ok);
+    QVERIFY(tracker.isActive());
+    QVERIFY2(!tracker.isCheckpointTimerActive_dbg(), "checkpoint interval 0 disables checkpoints; the edit must not arm a zero-interval repeating QTimer");
+
+    tracker.useTimerViaButton(Button::Stop);
+}
+
+// M7: guard against re-arming timer during exclusive edit
+void TimerTest::test_M7_edit_to_activity_during_exclusive_edit_does_not_arm_timer()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    tracker.useTimerViaButton(Button::Start);
+    QTest::qWait(10);
+    tracker.useTimerViaButton(Button::Pause);
+    QVERIFY(tracker.isPaused());
+
+    // Begin exclusive edit (simulates HistoryDialog open)
+    tracker.beginExclusiveEdit();
+
+    auto liveOngoing = tracker.getOngoingDuration();
+    QVERIFY(liveOngoing.has_value());
+    QCOMPARE(liveOngoing->type, DurationType::Pause);
+    TimeDuration editedOngoing = TimeDuration::fromLiveSession(
+        DurationType::Activity,
+        liveOngoing->startTime,
+        QDateTime::currentDateTime(),
+        liveOngoing->segment_id);
+
+    const auto result = tracker.commitEditedTimeline(Timeline({}, editedOngoing));
+
+    QVERIFY(result.ok);
+    QVERIFY(tracker.isActive());
+    QVERIFY2(!tracker.isCheckpointTimerActive_dbg(), "commitEditedTimeline must not re-arm checkpoints while an exclusive edit is in progress");
+
+    // Resume exclusive edit
+    tracker.endExclusiveEdit();
+    QVERIFY(tracker.isCheckpointTimerActive_dbg());
+
+    tracker.useTimerViaButton(Button::Stop);
+}
+
 // Disabled history: the store returns Disabled (a no-op) for commitSession.
 // Disabled must NOT be treated as a save failure: stopping must not retain
 // bogus unsaved data, must not bump the retry-failure counter, and must not
