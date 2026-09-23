@@ -105,6 +105,8 @@ private slots:
     void test_startTimer_drops_cross_midnight_boot_time_entry();
 
     void test_getOngoingDuration_returns_nullopt_when_cross_midnight();
+    void test_getOngoingDuration_capped_at_deferred_scheduled_cutoff();
+    void test_getOngoingDuration_stays_nullopt_for_deferred_watchdog_midnight();
 
     // TimeTracker public surface regression guard and initializeFromStore tests
     void test_D_timetracker_public_surface_regression();

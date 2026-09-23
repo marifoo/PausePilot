@@ -1272,6 +1272,16 @@ std::optional<TimeDuration> TimeTracker::getOngoingDuration_locked() const
     if (isCrossMidnight(session_.segment_start_time, now)) {
         // Cross-midnight ongoing — about to be force-stopped by the
         // watchdog within ~100 ms. Don't expose this transient state.
+        // Exception (H1): if History is open and a MidnightScheduled
+        // deferral already captured the true cutoff, no one is going to
+        // stop it — expose the segment capped at that cutoff instead of
+        // hiding it, so a history-edit save re-anchors it rather than
+        // treating it as gone.
+        const auto pending = deferred_edit_events_.midnight();
+        if (pending.has_value() && pending->reason == StopReason::MidnightScheduled
+            && session_.segment_start_time < pending->timestamp)
+            return TimeDuration::fromLiveSession(type, session_.segment_start_time,
+                                                 pending->timestamp, session_.segment_id);
         return std::nullopt;
     }
     return TimeDuration::fromLiveSession(type, session_.segment_start_time, now, session_.segment_id);

@@ -1186,6 +1186,70 @@ void TimerTest::test_getOngoingDuration_returns_nullopt_when_cross_midnight()
     QVERIFY(!result.has_value());
 }
 
+void TimerTest::test_getOngoingDuration_capped_at_deferred_scheduled_cutoff()
+{
+    // Arrange: start yesterday just before midnight, defer a MidnightScheduled
+    // cutoff (as onMidnightTimerFired() would while History is open), then
+    // advance the clock past midnight.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    FakeClock clock(QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    const auto before = tracker.getOngoingDuration();
+    QVERIFY(before.has_value());
+    const QDateTime segStart = before->startTime;
+    const auto segId = before->segment_id;
+
+    tracker.beginExclusiveEdit();
+    const QDateTime cutoff(QDate::currentDate().addDays(-1), QTime(23, 59, 59, 500), Qt::LocalTime);
+    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightScheduled, cutoff);
+    clock.setNow(QDateTime(QDate::currentDate(), QTime(0, 10, 0, 0), Qt::LocalTime));
+
+    // Act
+    const auto ongoing = tracker.getOngoingDuration();
+
+    // Assert: capped at the captured cutoff rather than hidden
+    QVERIFY(ongoing.has_value());
+    QCOMPARE(ongoing->endTime, cutoff);
+    QCOMPARE(ongoing->startTime, segStart);
+    QCOMPARE(ongoing->segment_id, segId);
+
+    tracker.endExclusiveEdit();
+}
+
+void TimerTest::test_getOngoingDuration_stays_nullopt_for_deferred_watchdog_midnight()
+{
+    // Same as above but with MidnightWatchdog: the discard policy must
+    // remain untouched by the fix.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    FakeClock clock(QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+
+    tracker.beginExclusiveEdit();
+    const QDateTime cutoff(QDate::currentDate().addDays(-1), QTime(23, 59, 59, 500), Qt::LocalTime);
+    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightWatchdog, cutoff);
+    clock.setNow(QDateTime(QDate::currentDate(), QTime(0, 10, 0, 0), Qt::LocalTime));
+
+    // Act
+    const auto ongoing = tracker.getOngoingDuration();
+
+    // Assert: still hidden — a watchdog deferral discards the whole segment
+    QVERIFY(!ongoing.has_value());
+
+    tracker.endExclusiveEdit();
+}
+
 // ============================================================================
 // TimeTracker public surface regression guard
 // ============================================================================

@@ -776,6 +776,95 @@ void HistoryDialogTest::test_historydialog_save_failed_db_replace_keeps_runtime_
     QSqlDatabase::removeDatabase(verifyConnName);
 }
 
+void HistoryDialogTest::test_historydialog_save_preserves_deferred_midnight_segment()
+{
+    // H1: a MidnightScheduled cutoff captured while History is open must
+    // survive saveChanges()'s refreshOngoing()/replaceAll() round-trip
+    // instead of being silently discarded (getOngoingDuration() returning
+    // nullopt would otherwise make refreshOngoing() erase the live segment).
+    resetDatabaseFile();
+    const QDate today = QDate::currentDate();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore db(settings);
+    // FakeClock declared before TimeTracker so it outlives it (see the
+    // outlives-tracker note at test_integration.cpp:614).
+    FakeClock clock(QDateTime(today, QTime(23, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Seed one finalized historical row (yesterday) before starting.
+    const QDateTime historicalStart(today.addDays(-1), QTime(10, 0, 0));
+    const QDateTime historicalEnd = historicalStart.addSecs(300);
+    std::deque<TimeDuration> historicalRows;
+    historicalRows.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, historicalStart, historicalEnd));
+    QVERIFY(tracker.replaceAll(Timeline(historicalRows, std::nullopt), Timeline({}, std::nullopt)).ok());
+
+    tracker.useTimerViaButton(Button::Start);
+    const auto beforeDialog = tracker.getOngoingDuration();
+    QVERIFY(beforeDialog.has_value());
+    const QDateTime segStart = beforeDialog->startTime;
+    const SegmentId segId = beforeDialog->segment_id;
+
+    const QDateTime cutoff(today, QTime(23, 59, 59, 500), Qt::LocalTime);
+
+    {
+        HistoryDialog dialog(tracker, settings);
+        tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightScheduled, cutoff);
+        clock.setNow(QDateTime(today.addDays(1), QTime(0, 10, 0, 0), Qt::LocalTime));
+
+        // Make a real edit on the historical page (today is page 0, yesterday is page 1).
+        QVERIFY(dialog.editSession_dbg().pages().size() >= static_cast<size_t>(2));
+        dialog.editSession_dbg().setPageTimeline(1, dialog.editSession_dbg().pendingTimelines()[1].withSegmentType(0, DurationType::Activity));
+
+        dialog.done(QDialog::Accepted);
+        QVERIFY(dialog.saveChanges());
+    }
+    // ~HistoryDialog ran endExclusiveEdit(), which replayed the deferred
+    // MidnightScheduled cutoff.
+
+    QVERIFY(tracker.isStopped());
+
+    const QString connName = "historydialog_h1_verify";
+    {
+        QSqlDatabase verifyDb = QSqlDatabase::addDatabase("QSQLITE", connName);
+        verifyDb.setDatabaseName(db_path_);
+        QVERIFY(verifyDb.open());
+
+        QSqlQuery segQuery(verifyDb);
+        segQuery.prepare(
+            "SELECT COUNT(*) FROM durations WHERE is_finalized = 1 AND type = :type "
+            "AND start_utc = :start_utc AND end_utc = :end_utc AND segment_id = :segment_id"
+        );
+        segQuery.bindValue(":type", static_cast<int>(DurationType::Activity));
+        segQuery.bindValue(":start_utc", segStart.toUTC().toString(Qt::ISODateWithMs));
+        segQuery.bindValue(":end_utc", cutoff.toUTC().toString(Qt::ISODateWithMs));
+        segQuery.bindValue(":segment_id", segId.toString());
+        QVERIFY(segQuery.exec());
+        QVERIFY(segQuery.next());
+        QCOMPARE(segQuery.value(0).toInt(), 1);
+
+        QSqlQuery historicalQuery(verifyDb);
+        historicalQuery.prepare(
+            "SELECT type FROM durations WHERE start_utc = :start_utc AND end_utc = :end_utc AND is_finalized = 1"
+        );
+        historicalQuery.bindValue(":start_utc", historicalStart.toUTC().toString(Qt::ISODateWithMs));
+        historicalQuery.bindValue(":end_utc", historicalEnd.toUTC().toString(Qt::ISODateWithMs));
+        QVERIFY(historicalQuery.exec());
+        QVERIFY(historicalQuery.next());
+        QCOMPARE(historicalQuery.value(0).toInt(), static_cast<int>(DurationType::Activity));
+
+        QSqlQuery unfinalizedQuery(verifyDb);
+        QVERIFY(unfinalizedQuery.exec("SELECT COUNT(*) FROM durations WHERE is_finalized = 0"));
+        QVERIFY(unfinalizedQuery.next());
+        QCOMPARE(unfinalizedQuery.value(0).toInt(), 0);
+
+        verifyDb.close();
+    }
+    QSqlDatabase::removeDatabase(connName);
+}
+
 void HistoryDialogTest::test_splitdialog_default_types_and_bounds()
 {
     QDateTime start = makeTime(0);
