@@ -177,6 +177,65 @@ flowchart TD
     K --> Z
 ```
 
+## History saves
+
+A History save is a whole-table replace: all durations in the
+`durations` table are deleted and re-inserted based on the edited
+timeline. Consequently, editing one row on one day rewrites every
+day's entries.
+
+When `HistoryDialog::saveChanges()` calls `replaceAll()`, it may
+remove rows the user never touched:
+
+1. **Cross-midnight rows** (counted): A single-boundary row that
+   crosses one local calendar boundary is displayed read-only in
+   History (since it spans more than one local date) but is
+   deliberately never added to `pendingTimelines_`. Therefore,
+   `buildSavePayload()` builds the save payload from
+   `pendingTimelines_[i].completed()` and the row is simply absent
+   from the payload — it is not discarded, but was never included.
+
+2. **Pre-existing overlaps** (counted): A persisted, unedited
+   Activity/Pause overlap between two already-saved rows (or between
+   a saved row and an unedited ongoing row) is resolved by a
+   `(startTime, segment_id)` tie-break. When the overlap is
+   completed-vs-completed, both rows compete in the tie-break and
+   the loser is dropped. When one row is ongoing, the ongoing row
+   is never dropped — only a conflicting completed row can lose.
+   This is reported in the payload as `preExistingOverlapDrops`.
+
+Before a destructive replace, `saveChanges()` computes both counts
+and asks a blocking Yes/No confirmation before any database write:
+"{count} entries spanning midnight will be removed. {count}
+pre-existing overlapping entries will be removed. Continue saving?"
+The prompt appears only if either count is positive and the save
+will actually call `replaceAll()` (i.e., the history or session
+timeline is non-empty). A No leaves the database untouched and the
+dialog open; the user can retry or cancel editing.
+
+The dialog does **not** count or announce rows spanning more than
+one local midnight — those are discarded on load and never reach
+the display or the editor.
+
+Additionally, an unfinalized row (checkpoint with `is_finalized = 0`)
+that was not loaded by the model (e.g., because `loadDurations()`
+filters to `is_finalized = 1`) is also erased by the whole-table
+replace. This fourth deletion path is not covered by the confirmation
+prompt; its production reachability is outside the scope of this
+feature.
+
+Before the replace, a safety backup is attempted
+(`SqliteSessionStore::replaceAll()`, before the write), but it may
+fail due to low disk space or a copy error; in that case, the user
+is warned after the save has been committed. Nothing in the UI or
+documentation promises that an overwritten row is recoverable.
+
+This differs from orphan reconciliation on startup
+(`recoverStartupCheckpoints()`), which applies a policy-drop decision
+and one-time transaction to decide whether orphans are finalized or
+removed. History saves replace the table unconditionally after
+confirmation.
+
 ## What is inside the `SessionStore` seam — and what is not
 
 Everything in this document — the SQL, the transactions, the

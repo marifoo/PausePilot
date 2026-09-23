@@ -56,7 +56,9 @@ the current day, plus the time you started.
 
 - **Start / Pause / Stop** — the obvious controls.
 - **History** — opens a dialog where you can browse past days and edit
-  entries (split a segment, change Activity↔Pause, etc.).
+  entries (split a segment, change Activity↔Pause, etc.). Saving may remove
+  older entries that span one local midnight or conflict with other saved
+  entries; the dialog asks for confirmation before doing so.
 - **Auto-Pause** — toggles whether long locks count as pauses.
 - **Pin / Tray** — keeps the window on top, or hides it to the system tray.
 
