@@ -96,6 +96,9 @@ int main(int argc, char *argv[])
         fprintf(stdout, "FAIL: %d unexpected QWARN message(s)\n", g_unexpectedWarnings.load());
         if (status == 0) status = 1;
     }
+#else
+    // Platform-specific banner for Windows: the stdout tee is POSIX-only.
+    fprintf(stdout, "NOTE: QWARN enforcement is disabled on this platform -- the stdout tee is POSIX-only; this exit status does not reflect warnings\n");
 #endif // !_WIN32
     return status;
 }

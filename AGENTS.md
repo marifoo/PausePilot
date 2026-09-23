@@ -37,5 +37,5 @@ qmake-qt5 && make -j4
 
 All tests shall use the "Arrange, Act, Assert" pattern.
 
-**Expected output:** All tests pass with zero `QWARN` messages.
+**Expected output:** All tests pass with zero `QWARN` messages. The zero-`QWARN` gate and qtest abort-truncation diagnostic are enforced on Linux only; a Windows run prints `NOTE: QWARN enforcement is disabled` and its exit status reflects test failures or aborts but not warning-only runs.
 

@@ -63,7 +63,8 @@ class SelfTestAggregateTest;
 // zero warnings (no widget realization under the offscreen QPA plugin).
 //
 // On Windows this entire mechanism is compiled out — no redirection, no thread,
-// no QWARN enforcement (the offscreen-QPA noise and CI test runs are Linux-only).
+// no QWARN enforcement (the offscreen-QPA noise and CI test runs are Linux-only);
+// a NOTE banner prints to state that "QWARN enforcement is disabled" instead.
 // ---------------------------------------------------------------------------
 
 static std::atomic<int> g_unexpectedWarnings{0};
@@ -299,6 +300,10 @@ int main(int argc, char *argv[])
         fprintf(stdout, "FAIL: %d unexpected QWARN message(s)\n", g_unexpectedWarnings.load());
         if (status == 0) status = 1;
     }
+#else
+    // Platform-specific banner for Windows: the stdout tee and abort diagnostics
+    // are POSIX-only. See qtest/main.cpp:65-66 for the design rationale.
+    fprintf(stdout, "NOTE: QWARN enforcement is disabled on this platform -- the stdout tee and abort diagnostics are POSIX-only; this exit status does not reflect warnings\n");
 #endif // !_WIN32
     return status;
 }

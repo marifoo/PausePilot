@@ -66,14 +66,28 @@ void SelfTestAggregateTest::test_failingChildSuite_makesAggregateNonzero_andLate
 
 void SelfTestAggregateTest::test_warnChildSuite_makesAggregateNonzero()
 {
+#ifndef _WIN32
     const ChildRun run = runSelfTestChild(QStringLiteral("warn"));
     QVERIFY2(run.exitCode != 0, "a QWARN-emitting child suite must make the aggregate exit nonzero");
     QVERIFY2(run.output.contains("unexpected QWARN"),
         qPrintable("the QWARN must actually be counted, not swallowed:\n" + run.output));
+#else
+    // The stdout tee that counts QWARN lines is POSIX-only (qtest/main.cpp:110-146).
+    // On Windows we assert the documented contract instead: the warning is visible
+    // but unenforced, and the child says so.
+    const ChildRun run = runSelfTestChild(QStringLiteral("warn"));
+    QVERIFY2(run.output.contains("deliberate self-test QWARN"),
+        qPrintable("the child must emit the warning: " + run.output));
+    QVERIFY2(run.output.contains("QWARN enforcement is disabled"),
+        qPrintable("the child must state that QWARN enforcement is disabled: " + run.output));
+#endif
 }
 
 void SelfTestAggregateTest::test_abortChildSuite_reportsTruncation()
 {
+#ifdef _WIN32
+    QSKIP("SIGABRT truncation reporting is POSIX-only (see qtest/main.cpp:89-108); nothing this test asserts exists on Windows");
+#endif
     const ChildRun run = runSelfTestChild(QStringLiteral("abort"));
     QVERIFY2(run.exitCode != 0, "an aborting child suite must make the aggregate exit nonzero");
     QVERIFY2(run.output.contains("QFATAL"),
