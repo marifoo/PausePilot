@@ -629,6 +629,7 @@ void ContractMatrixTest::test_recoverStartupCheckpoints_disabled_returns_Disable
     QCOMPARE(r.recovered_msec, static_cast<qint64>(0));
     QCOMPARE(r.finalized_count, 0);
     QCOMPARE(r.policy_dropped_count, 0);
+    QCOMPARE(r.discard_dropped_count, 0);
     QVERIFY(!r.notify_user);
     // transient/fatal: marker read failure sets status to TransientError (tested in DatabaseTest)
     // CallerBug: N/A — recoverStartupCheckpoints takes only a timestamp (cannot be wrong)

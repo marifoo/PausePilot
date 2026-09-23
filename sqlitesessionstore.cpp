@@ -2209,6 +2209,11 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
             remainingOrphans.push_back(orphan);
         }
     }
+    // M4: snapshot the discard-forced drops before the policy loop below
+    // appends to the SAME vector. Measured here, not from resolvedIntents:
+    // the insert() below adds unmatched intents that delete no row.
+    const int discardForcedDrops = static_cast<int>(policyDropIds.size());
+
     // Any intent left unmatched named no unfinalized row -- either already
     // deleted, or (a reused/corrupt identity) it now names a finalized row.
     // Either way there is nothing left to delete; just resolve the tombstone.
@@ -2302,6 +2307,7 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
     StartupRecoveryResult result;
     result.finalized_count = static_cast<int>(reconcile.finalized.size());
     result.policy_dropped_count = static_cast<int>(reconcile.policy_dropped.size());
+    result.discard_dropped_count = discardForcedDrops;
 
     // Accumulate exact milliseconds only for rows the store actually
     // finalized (R08-005: no per-row truncation, no seconds conversion).
@@ -2344,9 +2350,10 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
         result.notify_user = showNotification;
     }
 
-    Logger::Log(QString("[DB] Startup checkpoint recovery: finalized=%1, policy_dropped=%2, malformed_deleted=%3, recovered_msec=%4")
+    Logger::Log(QString("[DB] Startup checkpoint recovery: finalized=%1, policy_dropped=%2 (discard_forced=%3), malformed_deleted=%4, recovered_msec=%5")
         .arg(reconcile.finalized.size())
         .arg(reconcile.policy_dropped.size())
+        .arg(discardForcedDrops)
         .arg(reconcile.malformed_deleted)
         .arg(result.recovered_msec));
 

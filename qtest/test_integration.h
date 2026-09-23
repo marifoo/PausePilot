@@ -75,6 +75,12 @@ private slots:
     // as credited history.
     void test_A4_watchdog_discard_failure_survives_reopen_never_credited();
 
+    // M4: a real SqliteSessionStore + TimeTracker over a seeded cross-day
+    // orphan (no discard intent) reports the non-discard policy-drop count
+    // at the tracker boundary mainwin.cpp reads, while the old recovered-time
+    // notification channel stays closed.
+    void test_M4_tracker_reports_policy_dropped_count_for_cross_day_orphan();
+
     // D2 (R11-003/MEDIUM-8): a real SQLite store proves a backward-clock
     // Stop writes no row reflecting the reversed interval. HIGH-A (round-2
     // review): the already-checkpointed prefix must survive intact, not be

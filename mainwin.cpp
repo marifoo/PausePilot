@@ -193,9 +193,23 @@ void MainWin::start()
 	// consumes them directly -- no seconds conversion/rounding happens
 	// anywhere in the path leading here.
 	const qint64 recoveredMsec = timetracker_.getStartupRecoveredMsec();
+	const int policyDropped = timetracker_.getStartupPolicyDroppedCount();
+	QString message;
 	if (recoveredMsec > 0 && timetracker_.shouldShowStartupRecoveryNotification()) {
-		const QString message = QString("Recovered %1 from the last session after an unclean shutdown.")
+		message = QString("Recovered %1 from the last session after an unclean shutdown.")
 			.arg(convMSecToTimeStr(recoveredMsec));
+	}
+	if (policyDropped > 0) {
+		// M4: rows recovery deleted on its own policy (too short, too old,
+		// future-dated, spanning midnight, or overlapping existing history).
+		// Discards the user asked for are excluded upstream and stay silent.
+		const QString droppedText = QString("%1 unfinished %2 from the last session could not be restored and %3 discarded.")
+			.arg(policyDropped)
+			.arg(policyDropped == 1 ? "entry" : "entries")
+			.arg(policyDropped == 1 ? "was" : "were");
+		message = message.isEmpty() ? droppedText : message + " " + droppedText;
+	}
+	if (!message.isEmpty()) {
 		statusBar()->showMessage(message, 10000);
 		if (tray_icon_ && tray_icon_->isVisible()) {
 			tray_icon_->showMessage("uTimer Recovery", message, QSystemTrayIcon::Information, 10000);

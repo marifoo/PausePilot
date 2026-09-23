@@ -3215,6 +3215,7 @@ void DatabaseTest::test_recoverStartupCheckpoints_drops_future_dated_orphan()
     QVERIFY(res.ok());
     QCOMPARE(res.finalized_count, 0);
     QCOMPARE(res.policy_dropped_count, 1);
+    QCOMPARE(res.discard_dropped_count, 0);
 
     QVERIFY(manager.ensureOpen_dbg());
     QSqlQuery checkOrphan(manager.rawDb_dbg());
@@ -3260,6 +3261,7 @@ void DatabaseTest::test_recoverStartupCheckpoints_drops_unfinalized_cross_day_or
     QVERIFY(res.ok());
     QCOMPARE(res.finalized_count, 0);
     QCOMPARE(res.policy_dropped_count, 1);
+    QCOMPARE(res.discard_dropped_count, 0);
     QCOMPARE(res.recovered_msec, static_cast<qint64>(0));
 
     QVERIFY(manager.ensureOpen_dbg());
@@ -3983,6 +3985,91 @@ void DatabaseTest::test_A4_recovery_after_reopen_deletes_row_matching_durable_in
     QVERIFY(manager.ensureOpen_dbg());
     QCOMPARE(countDurationsForSegment(manager, segId), 0);
     QCOMPARE(countDiscardIntents(manager, segId), 0);
+    manager.closeConnection_dbg();
+}
+
+/**
+ * M4: a single recovery that policy-drops one intent-matched row and one
+ * cross-day row must report discard_dropped_count == 1 (the intent-matched
+ * subset only) while policy_dropped_count == 2 (both). Fixed calendar dates
+ * are used throughout -- not QDate::currentDate() -- so the fixture cannot
+ * flip behaviour depending on when the suite happens to run near midnight.
+ */
+void DatabaseTest::test_M4_recovery_splits_discard_forced_from_policy_drops()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QVERIFY(manager.ensureOpen_dbg());
+
+    // Row A: an ordinary same-day orphan shape that will be force-dropped by
+    // a durable discard intent keyed on its own segment_id.
+    const QDateTime startA = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime endA   = QDateTime(QDate(2025, 6, 1), QTime(10, 5, 0), Qt::UTC);
+    const qint64 orphanIdA = seedOrphanRow(manager, startA, endA);
+    QVERIFY(orphanIdA > 0);
+
+    QSqlQuery segQuery(manager.rawDb_dbg());
+    segQuery.prepare("SELECT segment_id FROM durations WHERE id = :id");
+    segQuery.bindValue(":id", orphanIdA);
+    QVERIFY(segQuery.exec());
+    QVERIFY(segQuery.next());
+    const QString segIdA = segQuery.value(0).toString();
+
+    QSqlQuery insertIntent(manager.rawDb_dbg());
+    insertIntent.prepare("INSERT INTO discard_intents (segment_id) VALUES (:id)");
+    insertIntent.bindValue(":id", segIdA);
+    QVERIFY(insertIntent.exec());
+
+    // Row B: a cross-day orphan (no discard intent) -- policy-dropped for
+    // spanning local midnight, not because it was ever discarded.
+    const QDate yesterday = QDate(2025, 5, 31);
+    const QDate today     = QDate(2025, 6, 1);
+    const QDateTime localStartB(yesterday, QTime(23, 50, 0), Qt::LocalTime);
+    const QDateTime localEndB(today, QTime(0, 10, 0), Qt::LocalTime);
+    const qint64 orphanIdB = seedOrphanRow(manager, localStartB.toUTC(), localEndB.toUTC());
+    QVERIFY(orphanIdB > 0);
+
+    manager.closeConnection_dbg();
+
+    // Act: recover shortly after both orphans' end times, well within the
+    // stale/future thresholds.
+    const QDateTime now(today, QTime(0, 20, 0), Qt::LocalTime);
+    const StartupRecoveryResult res = manager.recoverStartupCheckpoints(now);
+
+    // Assert
+    QVERIFY(res.ok());
+    QCOMPARE(res.finalized_count, 0);
+    QCOMPARE(res.policy_dropped_count, 2);
+    QCOMPARE(res.discard_dropped_count, 1);
+    QVERIFY(res.discard_dropped_count <= res.policy_dropped_count);
+    QCOMPARE(res.recovered_msec, qint64(0));
+    QVERIFY(!res.notify_user);
+
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery checkA(manager.rawDb_dbg());
+    checkA.prepare("SELECT COUNT(*) FROM durations WHERE id = :id");
+    checkA.bindValue(":id", orphanIdA);
+    QVERIFY(checkA.exec());
+    QVERIFY(checkA.next());
+    QCOMPARE(checkA.value(0).toInt(), 0);
+
+    QSqlQuery checkB(manager.rawDb_dbg());
+    checkB.prepare("SELECT COUNT(*) FROM durations WHERE id = :id");
+    checkB.bindValue(":id", orphanIdB);
+    QVERIFY(checkB.exec());
+    QVERIFY(checkB.next());
+    QCOMPARE(checkB.value(0).toInt(), 0);
+
+    QSqlQuery checkIntent(manager.rawDb_dbg());
+    checkIntent.prepare("SELECT COUNT(*) FROM discard_intents WHERE segment_id = :id");
+    checkIntent.bindValue(":id", segIdA);
+    QVERIFY(checkIntent.exec());
+    QVERIFY(checkIntent.next());
+    QCOMPARE(checkIntent.value(0).toInt(), 0);
     manager.closeConnection_dbg();
 }
 

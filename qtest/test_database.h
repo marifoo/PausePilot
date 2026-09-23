@@ -184,6 +184,9 @@ private slots:
     // is honored by the NEXT recovery -- the unfinalized row is deleted, not
     // finalized/credited, and the tombstone is resolved.
     void test_A4_recovery_after_reopen_deletes_row_matching_durable_intent();
+    // M4: recovery must split the intent-matched (discard_dropped_count)
+    // drops from the policy-only (cross-day) drops within one recovery.
+    void test_M4_recovery_splits_discard_forced_from_policy_drops();
     // A discard intent that (by a reused/corrupt identity) matches a
     // FINALIZED row must never delete it; only the tombstone is resolved.
     void test_A4_recovery_never_deletes_finalized_row_matching_intent();

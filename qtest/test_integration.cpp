@@ -1537,10 +1537,57 @@ void IntegrationTest::test_A4_watchdog_discard_failure_survives_reopen_never_cre
 
     QCOMPARE(reopened.getStartupRecoveredMsec(), static_cast<qint64>(0));
     QVERIFY(!reopened.shouldShowStartupRecoveryNotification());
+    QCOMPARE(reopened.getStartupPolicyDroppedCount(), 0);  // M4: an explicit discard must stay silent
 
     SqliteSessionStore db3(settings);
     auto loaded = db3.loadDurations();
     QVERIFY(loaded.empty());
+}
+
+/**
+ * M4: the exact silent case the finding reports -- a committed recovery
+ * that finalizes nothing and policy-drops a cross-day orphan (no discard
+ * intent involved) must leave the old recovered-time channel closed while
+ * opening the new policy-dropped-count channel, at the TimeTracker boundary
+ * mainwin.cpp actually reads.
+ */
+void IntegrationTest::test_M4_tracker_reports_policy_dropped_count_for_cross_day_orphan()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore db(settings);
+
+    QVERIFY(db.ensureOpen_dbg());
+
+    // Seed one cross-day unfinalized row (no discard intent): yesterday
+    // 23:50 local to today 00:10 local, on a fixed calendar date.
+    const QDate yesterday = QDate(2025, 6, 1);
+    const QDate today     = QDate(2025, 6, 2);
+    const QDateTime localStart(yesterday, QTime(23, 50, 0), Qt::LocalTime);
+    const QDateTime localEnd(today, QTime(0, 10, 0), Qt::LocalTime);
+    {
+        QSqlQuery q(db.rawDb_dbg());
+        q.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                  "VALUES (:seg, 0, :s, :e, 0)");
+        q.bindValue(":seg", SegmentId::mint().toString());
+        q.bindValue(":s", localStart.toUTC().toString(Qt::ISODateWithMs));
+        q.bindValue(":e", localEnd.toUTC().toString(Qt::ISODateWithMs));
+        QVERIFY(q.exec());
+    }
+    db.closeConnection_dbg();
+
+    const QDateTime fixedNow(today, QTime(0, 20, 0), Qt::LocalTime);
+    FakeClock clock(fixedNow);
+    TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.initializeFromStore();
+
+    QCOMPARE(tracker.getStartupRecoveredMsec(), static_cast<qint64>(0));
+    QVERIFY(!tracker.shouldShowStartupRecoveryNotification());
+    QCOMPARE(tracker.getStartupPolicyDroppedCount(), 1);
 }
 
 // D2/HIGH-A (round-2 review): a backward wall-clock step must drop only the

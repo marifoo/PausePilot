@@ -438,6 +438,7 @@ TimeTracker::TimeTracker(const Settings &settings, SessionStore& db, QObject *pa
       dialog_open_(false), db_(db),
       checkpoint_interval_msec_(settings.getCheckpointIntervalMsec()),
       startup_recovered_msec_(0), startup_recovery_notification_needed_(false),
+      startup_policy_dropped_count_(0),
       day_boundary_watcher_(*this)
 {
     // Setup checkpoint timer (disabled if interval is 0)
@@ -462,6 +463,9 @@ StartupRecoveryResult TimeTracker::initializeFromStore()
     if (recovery.okOrDisabled()) {
         startup_recovered_msec_ = recovery.recovered_msec;
         startup_recovery_notification_needed_ = recovery.notify_user;
+        // M4: the discard-forced subset is work the user explicitly threw away;
+        // only the remainder is a deletion the user never asked for.
+        startup_policy_dropped_count_ = recovery.policy_dropped_count - recovery.discard_dropped_count;
     }
     return recovery;
 }
@@ -1300,6 +1304,12 @@ bool TimeTracker::shouldShowStartupRecoveryNotification() const
 {
     QMutexLocker locker(&mutex_);
     return startup_recovery_notification_needed_;
+}
+
+int TimeTracker::getStartupPolicyDroppedCount() const
+{
+    QMutexLocker locker(&mutex_);
+    return startup_policy_dropped_count_;
 }
 
 bool TimeTracker::isFatalLatched() const

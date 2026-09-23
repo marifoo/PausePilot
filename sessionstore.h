@@ -240,6 +240,13 @@ struct LoadResult {
  * same atomic disposition, but are store-internal cleanup rather than a
  * policy decision: their count is logged only and is not part of this
  * struct.
+ *
+ * discard_dropped_count is the SUBSET of policy_dropped_count that was
+ * force-dropped by a durable A4 discard intent, i.e. work the user
+ * explicitly discarded. policy_dropped_count - discard_dropped_count is
+ * therefore the number of rows recovery deleted on its own policy
+ * (too-short/stale/future/cross-day/overlap-rejected) -- the only drops a
+ * caller should surface to the user.
  */
 struct StartupRecoveryResult {
     SessionStoreResult::Category status = SessionStoreResult::Success;
@@ -247,6 +254,7 @@ struct StartupRecoveryResult {
     qint64 recovered_msec = 0;
     int finalized_count = 0;
     int policy_dropped_count = 0;
+    int discard_dropped_count = 0;
     bool notify_user = false;
 
     bool ok() const { return status == SessionStoreResult::Success; }

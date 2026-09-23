@@ -105,7 +105,8 @@ does all of the reconciliation internally (see `sqlitesessionstore.cpp`
    (recorded when the engine deliberately discarded that checkpoint, e.g.
    the cross-midnight watchdog — see `discardCheckpoint` in
    `sessionstore.h`) is force-dropped outright, bypassing all of the above,
-   and never contributes to `recovered_msec` or the notification.
+   and never contributes to `recovered_msec` or to either notification
+   (neither the recovered-time one nor the drop one below).
 3. **Apply** — malformed-row deletes, policy drops, discard-intent
    resolution, marker consumption, and each remaining orphan's
    finalize-or-delete-on-overlap all run as steps inside **one** transaction
@@ -123,7 +124,8 @@ does all of the reconciliation internally (see `sqlitesessionstore.cpp`
    its own unit tests — recovery does not call it.)
 
 `TimeTracker` receives only domain facts back via `StartupRecoveryResult`
-(`recovered_msec`, `finalized_count`, `policy_dropped_count`, `notify_user`)
+(`recovered_msec`, `finalized_count`, `policy_dropped_count`,
+`discard_dropped_count`, `notify_user`)
 — row ids and the finalize/drop mechanics never cross the `SessionStore`
 interface.
 
@@ -147,6 +149,11 @@ not need a "recovered N seconds" notification — only genuinely-crashed
 recoveries surface in the UI. Using the oldest orphan instead would wrongly
 suppress the notification when an older orphan is covered by the marker but
 a newer one is not.
+
+Rows deleted by recovery *policy* (not by an explicit discard) are reported
+separately as `policy_dropped_count - discard_dropped_count` and surfaced in
+the status bar/tray on the next launch, independently of the clean-marker
+logic above.
 
 ```mermaid
 flowchart TD

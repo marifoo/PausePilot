@@ -398,6 +398,7 @@ private:
     qint64 checkpoint_interval_msec_; // Checkpoint interval (0 = disabled)
     qint64 startup_recovered_msec_;
     bool startup_recovery_notification_needed_;
+    int startup_policy_dropped_count_;
     DayBoundaryWatcher day_boundary_watcher_; // Must be last: constructed after all other members
 
     // cause defaults to the button/toggle path; lock-resume callers (Unlock
@@ -640,6 +641,7 @@ public:
     bool isOngoingSegmentCrossMidnight() const;
     qint64 getStartupRecoveredMsec() const;
     bool shouldShowStartupRecoveryNotification() const;
+    int getStartupPolicyDroppedCount() const;
     void setDurationType(size_t idx, DurationType type);
     SessionStoreResult replaceAll(const Timeline& history, const Timeline& session);
     /// Freezes checkpoints and defers midnight/lock events. Call before opening HistoryDialog.
