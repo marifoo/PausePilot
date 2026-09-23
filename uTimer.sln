@@ -7,6 +7,11 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "uTimer", "uTimer.vcxproj", 
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "qtest", "qtest\qtest.vcxproj", "{BFCA6FF3-3929-454A-95CD-17E59BE81E35}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "apptest", "apptest\apptest.vcxproj", "{5D79149D-7427-44E4-9974-69FA4C91B68A}"
+	ProjectSection(ProjectDependencies) = postProject
+		{77E3C304-6BDF-3D19-A4CF-BCBCBBBB5F09} = {77E3C304-6BDF-3D19-A4CF-BCBCBBBB5F09}
+	EndProjectSection
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x86 = Debug|x86
@@ -20,6 +25,10 @@ Global
 		{BFCA6FF3-3929-454A-95CD-17E59BE81E35}.Debug|x86.ActiveCfg = Debug|Win32
 		{BFCA6FF3-3929-454A-95CD-17E59BE81E35}.Debug|x86.Build.0 = Debug|Win32
 		{BFCA6FF3-3929-454A-95CD-17E59BE81E35}.Release|x86.ActiveCfg = Release|Win32
+		{5D79149D-7427-44E4-9974-69FA4C91B68A}.Debug|x86.ActiveCfg = Debug|Win32
+		{5D79149D-7427-44E4-9974-69FA4C91B68A}.Debug|x86.Build.0 = Debug|Win32
+		{5D79149D-7427-44E4-9974-69FA4C91B68A}.Release|x86.ActiveCfg = Release|Win32
+		{5D79149D-7427-44E4-9974-69FA4C91B68A}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
