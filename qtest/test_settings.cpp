@@ -147,6 +147,39 @@ void SettingsTest::test_settings_malformed_bool_uses_default()
     QCOMPARE(s.logToFile(), false);
 }
 
+// M1: Settings::readLogToFile() is a static pre-pass reading only
+// debug_log_to_file, used by main() to configure Logger before the
+// constructor's repairs run. It must return the same value the constructor
+// itself would settle on, for an absent, valid and malformed key.
+void SettingsTest::test_settings_readLogToFile_matches_constructor()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    const QString absentPath = QDir(tempDir.path()).filePath("absent.ini");
+    const QString truePath = QDir(tempDir.path()).filePath("true.ini");
+    const QString malformedPath = QDir(tempDir.path()).filePath("malformed.ini");
+
+    {
+        QSettings writer(truePath, QSettings::IniFormat);
+        writer.setValue("uTimer/debug_log_to_file", true);
+        writer.sync();
+    }
+    {
+        QSettings writer(malformedPath, QSettings::IniFormat);
+        writer.setValue("uTimer/debug_log_to_file", "banana");
+        writer.sync();
+    }
+
+    QCOMPARE(Settings::readLogToFile(absentPath), Settings(absentPath).logToFile());
+    QCOMPARE(Settings::readLogToFile(truePath), Settings(truePath).logToFile());
+    QCOMPARE(Settings::readLogToFile(malformedPath), Settings(malformedPath).logToFile());
+
+    QCOMPARE(Settings::readLogToFile(absentPath), false);
+    QCOMPARE(Settings::readLogToFile(truePath), true);
+    QCOMPARE(Settings::readLogToFile(malformedPath), false);
+}
+
 // D12-3: on a successful write, setAutopauseState() reports NoError and the
 // new value is visible via isAutopauseEnabled(). Falsified by corrupting
 // settings.cpp's post-writeAndSync() success branch (i.e. leaving

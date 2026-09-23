@@ -76,7 +76,26 @@ bool readBoolChecked(QSettings& sfile, const QString& key, bool default_val)
 				"\"), using default " + QString(default_val ? "true" : "false"));
 	return default_val;
 }
+
+/// Logs when a value read from the file was out of range and had to be
+/// clamped, then returns the repaired value.
+template <typename T>
+T noteRepair(const QString& key, T original, T repaired)
+{
+	if (repaired != original) {
+		Logger::Log("Settings: out-of-range value for " + key + " (" + QString::number(original) +
+					"), using " + QString::number(repaired));
+	}
+	return repaired;
+}
 } // namespace
+
+bool Settings::readLogToFile(const QString filename)
+{
+	QSettings sfile(filename, QSettings::IniFormat);
+	sfile.setIniCodec("UTF-8");
+	return readBoolChecked(sfile, kKeyLogToFile, false);
+}
 
 Settings::Settings(const QString filename) : sfile_(filename, QSettings::IniFormat)
 {
@@ -91,7 +110,8 @@ void Settings::readSettingsFile()
 {
 	autostart_timing_ = readBoolChecked(sfile_, kKeyPressStart, true);
 	autopause_enabled_ = readBoolChecked(sfile_, kKeyAutopause, true);
-	backpause_min_ = qBound(0, readIntChecked(sfile_, kKeyAutopauseThresh, 15), 99);
+	const int autopause_thresh = readIntChecked(sfile_, kKeyAutopauseThresh, 15);
+	backpause_min_ = noteRepair(kKeyAutopauseThresh, autopause_thresh, qBound(0, autopause_thresh, 99));
 	start_minimized_ = readBoolChecked(sfile_, kKeyStartMinimized, false);
 	start_pinned_to_top_ = readBoolChecked(sfile_, kKeyStartPinned, false);
 	warning_nopause_ = readBoolChecked(sfile_, kKeyWarnNoPause, false);
@@ -99,10 +119,13 @@ void Settings::readSettingsFile()
 	pause_for_warning_nopause_min_ = 30;
 	warning_activity_ = readBoolChecked(sfile_, kKeyWarnActivity, false);
 	warning_activity_min_ = 9*60+45;
-	history_days_to_keep_ = qMax(0, readIntChecked(sfile_, kKeyHistoryDays, 99));
+	const int history_days = readIntChecked(sfile_, kKeyHistoryDays, 99);
+	history_days_to_keep_ = noteRepair(kKeyHistoryDays, history_days, qMax(0, history_days));
 	log_to_file_ = readBoolChecked(sfile_, kKeyLogToFile, false);
-	boot_time_sec_ = qBound(0u, readUIntChecked(sfile_, kKeyBootTimeSec, 0u), 3600u);
-	checkpoint_interval_min_ = qBound(0, readIntChecked(sfile_, kKeyCheckpointMin, 5), 60);
+	const unsigned int boot_time = readUIntChecked(sfile_, kKeyBootTimeSec, 0u);
+	boot_time_sec_ = noteRepair(kKeyBootTimeSec, boot_time, qBound(0u, boot_time, 3600u));
+	const int checkpoint_min = readIntChecked(sfile_, kKeyCheckpointMin, 5);
+	checkpoint_interval_min_ = noteRepair(kKeyCheckpointMin, checkpoint_min, qBound(0, checkpoint_min, 60));
 }
 
 void Settings::writeAndSync()

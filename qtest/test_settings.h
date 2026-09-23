@@ -20,6 +20,10 @@ private slots:
     // documented default instead of silently becoming 0/false.
     void test_settings_malformed_int_uses_default();
     void test_settings_malformed_bool_uses_default();
+    // M1: the static pre-pass reader must agree with the constructor for
+    // every debug_log_to_file value, since Logger::configure() is now called
+    // from it before Settings is constructed.
+    void test_settings_readLogToFile_matches_constructor();
     // D12-3: setAutopauseState()/setPinToTopState() persist first and only
     // update in-memory state on success; on a write failure they report the
     // failure and retain the prior value.

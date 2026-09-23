@@ -172,6 +172,46 @@ void LoggerTest::test_d_settings_lifetime_survives_settings_destruction()
              qPrintable(QString("Log call after Settings destruction must still be written: '%1'").arg(marker)));
 }
 
+// Settings repair diagnostics must reach the log once Logger is configured
+// before the Settings constructor runs (M1). Must run after Test A1 (needs
+// the logger's one-time file open already done) and before Test E
+// (which permanently disables logging).
+void LoggerTest::test_settings_repair_diagnostics_reach_the_log()
+{
+    QSettings ini(settingsDir_.filePath("repair.ini"), QSettings::IniFormat);
+    ini.setValue("uTimer/debug_log_to_file", true);
+    ini.setValue("uTimer/checkpoint_interval_minutes", "notanumber");
+    ini.setValue("uTimer/history_days_to_keep", -5);
+    ini.sync();
+
+    const QString path = settingsDir_.filePath("repair.ini");
+    const QString logPath = Logger::logFilePath();
+    QFile before(logPath);
+    QVERIFY(before.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QString contentBefore = QString::fromUtf8(before.readAll());
+    before.close();
+
+    const bool logEnabled = Settings::readLogToFile(path);
+    QVERIFY(logEnabled);
+    Logger::configure(logEnabled);
+
+    Settings s(path);
+
+    QFile after(logPath);
+    QVERIFY(after.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QString contentAfter = QString::fromUtf8(after.readAll());
+    after.close();
+    const QString appended = contentAfter.mid(contentBefore.size());
+
+    QVERIFY2(appended.contains("malformed integer for uTimer/checkpoint_interval_minutes"),
+             qPrintable(appended));
+    QVERIFY2(appended.contains("out-of-range value for uTimer/history_days_to_keep"),
+             qPrintable(appended));
+    QVERIFY2(appended.contains("Autopause is enabled with Threshold"),
+             qPrintable(appended));
+    QCOMPARE(s.getHistoryDays(), 0);
+}
+
 // Test E: the process's first write failure must disable file logging
 // permanently and quietly. MUST run last in this suite: Logger's file handle
 // is a process-wide singleton (a function-local static), so once this test

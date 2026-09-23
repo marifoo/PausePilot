@@ -44,6 +44,10 @@ private slots:
     // opened once, and qtest's own process already spends that one open on
     // the success path.
     void test_production_unwritable_log_path_disables_logging_once();
+    // M1: Settings' constructor now logs its own repairs, and Logger must be
+    // configured before that constructor runs so the repair diagnostics
+    // reach the log instead of being dropped.
+    void test_production_logs_settings_repairs_from_the_first_line();
     void test_production_start_reclaims_stale_lock();
     void test_production_active_owner_survives_old_lock_timestamp();
     void test_production_loser_cannot_mutate_database_with_active_owner();

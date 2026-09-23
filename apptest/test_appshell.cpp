@@ -620,12 +620,12 @@ void AppShellTest::test_production_unwritable_log_path_disables_logging_once()
     ProcessGuard production;
     QVERIFY2(startProduction(production.process, tempDir.path()),
              qPrintable(startFailureMessage(production.process)));
-    // LockStateWatcher's constructor issues the first-ever Logger::Log()
-    // call in this process; the database is opened right after it, so its
-    // appearance proves that first call (and Logger's open() failure) has
-    // already happened.
+    // Settings' constructor issues the first-ever Logger::Log() call in
+    // this process whenever logging is on; the database is opened right
+    // after it, so its appearance proves that first call (and Logger's
+    // open() failure) has already happened.
     QVERIFY2(waitForFile(QDir(tempDir.path()).filePath("uTimer.sqlite"), 5000),
-             "production did not get past LockStateWatcher's startup log call");
+             "production did not get past Settings' startup log call");
     QTest::qWait(100);
 
     // Assert
@@ -636,6 +636,37 @@ void AppShellTest::test_production_unwritable_log_path_disables_logging_once()
     QVERIFY2(QFileInfo(QDir(tempDir.path()).filePath("uTimer.log")).isDir(),
              "the unwritable log path must be left untouched");
 #endif
+}
+
+// M1: main() must configure Logger before constructing Settings, so that
+// Settings' own repair diagnostics (malformed/out-of-range values) reach the
+// log instead of being dropped by a not-yet-configured Logger.
+void AppShellTest::test_production_logs_settings_repairs_from_the_first_line()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QSettings settings(createSettingsFile(tempDir.path(), 7), QSettings::IniFormat);
+    settings.setValue("uTimer/debug_log_to_file", true);
+    settings.setValue("uTimer/checkpoint_interval_minutes", "notanumber");
+    settings.sync();
+
+    // Act
+    ProcessGuard production;
+    QVERIFY2(startProduction(production.process, tempDir.path()),
+             qPrintable(startFailureMessage(production.process)));
+    QVERIFY2(waitForFile(QDir(tempDir.path()).filePath("uTimer.sqlite"), 5000),
+             "production did not reach database creation");
+
+    // Assert
+    const QString logPath = QDir(tempDir.path()).filePath("uTimer.log");
+    QVERIFY2(QFileInfo::exists(logPath), "uTimer.log must exist");
+    QFile logFile(logPath);
+    QVERIFY(logFile.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QString content = QString::fromUtf8(logFile.readAll());
+    logFile.close();
+    QVERIFY2(content.contains("malformed integer for uTimer/checkpoint_interval_minutes"),
+             qPrintable(content));
 }
 
 void AppShellTest::test_production_start_reclaims_stale_lock()

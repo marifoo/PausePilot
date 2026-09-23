@@ -28,6 +28,10 @@ private slots:
     // Test D: Logger::configure() captures logToFile as a value -- Logger
     // must keep working after the Settings object it was read from is gone.
     void test_d_settings_lifetime_survives_settings_destruction();
+    // Settings repair diagnostics must reach the log. Must run after Test A1
+    // (needs the logger's one-time file open already done) and before Test E
+    // (which permanently disables logging).
+    void test_settings_repair_diagnostics_reach_the_log();
     // Test E: the first write/flush failure disables file logging for the
     // rest of the process. Must run LAST -- it permanently disables Logger.
     void test_e_forced_write_failure_disables_logging_permanently();

@@ -99,8 +99,12 @@ int main(int argc, char *argv[])
 
 	QTimer timer;
 
-	Settings settings(AppPaths::settingsFile());
-	Logger::configure(settings.logToFile());
+	// Configure Logger before constructing Settings: the constructor logs its
+	// own repairs (malformed/out-of-range values), and Logger::Log() drops
+	// everything until configure() has run.
+	const QString settings_path = AppPaths::settingsFile();
+	Logger::configure(Settings::readLogToFile(settings_path));
+	Settings settings(settings_path);
 	LockStateWatcher lockstate_watcher(settings);
 	SqliteSessionStore session_store(settings);
 	TimeTracker time_tracker(settings, session_store);

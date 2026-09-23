@@ -28,6 +28,9 @@ private:
 	void writeAndSync();
 
 public:
+	/// Reads only debug_log_to_file from filename, so main() can configure
+	/// Logger before the constructor's repairs run.
+	static bool readLogToFile(const QString filename);
 	Settings(const QString filename);
 	/// Returns the status from the most recent sync() call (NoError on success).
 	QSettings::Status syncStatus() const { return last_sync_status_; }
