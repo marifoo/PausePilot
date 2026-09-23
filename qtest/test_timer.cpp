@@ -1818,6 +1818,100 @@ void TimerTest::test_A1_midnight_before_lock_replays_midnight_first()
     QCOMPARE(seg.endTime, cutoff);
 }
 
+// H2 (R11-003): useTimerViaLockEvent must defer when History holds the
+// exclusive edit; lock event does not discard a deferred scheduled midnight.
+void TimerTest::test_A1_lock_event_does_not_discard_deferred_scheduled_midnight()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    Settings settings(settingsPath);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    tracker.beginExclusiveEdit();
+
+    // Inject a pending scheduled midnight (as if onMidnightTimerFired() had captured it).
+    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
+    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightScheduled, cutoff);
+
+    // Clock forward to post-midnight; lock event arrives while dialog is open.
+    clock.setNow(QDate(2025, 6, 2).startOfDay().addSecs(5 * 60)); // 00:05
+    tracker.useTimerViaLockEvent(LockEvent::Lock);
+
+    // Act: the lock event saw a cross-midnight ongoing during exclusive edit;
+    // with the fix, it defers; without the fix, it stops the engine.
+
+    // Assert: engine untouched, pending midnight intact.
+    QVERIFY(tracker.isActive());
+    QVERIFY(tracker.pendingMidnightEvent_dbg().has_value());
+    QCOMPARE(tracker.pendingMidnightEvent_dbg()->reason, TimeTracker::StopReason::MidnightScheduled);
+    QCOMPARE(tracker.pendingMidnightEvent_dbg()->timestamp, cutoff);
+
+    // Advance clock and replay the deferred midnight.
+    clock.setNow(QDate(2025, 6, 2).startOfDay().addSecs(10 * 60)); // 00:10
+    tracker.endExclusiveEdit();
+
+    // Final state: engine stopped at the captured cutoff, exactly one segment committed.
+    QVERIFY(tracker.isStopped());
+    QVERIFY(!tracker.pendingMidnightEvent_dbg().has_value());
+    QCOMPARE(fakeDb.storedDurations.size(), size_t(1));
+    const auto& seg = fakeDb.storedDurations.front();
+    QCOMPARE(seg.type, DurationType::Activity);
+    QCOMPARE(seg.startTime, t0);
+    QCOMPARE(seg.endTime, cutoff);
+}
+
+// H2 (R11-003): lock event defers watchdog when no midnight is already pending.
+void TimerTest::test_A1_lock_event_defers_watchdog_when_no_midnight_pending()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    Settings settings(settingsPath);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    tracker.beginExclusiveEdit();
+
+    // No injected midnight; lock event sees a cross-midnight ongoing without prior deferral.
+    clock.setNow(QDate(2025, 6, 2).startOfDay().addSecs(5 * 60)); // 00:05
+    tracker.useTimerViaLockEvent(LockEvent::Lock);
+
+    // Act: lock event observed cross-midnight during exclusive edit;
+    // with the fix, it defers a watchdog; without the fix, it stops the engine.
+
+    // Assert: engine untouched, watchdog midnight deferred at the current clock time.
+    QVERIFY(tracker.isActive());
+    QVERIFY(tracker.pendingMidnightEvent_dbg().has_value());
+    QCOMPARE(tracker.pendingMidnightEvent_dbg()->reason, TimeTracker::StopReason::MidnightWatchdog);
+    QCOMPARE(tracker.pendingMidnightEvent_dbg()->timestamp,
+             QDate(2025, 6, 2).startOfDay().addSecs(5 * 60));
+
+    // Advance clock and replay the deferred watchdog (which discards the segment).
+    clock.setNow(QDate(2025, 6, 2).startOfDay().addSecs(10 * 60)); // 00:10
+    tracker.endExclusiveEdit();
+
+    // Final state: engine stopped, segment discarded (no commit), conservative policy preserved.
+    QVERIFY(tracker.isStopped());
+    QVERIFY(!tracker.pendingMidnightEvent_dbg().has_value());
+    // Watchdog policy discards the entire cross-midnight segment on replay.
+    QVERIFY(fakeDb.storedDurations.empty());
+    QVERIFY(!fakeDb.callLog.contains("commitSession"));
+}
+
 // If the ongoing segment was edited away during the dialog (mode_ == None),
 // the correction must be dropped without crashing or adding segments —
 // matching today's autopause_pending_resume_-only-armed-in-Activity rule.

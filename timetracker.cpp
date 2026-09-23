@@ -1579,6 +1579,12 @@ bool TimeTracker::isOngoingSegmentCrossMidnight() const
  * Forces the engine into the stopped state when the ongoing segment has
  * crossed midnight, discarding the in-flight segment.
  *
+ * Exception: while dialog_open_ is true (History holds the exclusive edit),
+ * records a deferred watchdog deferral instead and returns false without
+ * touching the engine. The captured deferral is replayed at endExclusiveEdit()
+ * to apply the discard then. This honours the exclusive-edit invariant that
+ * the engine itself is not touched while the dialog remains open.
+ *
  * Returns true when it fired (telling the caller to abandon any pending
  * transition). Safe to call multiple times; only the first call does real work.
  *
@@ -1590,6 +1596,16 @@ bool TimeTracker::discardCrossMidnightOngoingAndStop(const QDateTime& now)
     if (mode_ == Mode::None) return false;
     if (!session_.segment_start_time.isValid()) return false;
     if (!isCrossMidnight(session_.segment_start_time, now)) return false;
+
+    // The engine is not touched while the dialog is open (same invariant as
+    // DayBoundaryWatcher::tick at :101-113). deferMidnightIfAbsent is first-wins,
+    // so an already-captured MidnightScheduled cutoff keeps its exact instant;
+    // replay at endExclusiveEdit() applies it.
+    if (dialog_open_) {
+        deferred_edit_events_.deferMidnightIfAbsent(StopReason::MidnightWatchdog, now);
+        Logger::Log("[MIDNIGHT] cross-midnight ongoing seen during history edit - deferred, engine untouched");
+        return false;
+    }
 
     Logger::Log(QString("[MIDNIGHT] Cross-midnight ongoing detected "
                         "(segment_start=%1, now=%2) — discarding segment, forcing stop")

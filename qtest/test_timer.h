@@ -241,6 +241,11 @@ private slots:
     void test_A1_lock_before_midnight_replays_lock_first();
     void test_A1_midnight_before_lock_replays_midnight_first();
 
+    // H2 (R11-003): useTimerViaLockEvent must defer a cross-midnight discard
+    // when History holds the exclusive edit, exactly as the tick path does.
+    void test_A1_lock_event_does_not_discard_deferred_scheduled_midnight();
+    void test_A1_lock_event_defers_watchdog_when_no_midnight_pending();
+
     // ========================================================================
     // A3 (R11-001): TimeTracker::drainForShutdown() retries a pending commit
     // payload independent of tracker mode. Shutdown cleanliness derives from
