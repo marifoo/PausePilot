@@ -122,7 +122,6 @@ void TimeTracker::DayBoundaryWatcher::armScheduledStop(const QDateTime& now)
 
     qint64 msecs_until_stop;
     if (current_time < midnight_stop_time) {
-        msecs_until_stop = current_time.msecsTo(midnight_stop_time);
         // R11-004: remember the intended civil-time boundary so the callback
         // can revalidate wall time against it when it actually fires,
         // instead of trusting the QTimer's real-elapsed duration alone.
@@ -134,6 +133,8 @@ void TimeTracker::DayBoundaryWatcher::armScheduledStop(const QDateTime& now)
         // injectable in more places after this packet).
         intended_boundary_ = now;
         intended_boundary_.setTime(midnight_stop_time);
+        // M6: offset-aware across DST, same clamp as onMidnightTimerFired() (:184).
+        msecs_until_stop = qBound<qint64>(1, now.msecsTo(intended_boundary_), 24LL * 3600LL * 1000LL);
     } else {
         // Already past 23:59:59.500 — fire in 1 ms to trigger the watchdog
         // path. The intended boundary for revalidation is `now` itself, not

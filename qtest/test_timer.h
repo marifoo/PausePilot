@@ -421,6 +421,11 @@ private slots:
     // time and race the watchdog tick.
     void test_D2_scheduled_stop_late_across_date_defers_to_watchdog_discard();
 
+    // M6: DST spring-forward can cause an offset-blind QTime delay to
+    // over-estimate the real duration to the midnight boundary, arming the
+    // timer one real hour late. Mirror the offset-aware re-arm path to fix it.
+    void test_M6_scheduled_stop_arm_is_offset_aware_across_spring_dst();
+
     // ========================================================================
     // D5 (R15-002): cancelShutdown() is the one lifecycle operation that
     // reverses shutdown()'s terminal state after a cancelled OS shutdown. It

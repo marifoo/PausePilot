@@ -5396,6 +5396,51 @@ void TimerTest::test_D2_scheduled_stop_late_across_date_defers_to_watchdog_disca
 }
 
 // ============================================================================
+// M6: DST spring-forward can cause an offset-blind QTime delay to
+// over-estimate the real duration to the midnight boundary, arming the
+// timer one real hour late. Mirror the offset-aware re-arm path.
+// ============================================================================
+
+void TimerTest::test_M6_scheduled_stop_arm_is_offset_aware_across_spring_dst()
+{
+    // Arrange: Set TZ to Europe/Berlin and construct all QDateTimes after.
+    struct TzGuard {
+        QByteArray orig;
+        TzGuard() : orig(qgetenv("TZ")) {}
+        ~TzGuard() { orig.isEmpty() ? qunsetenv("TZ") : qputenv("TZ", orig); tzset(); }
+    } tzGuard;
+    qputenv("TZ", "Europe/Berlin");
+    tzset();
+
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    // Arm at 2025-03-30 01:00 CET (= 00:00 UTC) for boundary 23:59:59.500 CEST.
+    const QDateTime armAt(QDate(2025, 3, 30), QTime(1, 0, 0), Qt::LocalTime);
+    FakeClock clock(armAt);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+
+    // Pin the fixture: boundary is 21 h 59 m 59.5 s real time away
+    // (23:59:59.500 civil minus the spring-forward hour).
+    const QDateTime boundary(QDate(2025, 3, 30), QTime(23, 59, 59, 500), Qt::LocalTime);
+    QCOMPARE(armAt.msecsTo(boundary), 79199500LL);
+
+    // Assert: the scheduled timer is armed for the correct offset-aware
+    // duration, not the offset-blind civil duration (82799500 ms).
+    // Allow ±5 s to absorb QTimer::remainingTime() decay and real clock jitter.
+    const qint64 actualMs = tracker.dayBoundaryWatcher_dbg().remainingMs_dbg();
+    QVERIFY2(qAbs(actualMs - 79199500LL) < 5000,
+             qPrintable(QString("armed %1 ms, expected ~%2").arg(actualMs).arg(79199500LL)));
+
+    // Teardown: stop the timer so it does not fire during cleanup.
+    tracker.useTimerViaButton(Button::Stop);
+}
+
+// ============================================================================
 // D5 (R15-002): cancelShutdown() atomically clears the tracker's terminal
 // flag after a cancelled OS shutdown, without reconstructing/resuming the
 // ended session and without disturbing pending persistence.
