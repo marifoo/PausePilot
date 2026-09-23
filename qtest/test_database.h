@@ -34,7 +34,7 @@ private slots:
     void test_database_update_by_id_updates_existing_row_on_start_drift();
     void test_database_update_by_id_different_segments_same_start_both_exist();
     void test_database_update_by_id_empty_deque();
-    void test_database_load_negative_duration();
+    void test_database_load_computes_duration_from_timestamps();
     void test_database_load_start_after_end();
     void test_database_load_invalid_enum_type();
     void test_database_load_duration_mismatch_tolerance();

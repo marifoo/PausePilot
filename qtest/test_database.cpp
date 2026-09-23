@@ -576,7 +576,7 @@ void DatabaseTest::test_database_update_by_id_empty_deque()
     QVERIFY(manager.commitSession(Timeline(empty, std::nullopt)).ok()); // Should succeed as no-op
 }
 
-void DatabaseTest::test_database_load_negative_duration()
+void DatabaseTest::test_database_load_computes_duration_from_timestamps()
 {
     resetDatabaseFile();
     QTemporaryDir tempDir;
@@ -597,10 +597,10 @@ void DatabaseTest::test_database_load_negative_duration()
     QVERIFY(query.exec());
     manager.closeConnection_dbg();
 
-    // Duration is computed from timestamps at load — always non-negative.
+    // Duration is computed from the persisted endpoints and must equal the exact 5 s the row was written with.
     auto loaded = manager.loadDurations();
     QCOMPARE(loaded.size(), (size_t)1);
-    QVERIFY(loaded[0].duration() >= 0);
+    QCOMPARE(loaded[0].duration(), (qint64)5000);
 }
 
 void DatabaseTest::test_database_load_start_after_end()
