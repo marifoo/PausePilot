@@ -195,7 +195,9 @@ LockEvent LockStateWatcher::determineLockEvent(LockQueryResult query_result)
  * Workflow:
  * 1. Query current lock state via platform-specific isSessionLocked()
  * 2. Feed state into debounce buffer via determineLockEvent()
- * 3. On Lock: Record wall-clock lock_time_, emit Lock event
+ * 3. On Lock: Record wall-clock lock_time_ from the first observed Locked sample of the run (not the accepting tick),
+ *    so a suspend between the first sample and the debounced flip does not move the lock instant to the resume time.
+ *    Emit Lock event.
  * 4. On Unlock: Clear lock_time_, emit Unlock event
  * 5. While locked: Check if wall-clock duration (now - lock_time_) exceeded threshold → emit LongOngoingLock
  *
@@ -215,11 +217,23 @@ void LockStateWatcher::update()
 	// itself (round-3 review L7).
 	const QDateTime now = now_provider_();
 	const LockQueryResult q = query_provider_(now);
+
+	// Anchor the lock instant to the first Locked sample of the run. A suspend
+	// between the first sample and the debounced flip must not move the lock
+	// instant to the resume time. Unknown neither arms nor clears the anchor,
+	// matching the debounce buffer treatment.
+	if (q == LockQueryResult::Locked) {
+		if (!first_locked_sample_.isValid())
+			first_locked_sample_ = now;
+	} else if (q == LockQueryResult::Unlocked) {
+		first_locked_sample_ = QDateTime();
+	}
+
 	const LockEvent lock_event = determineLockEvent(q);
 
 	if (lock_event == LockEvent::Lock) {
 		Logger::Log("[LOCK] >> Lock determined");
-		lock_time_ = now;
+		lock_time_ = first_locked_sample_;
 		emit desktopLockEvent(LockEvent::Lock, lock_time_);
 	}
 	else if (lock_event == LockEvent::Unlock) {

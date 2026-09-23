@@ -41,6 +41,9 @@ private:
 	/// Wall-clock instant of the most recent Lock, captured via now_provider_.
 	/// Recorded here as the injectable wall-clock lock-time source (the A2 seam).
 	QDateTime lock_time_;
+	/// Wall-clock instant of the first Locked sample of the current run.
+	/// The instant the flip is stamped from. Invalid while no Locked run is in progress.
+	QDateTime first_locked_sample_;
 	/// Injectable lock-state probe. Defaults to isSessionLocked(); tests stub it
 	/// to script lock/unlock samples without touching DBus/WTS. Takes the same
 	/// civil `now` update() captured, so a query implementation that needs a

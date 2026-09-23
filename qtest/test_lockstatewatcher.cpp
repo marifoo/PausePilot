@@ -186,6 +186,141 @@ void LockStateWatcherTest::test_A2_longlock_uses_wallclock_across_suspend()
     QCOMPARE(events[1], LockEvent::LongOngoingLock);
 }
 
+// H3: lock_time_ is stamped from the first Locked sample of a run, not the
+// accepting (third) sample. A suspend between the first sample and the flip
+// does not move the lock instant to the resume time.
+void LockStateWatcherTest::test_H3_lock_anchor_survives_suspend_during_debounce()
+{
+    // Arrange: watcher with an injected clock and a scripted query probe.
+    Settings settings(TestCommon::createSettingsFile(QDir::tempPath(), 7));
+    LockStateWatcher watcher(settings);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    watcher.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    std::deque<LockQueryResult> script = {
+        LockQueryResult::Unlocked, LockQueryResult::Unlocked,
+        LockQueryResult::Locked,   LockQueryResult::Locked, LockQueryResult::Locked };
+    watcher.setQueryProvider_dbg([&script](const QDateTime &) {
+        LockQueryResult r = script.front();
+        script.pop_front();
+        return r;
+    });
+
+    // Capture both signal arguments: event and lockTime.
+    std::vector<std::pair<LockEvent, QDateTime>> events;
+    QObject::connect(&watcher, &LockStateWatcher::desktopLockEvent,
+                     [&events](LockEvent e, const QDateTime &lt) { events.push_back({e, lt}); });
+
+    // Act 1: first update at t0 (U).
+    watcher.update();
+
+    // Act 2: advance 100 ms and update (U).
+    clock.advance(100);
+    watcher.update();
+
+    // Act 3: advance 100 ms and update (first L at t0+200).
+    clock.advance(100);
+    watcher.update();
+
+    // Act 4: suspend—advance by backpause + 60 seconds, update (would be 3rd L, triggers flip).
+    clock.advance(settings.getBackpauseMsec() + 60000);
+    watcher.update();
+
+    // Act 5: advance 100 ms and update (flip after suspend).
+    clock.advance(100);
+    watcher.update();
+
+    // Assert: two events (Lock and LongOngoingLock), both stamped at t0+200 (the first Locked sample).
+    QCOMPARE(events.size(), static_cast<size_t>(2));
+    QCOMPARE(events[0].first, LockEvent::Lock);
+    QCOMPARE(events[0].second, t0.addMSecs(200));
+    QCOMPARE(events[1].first, LockEvent::LongOngoingLock);
+    QCOMPARE(events[1].second, t0.addMSecs(200));
+}
+
+// H3: lock_time_ is stamped from the first Locked sample, not the accepting
+// (third) sample, even in the healthy case with no suspend.
+void LockStateWatcherTest::test_H3_lock_time_is_first_locked_sample_not_third()
+{
+    // Arrange: watcher with an injected clock and a scripted query probe.
+    Settings settings(TestCommon::createSettingsFile(QDir::tempPath(), 7));
+    LockStateWatcher watcher(settings);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    watcher.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    std::deque<LockQueryResult> script = {
+        LockQueryResult::Unlocked, LockQueryResult::Unlocked,
+        LockQueryResult::Locked,   LockQueryResult::Locked, LockQueryResult::Locked };
+    watcher.setQueryProvider_dbg([&script](const QDateTime &) {
+        LockQueryResult r = script.front();
+        script.pop_front();
+        return r;
+    });
+
+    // Capture both signal arguments.
+    std::vector<std::pair<LockEvent, QDateTime>> events;
+    QObject::connect(&watcher, &LockStateWatcher::desktopLockEvent,
+                     [&events](LockEvent e, const QDateTime &lt) { events.push_back({e, lt}); });
+
+    // Act: five updates with 100 ms advances between them (U, U, L, L, L).
+    for (int i = 0; i < 5; ++i) {
+        if (i > 0)
+            clock.advance(100);
+        watcher.update();
+    }
+
+    // Assert: one Lock event, recorded at t0+200 (first Locked sample), not t0+400 (third sample).
+    QCOMPARE(events.size(), static_cast<size_t>(1));
+    QCOMPARE(events[0].first, LockEvent::Lock);
+    QCOMPARE(events[0].second, t0.addMSecs(200));
+    QCOMPARE(watcher.lockTime_dbg(), t0.addMSecs(200));
+}
+
+// H3: Unknown samples do not move the lock anchor; the anchor is stamped
+// from the first Locked sample before the Unknown samples arrive.
+void LockStateWatcherTest::test_H3_unknown_samples_do_not_move_the_lock_anchor()
+{
+    // Arrange: watcher with an injected clock and a scripted query probe.
+    Settings settings(TestCommon::createSettingsFile(QDir::tempPath(), 7));
+    LockStateWatcher watcher(settings);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    watcher.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    std::deque<LockQueryResult> script = {
+        LockQueryResult::Unlocked, LockQueryResult::Unlocked,
+        LockQueryResult::Locked,   LockQueryResult::Unknown, LockQueryResult::Unknown,
+        LockQueryResult::Locked,   LockQueryResult::Locked };
+    watcher.setQueryProvider_dbg([&script](const QDateTime &) {
+        LockQueryResult r = script.front();
+        script.pop_front();
+        return r;
+    });
+
+    // Capture both signal arguments.
+    std::vector<std::pair<LockEvent, QDateTime>> events;
+    QObject::connect(&watcher, &LockStateWatcher::desktopLockEvent,
+                     [&events](LockEvent e, const QDateTime &lt) { events.push_back({e, lt}); });
+
+    // Act: seven updates with 100 ms advances between them.
+    for (int i = 0; i < 7; ++i) {
+        if (i > 0)
+            clock.advance(100);
+        watcher.update();
+    }
+
+    // Assert: one Lock event, recorded at t0+200 (the first Locked sample),
+    // proving Unknown samples do not move the anchor forward.
+    QCOMPARE(events.size(), static_cast<size_t>(1));
+    QCOMPARE(events[0].first, LockEvent::Lock);
+    QCOMPARE(events[0].second, t0.addMSecs(200));
+}
+
 // A5: a single flaky Unlocked sample in the middle of an otherwise-Locked
 // transition must NOT permanently prevent Lock. Exact-pattern matching missed
 // this; hysteresis on the last-3 debounced level recovers.
