@@ -212,6 +212,8 @@ bool HistoryDialog::saveChanges()
     const Timeline& sessionTimeline  = payload.sessionTimeline;
     const Timeline& memoryTimeline   = payload.memoryTimeline;
 
+    bool backupMissing = false;
+
     // Step 4: Persist to DB.
     if (!historyTimeline.completed().empty() || !sessionTimeline.completed().empty()) {
         Logger::Log(QString("[HISTORY] Saving %1 historical + %2 current-session durations to DB")
@@ -248,6 +250,7 @@ bool HistoryDialog::saveChanges()
             return false;
         }
         Logger::Log("[HISTORY] Successfully saved historical durations to DB");
+        backupMissing = dbResult.backupMissing;
     } else {
         Logger::Log("[HISTORY] No historical durations to save");
     }
@@ -258,6 +261,22 @@ bool HistoryDialog::saveChanges()
         Logger::Log("[HISTORY] commitEditedTimeline: checkpoint write failed after edit commit");
     }
     Logger::Log("[HISTORY] Updated TimeTracker current session and checkpoint tracking");
+
+    if (backupMissing) {
+#ifndef QT_NO_DEBUG
+        ++debugBackupWarningShownCount_;
+        if (!debugSkipCritical_) {
+            QMessageBox::warning(this, "Database Warning",
+                "Your changes were saved, but no safety backup of the previous history "
+                "could be created (e.g. low disk space or a copy failure).");
+        }
+#else
+        QMessageBox::warning(this, "Database Warning",
+            "Your changes were saved, but no safety backup of the previous history "
+            "could be created (e.g. low disk space or a copy failure).");
+#endif
+    }
+
     return true;
 }
 

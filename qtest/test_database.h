@@ -45,6 +45,9 @@ private slots:
     void test_database_schema_validation_fresh_database();
     void test_database_schema_creates_idx_finalized_start();
     void test_database_backup_file_creation();
+    void test_M2_low_disk_skip_reports_missing_backup();
+    void test_M2_backup_copy_failure_reports_missing_backup();
+    void test_M2_successful_backup_reports_backup_present();
     void test_database_backup_preserves_contents();
     void test_database_backup_filenames_collision_free();
 

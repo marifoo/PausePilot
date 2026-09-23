@@ -2268,3 +2268,62 @@ void HistoryDialogTest::test_D9_split_too_short_row_does_not_open_modal()
     QVERIFY(dialog.debugLastSplitMessage_.contains("too short to split meaningfully"));
     QCOMPARE(dialog.editSession_dbg().pendingTimelines()[0].completed().size(), static_cast<size_t>(1));
 }
+
+// ---------------------------------------------------------------------------
+// M2: a successful save whose destructive replace ran without its pre-write
+// safety backup must warn the user, not stay silent.
+// ---------------------------------------------------------------------------
+
+void HistoryDialogTest::test_M2_saveChanges_warns_when_backup_missing()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime now = fixedNow();
+    tracker.seedCompletedDuration_dbg(
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
+
+    HistoryDialog dialog(tracker, settings);
+    dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+
+    SessionStoreResult r = SessionStoreResult::success();
+    r.backupMissing = true;
+    fakeDb.replaceDurationsResult = r;
+
+    fakeDb.callLog.clear();
+    dialog.debugSkipCritical_ = true;
+    dialog.done(QDialog::Accepted);
+
+    QVERIFY(dialog.saveChanges());
+    QCOMPARE(dialog.debugBackupWarningShownCount_, 1);
+    QCOMPARE(dialog.debugCriticalShownCount_, 0);
+    QCOMPARE(fakeDb.callLog.count("replaceAll"), 1);
+}
+
+void HistoryDialogTest::test_M2_saveChanges_silent_when_backup_present()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    const QDateTime now = fixedNow();
+    tracker.seedCompletedDuration_dbg(
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
+
+    HistoryDialog dialog(tracker, settings);
+    dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+
+    fakeDb.callLog.clear();
+    dialog.debugSkipCritical_ = true;
+    dialog.done(QDialog::Accepted);
+
+    QVERIFY(dialog.saveChanges());
+    QCOMPARE(dialog.debugBackupWarningShownCount_, 0);
+    QCOMPARE(dialog.debugCriticalShownCount_, 0);
+    QCOMPARE(fakeDb.callLog.count("replaceAll"), 1);
+}

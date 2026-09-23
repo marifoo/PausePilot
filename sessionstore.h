@@ -98,6 +98,12 @@ struct SessionStoreResult {
     enum Category { Success, Disabled, TransientError, FatalError, CallerBug };
     Category category;
     QString message;
+    /// True when a successful replaceAll() ran its destructive whole-table
+    /// replace without its pre-write safety copy (the backup was skipped or
+    /// failed). Set only by replaceAll(); every other result leaves it at
+    /// the default false, including Disabled, which attempts no backup or
+    /// replace.
+    bool backupMissing = false;
     bool ok() const { return category == Success; }
     /// True when the call did its job OR was a no-op because history storage
     /// is disabled.  Control-flow seams that treat "history off" the same as

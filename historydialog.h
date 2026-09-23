@@ -139,13 +139,17 @@ public:
     /// Defaults to true: under offscreen QPA a real QMessageBox::critical() has nothing to
     /// dismiss it, so an unexpected failure would hang the test run instead of failing the
     /// assertion on saveChanges()'s (unaffected) false return. A test that wants to observe
-    /// the "would have shown" signal still can, via debugCriticalShownCount_.
+    /// the "would have shown" signal still can, via debugCriticalShownCount_. Also suppresses
+    /// the M2 backup-missing warning (see debugBackupWarningShownCount_), for the same reason.
     bool debugSkipCritical_ = true;
     /// C4 fix round 2 (MEDIUM-5/LOW-9): incremented each time saveChanges()'s
     /// replaceAll() failure path reaches its own critical-dialog branch,
     /// regardless of debugSkipCritical_ -- lets a test observe whether this
     /// dialog would have been shown without exec()-ing a real QMessageBox.
     int debugCriticalShownCount_ = 0;
+    /// M2: incremented each time saveChanges() shows (or, under
+    /// debugSkipCritical_, would show) the backup-missing warning.
+    int debugBackupWarningShownCount_ = 0;
 
     /// D9 review (finding 1, round 3): if true, onSplitRow() skips its
     /// QMessageBox::information()/warning() calls for a rejected split

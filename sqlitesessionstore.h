@@ -20,8 +20,10 @@ enum class TransactionMode { Append, Replace };
 
 // Three-way result returned by createBackup().
 //   Success      — file copied and DB reopened.
-//   BackupFailed — file copy failed; DB connection state is unchanged (caller
-//                  may proceed without a backup — data is not at risk yet).
+//   BackupFailed — no backup exists — the copy failed or was deliberately
+//                  skipped (low disk); DB connection state is unchanged, the
+//                  caller may proceed without a backup — data is not at risk
+//                  yet.
 //   ReopenFailed — DB could not be reopened after the close-copy step; caller
 //                  must abort the pending write — the connection is dead.
 enum class BackupResult { Success, BackupFailed, ReopenFailed };
@@ -170,6 +172,13 @@ private:
     // test stays correct even if an earlier commit is ever added to the
     // path. D11 scope, same as the two seams above.
     bool force_settings_commit_failure_dbg_ = false;
+    // M2 test seam: makes createBackup()'s low-disk check take the skip
+    // branch without a genuinely near-full volume. Self-resetting once
+    // consumed.
+    bool force_backup_low_disk_dbg_ = false;
+    // M2 test seam: makes createBackup()'s file copy report failure without
+    // touching the real file. Self-resetting once consumed.
+    bool force_backup_copy_failure_dbg_ = false;
 #endif
 
     // Guards all public entry points so that no two operations can interleave.
@@ -406,6 +415,14 @@ public:
     /// first). Self-resetting once consumed (only if a rebuild is actually
     /// reached). D11 scope, same as the two setters above.
     void setForceSettingsCommitFailure_dbg(bool v) { force_settings_commit_failure_dbg_ = v; }
+
+    /// Forces the next createBackup() call to take the low-disk skip branch,
+    /// without a genuinely near-full volume. Self-resetting once consumed.
+    void setForceBackupLowDisk_dbg(bool v) { force_backup_low_disk_dbg_ = v; }
+
+    /// Forces the next createBackup() call's file copy to report failure,
+    /// without touching the real file. Self-resetting once consumed.
+    void setForceBackupCopyFailure_dbg(bool v) { force_backup_copy_failure_dbg_ = v; }
 #endif // QT_NO_DEBUG
 
 };

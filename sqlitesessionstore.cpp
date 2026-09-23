@@ -798,14 +798,20 @@ BackupResult SqliteSessionStore::createBackup(const std::deque<TimeDuration>& du
 
     // Skip backup if disk space is low (< 100 MB).  Proceeding with a full-table
     // write on a nearly-full volume risks leaving both the DB and the backup in a
-    // corrupted state; warn once and continue without a backup instead.
+    // corrupted state; report it as a missing backup and let the caller decide.
     {
         QStorageInfo storage(QFileInfo(db.databaseName()).absoluteDir().absolutePath());
         const qint64 available = storage.bytesAvailable();
-        if (available >= 0 && available < 100LL * 1024 * 1024) {
+#ifndef QT_NO_DEBUG
+        const bool lowDisk = force_backup_low_disk_dbg_ || (available >= 0 && available < 100LL * 1024 * 1024);
+        force_backup_low_disk_dbg_ = false;
+#else
+        const bool lowDisk = (available >= 0 && available < 100LL * 1024 * 1024);
+#endif
+        if (lowDisk) {
             Logger::Log(QString("[DB] Warning: Low disk space (%1 MB). Skipping backup.")
                 .arg(available / (1024 * 1024)));
-            return BackupResult::Success;
+            return BackupResult::BackupFailed;
         }
     }
 
@@ -828,7 +834,17 @@ BackupResult SqliteSessionStore::createBackup(const std::deque<TimeDuration>& du
     durationsFileName += ".durations.txt";
 
     // Copy the database file
+#ifndef QT_NO_DEBUG
+    bool success;
+    if (force_backup_copy_failure_dbg_) {
+        success = false;
+        force_backup_copy_failure_dbg_ = false;
+    } else {
+        success = QFile::copy(db.databaseName(), backupName);
+    }
+#else
     bool success = QFile::copy(db.databaseName(), backupName);
+#endif
 
     if (!success) {
         Logger::Log("[DB] Error: Failed to create backup of database");
@@ -1034,7 +1050,8 @@ SessionStoreResult SqliteSessionStore::replaceAll(const Timeline& history, const
         Logger::Log("[DB] CRITICAL: DB connection lost after backup - aborting replace");
         return SessionStoreResult::fatal("DB connection lost after backup");
     }
-    if (backup != BackupResult::Success) {
+    const bool backupMissing = (backup != BackupResult::Success);
+    if (backupMissing) {
         Logger::Log("[DB] Warning: Backup failed before REPLACE operation - proceeding without backup");
     }
 
@@ -1075,7 +1092,9 @@ SessionStoreResult SqliteSessionStore::replaceAll(const Timeline& history, const
     checkSegmentIdUniqueness();
 #endif
 
-    return SessionStoreResult::success();
+    SessionStoreResult result = SessionStoreResult::success();
+    result.backupMissing = backupMissing;
+    return result;
 }
 
 /**

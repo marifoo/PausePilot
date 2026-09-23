@@ -1031,6 +1031,94 @@ void DatabaseTest::test_database_backup_file_creation()
     QVERIFY(testDir.entryList(QStringList() << "*.durations.txt", QDir::Files).size() > txtBefore);
 }
 
+void DatabaseTest::test_M2_low_disk_skip_reports_missing_backup()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QDateTime now = fixedNow();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-190)));
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-180), now.addSecs(-170)));
+    QVERIFY(manager.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    QDir testDir(data_dir_.path());
+    const int backupsBefore = testDir.entryList(QStringList() << "*.backup", QDir::Files).size();
+
+    manager.setForceBackupLowDisk_dbg(true);
+
+    std::deque<TimeDuration> replacement;
+    replacement.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-90)));
+    const SessionStoreResult r = manager.replaceAll(Timeline(replacement, std::nullopt), Timeline());
+
+    QVERIFY(r.ok());
+    QVERIFY(r.backupMissing);
+    QCOMPARE(testDir.entryList(QStringList() << "*.backup", QDir::Files).size(), backupsBefore);
+    QVERIFY(manager.lastBackupPath_dbg().isEmpty());
+
+    const auto loaded = manager.loadDurations();
+    QCOMPARE(loaded.size(), (size_t)1);
+}
+
+void DatabaseTest::test_M2_backup_copy_failure_reports_missing_backup()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QDateTime now = fixedNow();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-190)));
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-180), now.addSecs(-170)));
+    QVERIFY(manager.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    manager.setForceBackupCopyFailure_dbg(true);
+
+    std::deque<TimeDuration> replacement;
+    replacement.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-90)));
+    const SessionStoreResult r = manager.replaceAll(Timeline(replacement, std::nullopt), Timeline());
+
+    QVERIFY(r.ok());
+    QVERIFY(r.backupMissing);
+    QVERIFY(manager.lastBackupPath_dbg().isEmpty());
+
+    const auto loaded = manager.loadDurations();
+    QCOMPARE(loaded.size(), (size_t)1);
+}
+
+void DatabaseTest::test_M2_successful_backup_reports_backup_present()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    QDateTime now = fixedNow();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-190)));
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-180), now.addSecs(-170)));
+    QVERIFY(manager.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    QDir testDir(data_dir_.path());
+    const int backupsBefore = testDir.entryList(QStringList() << "*.backup", QDir::Files).size();
+
+    std::deque<TimeDuration> replacement;
+    replacement.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-90)));
+    const SessionStoreResult r = manager.replaceAll(Timeline(replacement, std::nullopt), Timeline());
+
+    QVERIFY(r.ok());
+    QVERIFY(!r.backupMissing);
+    QCOMPARE(testDir.entryList(QStringList() << "*.backup", QDir::Files).size(), backupsBefore + 1);
+    QVERIFY(!manager.lastBackupPath_dbg().isEmpty());
+    QVERIFY(QFile::exists(manager.lastBackupPath_dbg()));
+}
+
 void DatabaseTest::test_database_backup_preserves_contents()
 {
     resetDatabaseFile();

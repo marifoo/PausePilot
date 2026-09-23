@@ -138,6 +138,13 @@ private slots:
     // D9 review (finding 1, round 3): a too-short row must be refused before
     // SplitDialog is ever constructed, not just before the split is applied.
     void test_D9_split_too_short_row_does_not_open_modal();
+
+    // ========================================================================
+    // M2: a successful save whose destructive replace ran without its
+    // pre-write safety backup must warn the user, not stay silent.
+    // ========================================================================
+    void test_M2_saveChanges_warns_when_backup_missing();
+    void test_M2_saveChanges_silent_when_backup_present();
 };
 
 #endif // TEST_HISTORYDIALOG_H
