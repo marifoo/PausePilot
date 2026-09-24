@@ -154,6 +154,12 @@ private slots:
     void test_M3_saveChanges_decline_pre_existing_overlap_preserves_rows();
     void test_M3_saveChanges_combined_drop_causes_single_prompt();
     void test_M3_saveChanges_no_prompt_when_nothing_is_replaced();
+
+    // ========================================================================
+    // WP1: History honours a revoked edit (inert until WP2).
+    // ========================================================================
+    void test_revoked_dialog_refuses_save_and_leaves_store_untouched();
+    void test_revoked_dialog_accept_does_not_commit();
 };
 
 #endif // TEST_HISTORYDIALOG_H

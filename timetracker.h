@@ -704,6 +704,13 @@ public slots:
 
 signals:
     void userWarning(const QString& text);
+    /// WP1: the edit has been revoked (at lock, sleep, midnight, shutdown or
+    /// fatal DB error). HistoryDialog's onExclusiveEditRevoked() slot receives
+    /// this synchronously (direct connection) to set editRevoked_, then queues
+    /// closeRevoked() to run on the next event-loop turn so nested modals
+    /// (QMessageBox::question, QMenu::exec) can unwind first. If the dialog
+    /// is destroyed before that turn, the queued call is dropped with it.
+    void exclusiveEditRevoked();
     /// C4 fix round 2 (HIGH-1): the ONE modal error C4/R05-006 requires.
     /// Emitted by enterFatalState() on the first latch only, in place of
     /// (not in addition to) userWarning -- a tray balloon/status-bar message

@@ -13,6 +13,11 @@
  * - Close blocking: accept() runs saveChanges() before closing. A failed DB
  *   save or a declined merge confirmation leaves the dialog open so the user
  *   can correct the situation or cancel explicitly.
+ * - Close on edit revoke (WP1): when the engine revokes the edit (at lock,
+ *   sleep, midnight, shutdown or fatal DB error), onExclusiveEditRevoked()
+ *   sets editRevoked_, queues closeRevoked() to reject child dialogs/menus,
+ *   then rejects History itself. saveChanges() refuses with a single
+ *   editRevoked_ check placed before Step 4 (DB persist).
  */
 
 #include "historydialog.h"
@@ -52,6 +57,11 @@ HistoryDialog::HistoryDialog(TimeTracker& timetracker, const Settings& settings,
     // Enable right-click context menu for split functionality
     table_->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(table_, &QTableWidget::customContextMenuRequested, this, &HistoryDialog::showContextMenu);
+
+    // WP1: connect exclusiveEditRevoked signal. Direct connection ensures
+    // editRevoked_ is set synchronously before any nested modals unwind.
+    connect(&timetracker_, &TimeTracker::exclusiveEditRevoked, this,
+            &HistoryDialog::onExclusiveEditRevoked, Qt::DirectConnection);
 
     // Log initial state for debugging
     Logger::Log("[HISTORY] Dialog opened");
@@ -262,6 +272,14 @@ bool HistoryDialog::saveChanges()
 
     bool backupMissing = false;
 
+    // WP1: if the edit was revoked (at lock, sleep, midnight, shutdown or fatal
+    // DB error), refuse the save and discard all edits. This check gates both
+    // Step 4 (DB persist) and Step 5 (memory-only commit).
+    if (editRevoked_) {
+        Logger::Log("[HISTORY] Edit was revoked; discarding changes");
+        return false;
+    }
+
     // Step 4: Persist to DB.
     if (!historyTimeline.completed().empty() || !sessionTimeline.completed().empty()) {
         Logger::Log(QString("[HISTORY] Saving %1 historical + %2 current-session durations to DB")
@@ -326,6 +344,42 @@ bool HistoryDialog::saveChanges()
     }
 
     return true;
+}
+
+void HistoryDialog::onExclusiveEditRevoked()
+{
+    // WP1: set editRevoked_ synchronously so any prompts in-flight
+    // (QMessageBox::question, QMenu::exec) can unwind and be seen by
+    // closeRevoked(). Then queue closeRevoked() to run after they unwind.
+    editRevoked_ = true;
+    Logger::Log("[HISTORY-EDIT] revoked");
+    QMetaObject::invokeMethod(this, &HistoryDialog::closeRevoked, Qt::QueuedConnection);
+}
+
+void HistoryDialog::closeRevoked()
+{
+    // WP1: close all visible child dialogs and menus so they unwind before
+    // this dialog itself closes, then reject this dialog.
+    // Walk through all top-level dialogs; find those parented to this dialog.
+    for (QWidget* widget : QApplication::topLevelWidgets()) {
+        QDialog* dlg = qobject_cast<QDialog*>(widget);
+        if (dlg && dlg != this && dlg->isVisible() && dlg->parentWidget() == this) {
+            dlg->reject();
+        }
+        QMenu* menu = qobject_cast<QMenu*>(widget);
+        if (menu && menu->isVisible()) {
+            // Check if the menu is a child of this dialog or any child dialog
+            QWidget* w = menu->parentWidget();
+            while (w) {
+                if (w == this) {
+                    menu->close();
+                    break;
+                }
+                w = w->parentWidget();
+            }
+        }
+    }
+    reject();
 }
 
 void HistoryDialog::setupUI()

@@ -55,6 +55,12 @@ private:
     /// RAII guard: beginExclusiveEdit on construction, endExclusiveEdit on destruction.
     TimerExclusiveEditGuard exclusiveEditGuard_;
 
+    /// WP1: set synchronously by onExclusiveEditRevoked() when the engine
+    /// revokes the edit (at lock, sleep, midnight, shutdown or fatal DB error).
+    /// saveChanges() refuses with a single check placed before Step 4, also
+    /// gating Step 5's memory-only commit when nothing is written to the DB.
+    bool editRevoked_ = false;
+
     /// Non-widget model owning all edit state: pages, pending timelines, origin tracking.
     HistoryEditSession session_;
 
@@ -96,6 +102,14 @@ private slots:
     void onOlder();
     void onNewer();
     void onSplitRow();
+    /// WP1: receives exclusiveEditRevoked() from TimeTracker. Sets editRevoked_
+    /// synchronously, then queues closeRevoked() to run on the next event-loop
+    /// turn (so nested modals can unwind first).
+    void onExclusiveEditRevoked();
+    /// WP1: queued by onExclusiveEditRevoked() to run after nested modals unwind.
+    /// Rejects every visible child QDialog and closes every visible child QMenu,
+    /// then rejects this dialog itself.
+    void closeRevoked();
 
 public:
     explicit HistoryDialog(TimeTracker& timetracker, const Settings& settings, QWidget* parent = nullptr);
@@ -187,6 +201,7 @@ public:
      * Commits pending edits to the database and TimeTracker. Returns true on success.
      * Returns false (and keeps the dialog open / exits early) if:
      *   - The dialog result is not Accepted (cancelled path).
+     *   - The edit was revoked (exclusiveEditRevoked() signal received).
      *   - A merge confirmation was declined by the user.
      *   - The DB save failed (shows a critical error dialog).
      *
@@ -197,6 +212,8 @@ public:
 
     /// Overrides QDialog::accept() to run saveChanges() before closing.
     /// If saveChanges() returns false the dialog stays open.
+    /// If the edit is revoked before saveChanges() completes, closeRevoked()
+    /// will reject the dialog on the next event-loop turn.
     void accept() override;
 };
 

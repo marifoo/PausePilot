@@ -6,6 +6,8 @@
 #include <QMessageBox>
 #include <QTimer>
 #include <QApplication>
+#include <QSqlDatabase>
+#include <QSqlQuery>
 
 #include "../historydialog.h"
 #include "../historyeditsession.h"
@@ -2561,4 +2563,141 @@ void HistoryDialogTest::test_M3_saveChanges_no_prompt_when_nothing_is_replaced()
     // Cleanup: restore the clock ahead of the segment start before stopping.
     clock.setNow(fixedNow().addSecs(300));
     tracker.useTimerViaButton(Button::Stop);
+}
+
+void HistoryDialogTest::test_revoked_dialog_refuses_save_and_leaves_store_untouched()
+{
+    // WP1 A1: the dialog refuses to save when the edit is revoked, and the store is untouched.
+    // Per the plan's spec: real SQLite with one historical Pause row, falsifiable
+    // 'closed' assertion via QSignalSpy, and segment_id tracking.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore db(settings);
+
+    const QDateTime now = fixedNow();
+
+    // Save a Pause row to the DB (historical, earlier today)
+    std::deque<TimeDuration> dbDurations;
+    dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-200), now.addSecs(-150)));
+
+    // FakeClock declared before TimeTracker so it outlives it.
+    FakeClock clock(now);
+    TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Write the historical row to the DB via replaceAll
+    QVERIFY(tracker.replaceAll(Timeline(dbDurations, std::nullopt), Timeline({}, std::nullopt)).ok());
+
+    // Start the timer to create the ongoing segment
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(5); // Ensure positive-length ongoing
+
+    // Capture the segment_id before the revoke
+    auto ongoingBefore = tracker.getOngoingDuration();
+    QVERIFY(ongoingBefore.has_value());
+    const SegmentId originalSegmentId = ongoingBefore->segment_id;
+
+    // Construct the dialog
+    HistoryDialog dialog(tracker, settings);
+
+    // Flip the Pause row to Activity (an edit)
+    dialog.editSession_dbg().setPageTimeline(0,
+        dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Activity));
+
+    // Arrange: create the finished spy before Act (per MEDIUM-1 rule)
+    QSignalSpy finished(&dialog, &QDialog::finished);
+
+    // Act: emit the revoke signal
+    emit tracker.exclusiveEditRevoked();
+
+    // Assert: the spy reaches count 1 with last() == Rejected
+    QTRY_COMPARE(finished.count(), 1);
+    QCOMPARE(finished.last().at(0).toInt(), int(QDialog::Rejected));
+
+    // Retry via setResult(Accepted) + saveChanges(), which exercises the editRevoked_ check
+    dialog.setResult(QDialog::Accepted);
+    QVERIFY(!dialog.saveChanges());
+
+    // Assert: the spy count is unchanged (no new finished emission)
+    QCOMPARE(finished.count(), 1);
+
+    // Assert: SQLite still has the row as Pause
+    {
+        const QString connName = QString("test_revoked_a1_%1").arg(reinterpret_cast<quintptr>(&db));
+        QSqlDatabase rawDb = QSqlDatabase::addDatabase("QSQLITE", connName);
+        rawDb.setDatabaseName(db_path_);
+        QVERIFY(rawDb.open());
+
+        QSqlQuery q(rawDb);
+        q.prepare("SELECT type FROM durations WHERE is_finalized = 1");
+        QVERIFY(q.exec());
+        QVERIFY(q.next());
+        // type 0 is Activity, 1 is Pause (per DurationType enum)
+        QCOMPARE(q.value(0).toInt(), 1); // Pause
+
+        rawDb.close();
+    }
+    QSqlDatabase::removeDatabase(QString("test_revoked_a1_%1").arg(reinterpret_cast<quintptr>(&db)));
+
+    // Assert: tracker is Active with the same segment_id
+    QVERIFY(tracker.isActive());
+    auto ongoingAfter = tracker.getOngoingDuration();
+    QVERIFY(ongoingAfter.has_value());
+    QCOMPARE(ongoingAfter->segment_id, originalSegmentId);
+}
+
+void HistoryDialogTest::test_revoked_dialog_accept_does_not_commit()
+{
+    // WP1 A2: after revoke, accept() does not commit edits; editRevoked_
+    // check is what refuses (not the result() guard).
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime now = fixedNow();
+    // Add an Activity row earlier today (same-day, so it's on page 0)
+    fakeDb.loadDurationsResult.durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
+
+    // FakeClock declared before TimeTracker so it outlives it.
+    FakeClock clock(now);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Start the timer
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(5); // Ensure positive-length ongoing
+
+    // Construct the dialog
+    HistoryDialog dialog(tracker, settings);
+
+    // Make an edit: toggle the Activity row to Pause
+    dialog.editSession_dbg().setPageTimeline(0,
+        dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+
+    // Arrange the finished spy
+    QSignalSpy finished(&dialog, &QDialog::finished);
+
+    // Act: emit the revoke signal
+    emit tracker.exclusiveEditRevoked();
+
+    // Wait for the finished signal to reach count 1 (the queued close)
+    QTRY_COMPARE(finished.count(), 1);
+
+    // Now call accept(), which sets result to Accepted and calls saveChanges()
+    fakeDb.callLog.clear();
+    dialog.accept();
+
+    // Assert: replaceAll was never called
+    QCOMPARE(fakeDb.callLog.count("replaceAll"), 0);
+
+    // The spy count is still 1 (only the revoke rejection), no new Accepted
+    QCOMPARE(finished.count(), 1);
+    QCOMPARE(finished.last().at(0).toInt(), int(QDialog::Rejected));
+
+    // result() is Rejected
+    QCOMPARE(dialog.result(), QDialog::Rejected);
 }
