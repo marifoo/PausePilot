@@ -67,9 +67,11 @@
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)qtest</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <!-- Project-relative rather than $(SolutionDir): apptest.vcxproj is not
-           a member of uTimer.sln, so SolutionDir is not reliably defined for
-           it. MSBuildProjectDirectory is always defined for any project.
+      <!-- Project-relative rather than $(SolutionDir): apptest.vcxproj is a
+           member of uTimer.sln (Debug only; Release is not built there
+           because apptest relies on debug-only seams), but a standalone
+           build outside the solution does not reliably define SolutionDir.
+           MSBuildProjectDirectory is always defined for any project.
            .Replace('\','/') avoids emitting literal backslash-letter pairs
            (e.g. \U, \u) that MSVC's preprocessor would otherwise parse as
            (possibly invalid) universal-character-name escapes. -->
