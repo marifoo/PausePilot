@@ -8,6 +8,8 @@
 #include "startuprecovery.h"
 #include "lockdecision.h"
 #include "unixsignalbridge.h"
+#include "contentwidget.h"
+#include "historydialog.h"
 #include <QtTest>
 #include <QApplication>
 #include <QDateTime>
@@ -1488,4 +1490,94 @@ void AppShellTest::test_mainwin_stopped_rearms_health_monitor_through_real_wirin
 
     // Cleanup
     tracker.useTimerViaButton(Button::Stop);
+}
+
+// ============================================================================
+// WP3 (midnight_close_plan.md): the midnight revoke must close a real
+// HistoryDialog even while a nested QMessageBox::question() is the active
+// modal on top of it -- HistoryDialog::closeRevoked() rejects every visible
+// child QDialog before rejecting itself (section 1.2 of the plan). Nested
+// modals here must be QMessageBox: a QMenu under offscreen QPA emits a
+// non-allow-listed warning.
+// ============================================================================
+
+namespace {
+const QString kWP3RevokedNotice =
+    "History was closed (screen lock, sleep, midnight, shutdown or a database error); any unsaved changes were discarded.";
+}
+
+void AppShellTest::test_history_closes_at_midnight_under_nested_prompt()
+{
+    // Arrange: a real MainWin/ContentWidget wired to a real TimeTracker,
+    // running, with the clock one minute before local midnight so the
+    // scheduled-stop cutoff lands within the test.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    const QDate today = QDate::currentDate();
+    FakeClock clock(QDateTime(today, QTime(23, 59, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+    MainWin mainWin(settings, tracker, fakeDb, coordinator);
+    QSignalSpy warn(&tracker, &TimeTracker::userWarning);
+    tracker.useTimerViaButton(Button::Start);
+
+    // Act: open History (a real modal exec()), and from a 5 ms poller --
+    // once it becomes the active modal -- raise a nested QMessageBox::
+    // question() on top of it. Once THAT is the active modal, set the clock
+    // to the cutoff and fire the scheduled midnight timer, so the revoke
+    // runs while both dialogs are nested. A ~5 s watchdog rejects whatever
+    // is open and fails the test instead of hanging the whole suite if
+    // either modal never appears.
+    QMessageBox::StandardButton answer = QMessageBox::Yes;
+    bool asked = false, fired = false, answered = false;
+    int ticks = 0;
+    QTimer poll;
+    poll.setInterval(5);
+    QObject::connect(&poll, &QTimer::timeout, [&]() {
+        QWidget* active = QApplication::activeModalWidget();
+        if (++ticks > 1000) { // ~5 s watchdog
+            poll.stop();
+            while (QDialog* d = qobject_cast<QDialog*>(QApplication::activeModalWidget()))
+                d->reject();
+            qWarning("watchdog: test_history_closes_at_midnight_under_nested_prompt did not "
+                     "see both modals in time");
+            return;
+        }
+        if (HistoryDialog* dlg = qobject_cast<HistoryDialog*>(active)) {
+            if (!asked) {
+                asked = true;
+                QTimer::singleShot(0, dlg, [&, dlg]() {
+                    answer = QMessageBox::question(dlg, "t", "q", QMessageBox::Yes | QMessageBox::No);
+                    answered = true;
+                });
+            }
+            return;
+        }
+        if (qobject_cast<QMessageBox*>(active) && !fired) {
+            fired = true;
+            const QDateTime cutoff(today, QTime(23, 59, 59, 500), Qt::LocalTime);
+            clock.setNow(cutoff);
+            tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+        }
+    });
+    poll.start();
+    mainWin.findChild<ContentWidget*>()->pressedShowHistoryButton();
+    poll.stop();
+
+    // Assert
+    QVERIFY(asked);
+    QVERIFY(fired);
+    QVERIFY(answered);
+    QVERIFY(answer != QMessageBox::Yes);
+    QVERIFY(!QApplication::activeModalWidget());
+    QVERIFY(tracker.isStopped());
+    QVERIFY(!tracker.isDialogOpen_dbg());
+    QCOMPARE(warn.count(), 1);
+    QCOMPARE(warn.first().first().toString(), kWP3RevokedNotice);
+    QCOMPARE(fakeDb.storedDurations.size(), size_t(1));
+    QCOMPARE(fakeDb.storedDurations.front().endTime,
+             QDateTime(today, QTime(23, 59, 59, 500), Qt::LocalTime));
 }

@@ -118,6 +118,12 @@ private slots:
     // GUI/not in the test build" -- apptest links mainwin.cpp, so that
     // workaround is no longer necessary here).
     void test_mainwin_stopped_rearms_health_monitor_through_real_wiring();
+
+    // WP3 (midnight_close_plan.md): the midnight revoke closes a real
+    // HistoryDialog even while it has a nested QMessageBox::question active
+    // on top of it -- the engine's revoke-then-normal-code outcome must not
+    // depend on how deeply the dialog is buried in nested event loops.
+    void test_history_closes_at_midnight_under_nested_prompt();
 };
 
 #endif // TEST_APPSHELL_H
