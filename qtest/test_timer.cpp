@@ -1882,100 +1882,6 @@ void TimerTest::test_A1_midnight_before_lock_replays_midnight_first()
     QCOMPARE(seg.endTime, cutoff);
 }
 
-// H2 (R11-003): useTimerViaLockEvent must defer when History holds the
-// exclusive edit; lock event does not discard a deferred scheduled midnight.
-void TimerTest::test_A1_lock_event_does_not_discard_deferred_scheduled_midnight()
-{
-    // Arrange
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    FakeSessionStore fakeDb;
-
-    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    Settings settings(settingsPath);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    tracker.beginExclusiveEdit();
-
-    // Inject a pending scheduled midnight (as if onMidnightTimerFired() had captured it).
-    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
-    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightScheduled, cutoff);
-
-    // Clock forward to post-midnight; lock event arrives while dialog is open.
-    clock.setNow(QDate(2025, 6, 2).startOfDay().addSecs(5 * 60)); // 00:05
-    tracker.useTimerViaLockEvent(LockEvent::Lock);
-
-    // Act: the lock event saw a cross-midnight ongoing during exclusive edit;
-    // with the fix, it defers; without the fix, it stops the engine.
-
-    // Assert: engine untouched, pending midnight intact.
-    QVERIFY(tracker.isActive());
-    QVERIFY(tracker.pendingMidnightEvent_dbg().has_value());
-    QCOMPARE(tracker.pendingMidnightEvent_dbg()->reason, TimeTracker::StopReason::MidnightScheduled);
-    QCOMPARE(tracker.pendingMidnightEvent_dbg()->timestamp, cutoff);
-
-    // Advance clock and replay the deferred midnight.
-    clock.setNow(QDate(2025, 6, 2).startOfDay().addSecs(10 * 60)); // 00:10
-    tracker.endExclusiveEdit();
-
-    // Final state: engine stopped at the captured cutoff, exactly one segment committed.
-    QVERIFY(tracker.isStopped());
-    QVERIFY(!tracker.pendingMidnightEvent_dbg().has_value());
-    QCOMPARE(fakeDb.storedDurations.size(), size_t(1));
-    const auto& seg = fakeDb.storedDurations.front();
-    QCOMPARE(seg.type, DurationType::Activity);
-    QCOMPARE(seg.startTime, t0);
-    QCOMPARE(seg.endTime, cutoff);
-}
-
-// H2 (R11-003): lock event defers watchdog when no midnight is already pending.
-void TimerTest::test_A1_lock_event_defers_watchdog_when_no_midnight_pending()
-{
-    // Arrange
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    FakeSessionStore fakeDb;
-
-    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    Settings settings(settingsPath);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    tracker.beginExclusiveEdit();
-
-    // No injected midnight; lock event sees a cross-midnight ongoing without prior deferral.
-    clock.setNow(QDate(2025, 6, 2).startOfDay().addSecs(5 * 60)); // 00:05
-    tracker.useTimerViaLockEvent(LockEvent::Lock);
-
-    // Act: lock event observed cross-midnight during exclusive edit;
-    // with the fix, it defers a watchdog; without the fix, it stops the engine.
-
-    // Assert: engine untouched, watchdog midnight deferred at the current clock time.
-    QVERIFY(tracker.isActive());
-    QVERIFY(tracker.pendingMidnightEvent_dbg().has_value());
-    QCOMPARE(tracker.pendingMidnightEvent_dbg()->reason, TimeTracker::StopReason::MidnightWatchdog);
-    QCOMPARE(tracker.pendingMidnightEvent_dbg()->timestamp,
-             QDate(2025, 6, 2).startOfDay().addSecs(5 * 60));
-
-    // Advance clock and replay the deferred watchdog (which discards the segment).
-    clock.setNow(QDate(2025, 6, 2).startOfDay().addSecs(10 * 60)); // 00:10
-    tracker.endExclusiveEdit();
-
-    // Final state: engine stopped, segment discarded (no commit), conservative policy preserved.
-    QVERIFY(tracker.isStopped());
-    QVERIFY(!tracker.pendingMidnightEvent_dbg().has_value());
-    // Watchdog policy discards the entire cross-midnight segment on replay.
-    QVERIFY(fakeDb.storedDurations.empty());
-    QVERIFY(!fakeDb.callLog.contains("commitSession"));
-}
-
 // If the ongoing segment was edited away during the dialog (mode_ == None),
 // the correction must be dropped without crashing or adding segments —
 // matching today's autopause_pending_resume_-only-armed-in-Activity rule.
@@ -3366,81 +3272,6 @@ void TimerTest::test_A1_watchdog_deferred_discards_entire_segment_no_checkpoint(
 // A1 (R11-002): production capture path — onMidnightTimerFired() must record
 // a typed event (not just a bool) while dialog_open_, without stopping the
 // engine. Exercises the real QTimer firing, not a dbg poke.
-void TimerTest::test_A1_onMidnightTimerFired_captures_typed_event_while_dialog_open()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
-    FakeClock clock(cutoff);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    QVERIFY(tracker.isActive());
-
-    tracker.beginExclusiveEdit();
-
-    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
-    QVERIFY(stoppedSpy.isValid());
-
-    // Start() already armed the scheduled stop against the FakeClock (frozen
-    // exactly at the cutoff); drive the timer-fired callback directly
-    // (D2/R11-004/D2 item 5) rather than waiting for the real QTimer, so
-    // there is no real wait and the boundary revalidation sees an on-time
-    // fire.
-    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
-
-    // Deferred, not applied: engine still Activity, nothing stopped.
-    QCOMPARE(stoppedSpy.count(), 0);
-    QVERIFY(tracker.isActive());
-
-    auto pending = tracker.pendingMidnightEvent_dbg();
-    QVERIFY(pending.has_value());
-    QCOMPARE(pending->reason, TimeTracker::StopReason::MidnightScheduled);
-    QCOMPARE(pending->timestamp, cutoff);
-
-    tracker.endExclusiveEdit();
-}
-
-// A1 (R11-002): production capture path — the watchdog tick() must record a
-// typed deferred event (not immediately stop) while dialog_open_.
-void TimerTest::test_A1_tick_captures_watchdog_event_while_dialog_open()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    QVERIFY(tracker.isActive());
-
-    tracker.beginExclusiveEdit();
-
-    // Machine "wakes" past midnight while the dialog is still open.
-    const QDateTime afterMidnight(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime);
-    clock.setNow(afterMidnight);
-
-    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
-    tracker.onTick(afterMidnight);
-
-    QCOMPARE(stoppedSpy.count(), 0);
-    QVERIFY(tracker.isActive());
-
-    auto pending = tracker.pendingMidnightEvent_dbg();
-    QVERIFY(pending.has_value());
-    QCOMPARE(pending->reason, TimeTracker::StopReason::MidnightWatchdog);
-
-    tracker.endExclusiveEdit();
-}
-
 // A1 (R11-002): an unrelated in-memory History edit (e.g. reclassifying an
 // earlier completed segment) made while the dialog is open must survive the
 // deferred-midnight replay unchanged.
@@ -3535,6 +3366,456 @@ void TimerTest::test_A1_repeated_endExclusiveEdit_does_not_replay_twice()
     QVERIFY(tracker.isStopped());
     QCOMPARE(fakeDb.callLog.size(), callsAfterFirst);
     QCOMPARE(fakeDb.storedDurations.size(), storedAfterFirst);
+}
+
+// ============================================================================
+// WP2 (midnight_close_plan.md): the engine revokes an open History edit at
+// the midnight boundary, then runs its normal no-dialog code. The final
+// notice text is pinned here (LOW-2 of the plan) -- no later package changes
+// it or the assertions below that compare it.
+// ============================================================================
+
+namespace {
+const QString kWP2RevokedNotice =
+    "History was closed (screen lock, sleep, midnight, shutdown or a database error); any unsaved changes were discarded.";
+}
+
+// N1: a scheduled stop revokes an open edit and credits Activity through the
+// captured cutoff, exactly as it would with no dialog.
+void TimerTest::test_N1_scheduled_stop_revokes_edit_and_credits_activity_through_cutoff()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    clock.advance(60ll * 1000ll); // 23:51, so the checkpoint isn't zero-length
+    tracker.triggerCheckpoint_dbg();
+    QVERIFY(fakeDb.callLog.contains("saveCheckpoint"));
+
+    tracker.beginExclusiveEdit();
+    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
+    clock.setNow(cutoff);
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+    fakeDb.callLog.clear();
+
+    // Act
+    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+
+    // Assert
+    QCOMPARE(revokedSpy.count(), 1);
+    QVERIFY(!tracker.isDialogOpen_dbg());
+    QCOMPARE(warnSpy.count(), 1);
+    QCOMPARE(warnSpy.first().first().toString(), kWP2RevokedNotice);
+    QCOMPARE(stoppedSpy.count(), 1);
+    QCOMPARE(stoppedSpy.first().first().value<TimeTracker::StopReason>(),
+             TimeTracker::StopReason::MidnightScheduled);
+    QVERIFY(fakeDb.callLog.contains("commitSession"));
+    QVERIFY(!fakeDb.callLog.contains("discardCheckpoint"));
+    QCOMPARE(fakeDb.storedDurations.size(), size_t(1));
+    const auto& seg = fakeDb.storedDurations.front();
+    QCOMPARE(seg.type, DurationType::Activity);
+    QCOMPARE(seg.startTime, t0);
+    QCOMPARE(seg.endTime, cutoff);
+}
+
+// N2 (*HEAD-red*): the Pause variant of N1.
+void TimerTest::test_N2_scheduled_stop_revokes_edit_and_credits_pause_through_cutoff()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(5ll * 60ll * 1000ll); // 23:55
+    tracker.useTimerViaButton(Button::Pause);
+    QVERIFY(tracker.isPaused());
+    const QDateTime pauseStart = clock.now();
+    fakeDb.storedDurations.clear(); // ignore the crash-safety commit finalizePauseTransition just made
+
+    tracker.beginExclusiveEdit();
+    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
+    clock.setNow(cutoff);
+    fakeDb.callLog.clear();
+
+    // Act
+    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+
+    // Assert
+    QVERIFY(!tracker.isDialogOpen_dbg());
+    QVERIFY(tracker.isStopped());
+    QVERIFY(!fakeDb.callLog.contains("discardCheckpoint"));
+    bool foundActivity = false, foundPause = false;
+    for (const auto& seg : fakeDb.storedDurations) {
+        if (seg.type == DurationType::Activity && seg.startTime == t0 && seg.endTime == pauseStart)
+            foundActivity = true;
+        if (seg.type == DurationType::Pause && seg.startTime == pauseStart && seg.endTime == cutoff)
+            foundPause = true;
+    }
+    QVERIFY2(foundActivity, "Expected the pre-pause Activity segment to survive");
+    QVERIFY2(foundPause, "Expected the Pause segment credited exactly through the cutoff");
+}
+
+// N3 (*HEAD-red*): a watchdog tick at 00:10 with the dialog open revokes the
+// edit and discards the whole cross-midnight segment, exactly as the
+// non-deferred watchdog policy already does.
+void TimerTest::test_N3_watchdog_tick_revokes_edit_and_discards_segment()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    tracker.triggerCheckpoint_dbg();
+    QVERIFY(fakeDb.callLog.contains("saveCheckpoint"));
+
+    tracker.beginExclusiveEdit();
+    const QDateTime postMidnight(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime);
+    clock.setNow(postMidnight);
+    fakeDb.callLog.clear();
+
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+
+    // Act: the real 100ms heartbeat slot.
+    tracker.onTick(postMidnight);
+
+    // Assert
+    QVERIFY(!tracker.isDialogOpen_dbg());
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(stoppedSpy.count(), 1);
+    QCOMPARE(stoppedSpy.first().first().value<TimeTracker::StopReason>(),
+             TimeTracker::StopReason::MidnightWatchdog);
+    QVERIFY(fakeDb.callLog.contains("discardCheckpoint"));
+    QVERIFY(!fakeDb.callLog.contains("commitSession"));
+    QVERIFY(fakeDb.storedDurations.empty());
+}
+
+// N4 (*HEAD-red*): a Lock event at 00:05 with the dialog open revokes the
+// edit and stops via the same cross-midnight discard.
+void TimerTest::test_N4_lock_event_revokes_edit_and_stops()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    tracker.beginExclusiveEdit();
+    const QDateTime postMidnight(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime);
+    clock.setNow(postMidnight);
+
+    // Act
+    tracker.useTimerViaLockEvent(LockEvent::Lock);
+
+    // Assert
+    QVERIFY(!tracker.isDialogOpen_dbg());
+    QVERIFY(tracker.isStopped());
+    QVERIFY(fakeDb.storedDurations.empty());
+}
+
+// N5 (*HEAD-red*): a LongOngoingLock/Unlock interval already deferred while
+// the dialog was open still replays normally when the scheduled stop later
+// revokes the edit. This test must stay unchanged through WP5 (when the
+// lock events themselves start revoking immediately, no deferral involved).
+void TimerTest::test_N5_scheduled_stop_after_autopause_revokes_and_credits_all_segments()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/autopause_enabled", true);
+    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    tracker.beginExclusiveEdit();
+
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
+
+    const QDateTime lockTime(QDate(2025, 6, 1), QTime(23, 20, 0), Qt::LocalTime);
+    clock.setNow(lockTime);
+    tracker.useTimerViaLockEvent(LockEvent::Lock);
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
+
+    const QDateTime unlockTime(QDate(2025, 6, 1), QTime(23, 40, 0), Qt::LocalTime);
+    clock.setNow(unlockTime);
+    tracker.useTimerViaLockEvent(LockEvent::Unlock);
+
+    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
+    clock.setNow(cutoff);
+
+    // Act: the deferred lock correction and the scheduled stop are both
+    // resolved by this one fire (see the plan's §1.3 heartbeat-order note).
+    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+
+    // Assert: rows
+    QVERIFY(tracker.isStopped());
+    bool foundPreLockActivity = false, foundPause = false, foundPostUnlockActivity = false;
+    for (const auto& seg : fakeDb.storedDurations) {
+        if (seg.type == DurationType::Activity && seg.startTime == t0 && seg.endTime == lockTime)
+            foundPreLockActivity = true;
+        if (seg.type == DurationType::Pause && seg.startTime == lockTime && seg.endTime == unlockTime)
+            foundPause = true;
+        if (seg.type == DurationType::Activity && seg.startTime == unlockTime && seg.endTime == cutoff)
+            foundPostUnlockActivity = true;
+    }
+    QVERIFY2(foundPreLockActivity, "Expected completed Activity segment 23:00->23:20");
+    QVERIFY2(foundPause, "Expected completed Pause segment 23:20->23:40");
+    QVERIFY2(foundPostUnlockActivity, "Expected Activity segment 23:40->cutoff");
+
+    // Assert: transitioned causes in order.
+    QCOMPARE(transitionedSpy.count(), 3);
+    QCOMPARE(transitionedSpy.at(0).first().value<TimeTracker::Transition>().cause,
+             TimeTracker::TransitionCause::LockAutopause);
+    QCOMPARE(transitionedSpy.at(1).first().value<TimeTracker::Transition>().cause,
+             TimeTracker::TransitionCause::LockResume);
+    QCOMPARE(transitionedSpy.at(2).first().value<TimeTracker::Transition>().cause,
+             TimeTracker::TransitionCause::MidnightScheduled);
+}
+
+// N5b (*HEAD-red*): History stays open while still locked (no Unlock) right
+// up to the scheduled stop. The deferred LongOngoingLock replays as "still
+// locked", so the scheduled stop finalizes a Pause segment through the cutoff.
+void TimerTest::test_N5b_scheduled_stop_while_still_locked_revokes_and_stops_paused()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/autopause_enabled", true);
+    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    tracker.beginExclusiveEdit();
+
+    const QDateTime lockTime(QDate(2025, 6, 1), QTime(23, 20, 0), Qt::LocalTime);
+    clock.setNow(lockTime);
+    tracker.useTimerViaLockEvent(LockEvent::Lock);
+
+    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(23, 35, 0), Qt::LocalTime));
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
+
+    // No Unlock before the scheduled stop.
+    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
+    clock.setNow(cutoff);
+
+    // Act
+    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+
+    // Assert
+    QVERIFY(tracker.isStopped());
+    bool foundActivity = false, foundPause = false;
+    for (const auto& seg : fakeDb.storedDurations) {
+        if (seg.type == DurationType::Activity && seg.startTime == t0 && seg.endTime == lockTime)
+            foundActivity = true;
+        if (seg.type == DurationType::Pause && seg.startTime == lockTime && seg.endTime == cutoff)
+            foundPause = true;
+    }
+    QVERIFY2(foundActivity, "Expected completed Activity segment 23:00->23:20");
+    QVERIFY2(foundPause, "Expected the Pause interval to cover [23:20, cutoff] contiguously");
+
+    // A later Unlock does not restart the (now stopped) timer.
+    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime));
+    tracker.useTimerViaLockEvent(LockEvent::Unlock);
+    QVERIFY(tracker.isStopped());
+    QVERIFY(!tracker.isAutopausePendingResume_dbg());
+}
+
+// N6 (*HEAD-red*; the Medium; tick-first): a watchdog tick fires before an
+// Unlock arrives, while a LongOngoingLock correction is still deferred
+// (still locked). The tick's revoke replays the "still locked" correction,
+// which itself immediately hits the cross-midnight guard and stops the
+// engine -- the whole overnight segment is discarded, matching the no-dialog
+// watchdog policy. HEAD instead resumes Activity at 08:00.
+void TimerTest::test_N6_watchdog_tick_before_unlock_revokes_and_discards_whole_segment()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/autopause_enabled", true);
+    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(21, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    tracker.beginExclusiveEdit();
+
+    const QDateTime lockTime(QDate(2025, 6, 1), QTime(22, 5, 0), Qt::LocalTime);
+    clock.setNow(lockTime);
+    tracker.useTimerViaLockEvent(LockEvent::Lock);
+
+    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(22, 20, 0), Qt::LocalTime));
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
+
+    const QDateTime nextMorning(QDate(2025, 6, 2), QTime(8, 0, 0), Qt::LocalTime);
+    clock.setNow(nextMorning);
+
+    // Act
+    tracker.onTick(nextMorning);
+    tracker.useTimerViaLockEvent(LockEvent::Unlock);
+    tracker.endExclusiveEdit();
+
+    // Assert
+    QVERIFY(tracker.isStopped());
+    QVERIFY(!tracker.isAutopausePendingResume_dbg());
+    for (const auto& seg : fakeDb.storedDurations) {
+        QVERIFY2(seg.endTime.date() == t0.date(), "No row may end after midnight");
+    }
+}
+
+// N7 (*HEAD-red*; the Medium): once a scheduled stop has already revoked and
+// committed the cutoff segment, a later shutdown() must not re-touch it.
+void TimerTest::test_N7_shutdown_after_revoked_scheduled_stop_leaves_segment_unchanged()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    tracker.beginExclusiveEdit();
+
+    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
+    clock.setNow(cutoff);
+    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+    QVERIFY(tracker.isStopped());
+
+    // Act
+    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(1, 0, 0), Qt::LocalTime));
+    tracker.shutdown();
+
+    // Assert
+    QCOMPARE(fakeDb.storedDurations.size(), size_t(1));
+    const auto& seg = fakeDb.storedDurations.front();
+    QCOMPARE(seg.type, DurationType::Activity);
+    QCOMPARE(seg.startTime, t0);
+    QCOMPARE(seg.endTime, cutoff);
+}
+
+// N8: a spurious early fire (before the intended boundary) must not revoke.
+void TimerTest::test_N8_early_midnight_fire_does_not_revoke()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    tracker.beginExclusiveEdit();
+
+    const QDateTime early(QDate(2025, 6, 1), QTime(23, 59, 58, 0), Qt::LocalTime);
+    clock.setNow(early);
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+
+    // Act
+    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+
+    // Assert
+    QCOMPARE(revokedSpy.count(), 0);
+    QVERIFY(tracker.isDialogOpen_dbg());
+    QVERIFY(tracker.isActive());
+    QVERIFY(tracker.dayBoundaryWatcher_dbg().remainingMs_dbg() > 0);
+}
+
+// N9: after N1, a second endExclusiveEdit() (the guard's own harmless
+// repeat) changes nothing.
+void TimerTest::test_N9_repeated_endExclusiveEdit_after_revoke_changes_nothing()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    tracker.beginExclusiveEdit();
+    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
+    clock.setNow(cutoff);
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
+
+    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(revokedSpy.count(), 1);
+    QCOMPARE(warnSpy.count(), 1);
+    const size_t storedAfterFirst = fakeDb.storedDurations.size();
+    const int callsAfterFirst = fakeDb.callLog.size();
+
+    // Act
+    tracker.endExclusiveEdit();
+
+    // Assert: no new revoke, no new notice, no new persistence.
+    QCOMPARE(revokedSpy.count(), 1);
+    QCOMPARE(warnSpy.count(), 1);
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(fakeDb.storedDurations.size(), storedAfterFirst);
+    QCOMPARE(fakeDb.callLog.size(), callsAfterFirst);
 }
 
 // F2: an on-time stop (same day) must NOT discard the checkpoint — it gets

@@ -222,11 +222,6 @@ private slots:
     // post-dialog-close "now" as a segment endpoint.
     // ========================================================================
 
-    // Production capture path: onMidnightTimerFired()/tick() must record a
-    // typed event (not just a bool) while dialog_open_, without stopping.
-    void test_A1_onMidnightTimerFired_captures_typed_event_while_dialog_open();
-    void test_A1_tick_captures_watchdog_event_while_dialog_open();
-
     // Scheduled deferral credits exactly through the captured cutoff.
     void test_A1_scheduled_deferred_credits_activity_through_cutoff_with_checkpoint();
     void test_A1_scheduled_deferred_credits_activity_through_cutoff_no_checkpoint();
@@ -242,15 +237,25 @@ private slots:
     // endExclusiveEdit() is idempotent: a second call must not replay again.
     void test_A1_repeated_endExclusiveEdit_does_not_replay_twice();
 
+    // ========================================================================
+    // WP2 (midnight_close_plan.md): the engine revokes an open History edit
+    // at the midnight boundary, then runs its normal no-dialog code.
+    // ========================================================================
+    void test_N1_scheduled_stop_revokes_edit_and_credits_activity_through_cutoff();
+    void test_N2_scheduled_stop_revokes_edit_and_credits_pause_through_cutoff();
+    void test_N3_watchdog_tick_revokes_edit_and_discards_segment();
+    void test_N4_lock_event_revokes_edit_and_stops();
+    void test_N5_scheduled_stop_after_autopause_revokes_and_credits_all_segments();
+    void test_N5b_scheduled_stop_while_still_locked_revokes_and_stops_paused();
+    void test_N6_watchdog_tick_before_unlock_revokes_and_discards_whole_segment();
+    void test_N7_shutdown_after_revoked_scheduled_stop_leaves_segment_unchanged();
+    void test_N8_early_midnight_fire_does_not_revoke();
+    void test_N9_repeated_endExclusiveEdit_after_revoke_changes_nothing();
+
     // A deferred lock correction and a deferred midnight event pending
     // together replay chronologically by captured timestamp; both orders.
     void test_A1_lock_before_midnight_replays_lock_first();
     void test_A1_midnight_before_lock_replays_midnight_first();
-
-    // H2 (R11-003): useTimerViaLockEvent must defer a cross-midnight discard
-    // when History holds the exclusive edit, exactly as the tick path does.
-    void test_A1_lock_event_does_not_discard_deferred_scheduled_midnight();
-    void test_A1_lock_event_defers_watchdog_when_no_midnight_pending();
 
     // ========================================================================
     // A3 (R11-001): TimeTracker::drainForShutdown() retries a pending commit

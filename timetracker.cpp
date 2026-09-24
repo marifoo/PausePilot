@@ -38,6 +38,12 @@
 #include "dayvalidity.h"
 
 namespace {
+// WP2: one neutral notice for every trigger that force-closes an open
+// History edit (lock, sleep, midnight, shutdown or a database error). Final
+// text -- no later package changes it or the tests that compare it.
+const QString kHistoryRevokedNotice =
+    "History was closed (screen lock, sleep, midnight, shutdown or a database error); any unsaved changes were discarded.";
+
 // D10: the only translation needed between the pre-existing StopReason
 // vocabulary (still used wherever a stop's own reason is threaded through --
 // stopTimer's parameter, DrainResult, ShutdownCoordinator) and the newer,
@@ -98,20 +104,9 @@ void TimeTracker::DayBoundaryWatcher::tick(const QDateTime& now)
     // Watchdog: if the ongoing segment has crossed midnight (e.g. due to sleep
     // bypassing the scheduled stop), force the engine to stopped state.
     // The mutex is already held by the caller (TimeTracker::onTick).
-    if (owner_.dialog_open_) {
-        // Capture (once) a conservative watchdog deferral so endExclusiveEdit()
-        // can discard the whole ongoing segment at replay, exactly as this
-        // watchdog would have done had the dialog not suspended it. The
-        // engine itself is not touched while the dialog remains open.
-        if (!owner_.deferred_edit_events_.hasMidnight()
-            && owner_.mode_ != Mode::None
-            && owner_.session_.segment_start_time.isValid()
-            && isCrossMidnight(owner_.session_.segment_start_time, now)) {
-            owner_.deferred_edit_events_.deferMidnightIfAbsent(StopReason::MidnightWatchdog, now);
-            Logger::Log("[MIDNIGHT] watchdog cross-midnight detected during history edit - deferred");
-        }
-        return;
-    }
+    // WP2: an open History edit no longer suspends this -- it is revoked
+    // inside discardCrossMidnightOngoingAndStop() itself, which then runs
+    // exactly as it would with no dialog.
     owner_.discardCrossMidnightOngoingAndStop(now);
 }
 
@@ -198,9 +193,8 @@ void TimeTracker::DayBoundaryWatcher::onMidnightTimerFired()
     // same segment -- the outcome would depend on which owner wins. Defer
     // entirely to the watchdog once the fire has crossed into a later date
     // than the boundary itself (R11-004/MEDIUM-5): do nothing here: the
-    // next tick() discards the segment (or, if the dialog is open, captures
-    // the typed watchdog deferral) exactly as an un-deferred late fire
-    // already would.
+    // next tick() discards the segment -- revoking any open History edit
+    // first -- exactly as an un-deferred late fire already would.
     if (intended_boundary_.isValid() && now.date() > intended_boundary_.date()) {
         Logger::Log(QString("[MIDNIGHT] Scheduled stop fired very late (now=%1, boundary=%2) — "
                              "deferring to the watchdog's conservative discard")
@@ -208,17 +202,14 @@ void TimeTracker::DayBoundaryWatcher::onMidnightTimerFired()
         return;
     }
     // Capture the cutoff once, at the intended boundary (nominally
-    // 23:59:59.500). If History editing is suspending mutation, this exact
-    // instant becomes the deferred event's boundary, so replay later
-    // credits precisely through it rather than through whatever wall time
-    // happens to be current when the dialog eventually closes.
+    // 23:59:59.500), before revoking any open History edit below. WP2:
+    // revokeExclusiveEdit() discards the edit synchronously, so this exact
+    // instant is still what stopTimer() credits through, not whatever wall
+    // time happens to be current once the dialog's queued close eventually
+    // runs.
     const QDateTime cutoff = intended_boundary_.isValid() ? intended_boundary_ : now;
     if (owner_.dialog_open_) {
-        if (!owner_.deferred_edit_events_.hasMidnight()) {
-            owner_.deferred_edit_events_.deferMidnightIfAbsent(StopReason::MidnightScheduled, cutoff);
-            Logger::Log("[MIDNIGHT] suspended during history edit");
-        }
-        return;
+        owner_.revokeExclusiveEdit();
     }
     owner_.stopTimer(cutoff, StopReason::MidnightScheduled);
 }
@@ -1602,11 +1593,9 @@ bool TimeTracker::isOngoingSegmentCrossMidnight() const
  * Forces the engine into the stopped state when the ongoing segment has
  * crossed midnight, discarding the in-flight segment.
  *
- * Exception: while dialog_open_ is true (History holds the exclusive edit),
- * records a deferred watchdog deferral instead and returns false without
- * touching the engine. The captured deferral is replayed at endExclusiveEdit()
- * to apply the discard then. This honours the exclusive-edit invariant that
- * the engine itself is not touched while the dialog remains open.
+ * If a History edit is open, first revokes it (WP2's
+ * TimeTracker::revokeExclusiveEdit()), then re-evaluates: the discard below
+ * then runs exactly as it would with no dialog having intervened.
  *
  * Returns true when it fired (telling the caller to abandon any pending
  * transition). Safe to call multiple times; only the first call does real work.
@@ -1620,14 +1609,9 @@ bool TimeTracker::discardCrossMidnightOngoingAndStop(const QDateTime& now)
     if (!session_.segment_start_time.isValid()) return false;
     if (!isCrossMidnight(session_.segment_start_time, now)) return false;
 
-    // The engine is not touched while the dialog is open (same invariant as
-    // DayBoundaryWatcher::tick at :101-113). deferMidnightIfAbsent is first-wins,
-    // so an already-captured MidnightScheduled cutoff keeps its exact instant;
-    // replay at endExclusiveEdit() applies it.
     if (dialog_open_) {
-        deferred_edit_events_.deferMidnightIfAbsent(StopReason::MidnightWatchdog, now);
-        Logger::Log("[MIDNIGHT] cross-midnight ongoing seen during history edit - deferred, engine untouched");
-        return false;
+        revokeExclusiveEdit();
+        return discardCrossMidnightOngoingAndStop(now) || mode_ == Mode::None;
     }
 
     Logger::Log(QString("[MIDNIGHT] Cross-midnight ongoing detected "
@@ -1723,6 +1707,23 @@ void TimeTracker::beginExclusiveEdit()
     dialog_open_ = true;
     checkpointTimer_.stop();
     Logger::Log("[CHECKPOINT] Checkpoints paused (dialog open)");
+}
+
+/**
+ * WP2: force-closes an open History edit so the engine can run its normal,
+ * no-dialog code for whatever event is intervening (midnight, lock, sleep,
+ * shutdown or a fatal DB error -- later packages add the other triggers).
+ * Called with mutex_ already held. exclusiveEditRevoked() reaches
+ * HistoryDialog synchronously so it can flag the refusal before the dialog
+ * is actually closed on the next event-loop turn; endExclusiveEdit() then
+ * clears dialog_open_ so the caller's own no-dialog code runs unimpeded.
+ */
+void TimeTracker::revokeExclusiveEdit()
+{
+    Logger::Log("[HISTORY-EDIT] revoked");
+    emit exclusiveEditRevoked();
+    endExclusiveEdit();
+    emit userWarning(kHistoryRevokedNotice);
 }
 
 void TimeTracker::endExclusiveEdit()

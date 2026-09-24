@@ -160,6 +160,12 @@ private slots:
     // ========================================================================
     void test_revoked_dialog_refuses_save_and_leaves_store_untouched();
     void test_revoked_dialog_accept_does_not_commit();
+
+    // ========================================================================
+    // WP2 (midnight_close_plan.md): a live scheduled midnight stop revokes
+    // an open edit and closes the dialog.
+    // ========================================================================
+    void test_D1_scheduled_midnight_closes_dialog_and_keeps_cutoff_segment();
 };
 
 #endif // TEST_HISTORYDIALOG_H

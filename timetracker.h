@@ -272,7 +272,9 @@ private:
     Mode mode_;
     bool autopause_pending_resume_;
     bool is_locked_;     // Track if desktop is currently locked (to prevent checkpoints while locked)
-    bool dialog_open_;   // True while HistoryDialog is open (suspends mutation)
+    bool dialog_open_;   // True while HistoryDialog is open. Midnight triggers now
+                         // revoke it (WP2); other triggers still suspend mutation
+                         // until later packages.
     bool shutdown_called_ = false;  // Set once shutdown() has torn down the engine.
     /// D5 review fix (finding 1, R15-002): monotonic counter incremented on
     /// every shutdown() call (never by cancelShutdown()). HistoryDialog
@@ -448,9 +450,14 @@ private:
                      SegmentId segmentId = SegmentId{});
 
     // If the ongoing segment is cross-midnight, forces the engine into None,
-    // discarding the in-flight segment. Returns true when it fired.
-    // Safe to call multiple times; only the first call does real work.
+    // discarding the in-flight segment. If a History edit is open, first
+    // revokes it (WP2), then re-evaluates, so the discard runs exactly as
+    // it would with no dialog. Returns true when it fired. Safe to call
+    // multiple times; only the first call does real work.
     bool discardCrossMidnightOngoingAndStop(const QDateTime& now);
+    // WP2: force-closes an open History edit (see the definition for the
+    // full contract) and runs the caller's own no-dialog code next.
+    void revokeExclusiveEdit();
     EntriesForDateResult hasEntriesForDate(const QDate& date);
     void saveCheckpoint_locked(const QDateTime& now);  // Internal checkpoint save (called when mutex already held)
     SessionStoreResult appendDurationsChunkToDB(const std::deque<TimeDuration>& durations);

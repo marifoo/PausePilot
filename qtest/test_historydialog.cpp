@@ -2701,3 +2701,100 @@ void HistoryDialogTest::test_revoked_dialog_accept_does_not_commit()
     // result() is Rejected
     QCOMPARE(dialog.result(), QDialog::Rejected);
 }
+
+// ============================================================================
+// WP2 (midnight_close_plan.md): a live scheduled midnight stop revokes an
+// open edit and closes the dialog, and the cutoff segment is committed via
+// the normal no-dialog stop path.
+// ============================================================================
+
+void HistoryDialogTest::test_D1_scheduled_midnight_closes_dialog_and_keeps_cutoff_segment()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore db(settings);
+
+    const QDate today = QDate::currentDate();
+    const QDateTime segStart(today, QTime(23, 50, 0), Qt::LocalTime);
+
+    // Historical Pause row earlier the same day.
+    std::deque<TimeDuration> dbDurations;
+    dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Pause,
+        segStart.addSecs(-200), segStart.addSecs(-150)));
+
+    // FakeClock declared before TimeTracker so it outlives it.
+    FakeClock clock(segStart);
+    TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    QVERIFY(tracker.replaceAll(Timeline(dbDurations, std::nullopt), Timeline({}, std::nullopt)).ok());
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    const SegmentId liveSegmentId = tracker.getOngoingDuration()->segment_id;
+
+    const QDateTime cutoff(today, QTime(23, 59, 59, 500), Qt::LocalTime);
+
+    {
+        HistoryDialog dialog(tracker, settings);
+
+        // Flip the historical Pause row to Activity (an edit); no prompt raised.
+        dialog.editSession_dbg().setPageTimeline(0,
+            dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Activity));
+
+        clock.setNow(cutoff);
+
+        // Arrange: create the finished spy before Act (no done() in the Arrange).
+        QSignalSpy dialogFinished(&dialog, &QDialog::finished);
+
+        // Act: the real scheduled-stop callback fires at the boundary.
+        tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+
+        // Assert: closed (fails on HEAD, which defers instead of revoking).
+        QTRY_COMPARE(dialogFinished.count(), 1);
+        QCOMPARE(dialogFinished.last().at(0).toInt(), int(QDialog::Rejected));
+
+        // Retry refused by editRevoked_, not by the result() guard.
+        dialog.setResult(QDialog::Accepted);
+        QVERIFY(!dialog.saveChanges());
+        QCOMPARE(dialogFinished.count(), 1);
+    }
+    // dialog destroyed here.
+
+    // Assert: SQLite has one finalized Activity row [segStart, cutoff] with
+    // the live segment_id, the historical row is still Pause, and no row is
+    // left unfinalized.
+    {
+        const QString connName = QString("test_D1_%1").arg(reinterpret_cast<quintptr>(&db));
+        QSqlDatabase rawDb = QSqlDatabase::addDatabase("QSQLITE", connName);
+        rawDb.setDatabaseName(db_path_);
+        QVERIFY(rawDb.open());
+
+        QSqlQuery unfinalized(rawDb);
+        QVERIFY(unfinalized.exec("SELECT COUNT(*) FROM durations WHERE is_finalized = 0"));
+        QVERIFY(unfinalized.next());
+        QCOMPARE(unfinalized.value(0).toInt(), 0);
+
+        QSqlQuery cutoffRow(rawDb);
+        cutoffRow.prepare("SELECT type, start_utc, end_utc FROM durations WHERE segment_id = ?");
+        cutoffRow.addBindValue(liveSegmentId.toString());
+        QVERIFY(cutoffRow.exec());
+        QVERIFY(cutoffRow.next());
+        QCOMPARE(cutoffRow.value(0).toInt(), 0); // Activity
+        QCOMPARE(QDateTime::fromString(cutoffRow.value(1).toString(), Qt::ISODateWithMs).toUTC(),
+                 segStart.toUTC());
+        QCOMPARE(QDateTime::fromString(cutoffRow.value(2).toString(), Qt::ISODateWithMs).toUTC(),
+                 cutoff.toUTC());
+
+        QSqlQuery historicalRow(rawDb);
+        QVERIFY(historicalRow.exec("SELECT type FROM durations WHERE segment_id != '"
+            + liveSegmentId.toString() + "'"));
+        QVERIFY(historicalRow.next());
+        QCOMPARE(historicalRow.value(0).toInt(), 1); // still Pause
+
+        rawDb.close();
+    }
+    QSqlDatabase::removeDatabase(QString("test_D1_%1").arg(reinterpret_cast<quintptr>(&db)));
+}
