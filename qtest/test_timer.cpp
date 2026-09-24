@@ -3818,6 +3818,152 @@ void TimerTest::test_N9_repeated_endExclusiveEdit_after_revoke_changes_nothing()
     QCOMPARE(fakeDb.callLog.size(), callsAfterFirst);
 }
 
+// ========================================================================
+// WP4 (midnight_close_plan.md): revoke History when the date moves forward
+// ========================================================================
+
+// S1: timer stopped, begin edit at 23:50 on 2025-06-01, tick at 00:00:00.100
+// on 2025-06-02. Assert: revoked once, one notice, still stopped, no writes,
+// dialog closed.
+void TimerTest::test_S1_date_forward_tick_revokes_edit_while_stopped()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Arrange: start, advance 1 min, then stop
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    clock.advance(60ll * 1000ll);
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.isStopped());
+
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    // Move to next day at 00:00:00.100
+    const QDateTime nextDay(QDate(2025, 6, 2), QTime(0, 0, 0, 100), Qt::LocalTime);
+    clock.setNow(nextDay);
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
+    fakeDb.callLog.clear();
+
+    // Act: trigger a tick (which calls DayBoundaryWatcher::tick)
+    tracker.onTick(nextDay);
+
+    // Assert
+    QCOMPARE(revokedSpy.count(), 1);
+    QVERIFY(!tracker.isDialogOpen_dbg());
+    QCOMPARE(warnSpy.count(), 1);
+    QCOMPARE(warnSpy.first().first().toString(), kWP2RevokedNotice);
+    QVERIFY(tracker.isStopped());
+    // No store writes should have happened
+    QVERIFY(!fakeDb.callLog.contains("commitSession"));
+    QVERIFY(!fakeDb.callLog.contains("discardCheckpoint"));
+}
+
+// S2: one test function that runs stopped and running variants in sequence.
+// Same-day tick at 23:59:59.400 does not revoke in either (spy count 0,
+// dialog still open).
+void TimerTest::test_S2_same_day_tick_does_not_revoke_stopped_or_running()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Stopped variant
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.isStopped());
+
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    // Move to 23:59:59.400 same day
+    const QDateTime sameDay(QDate(2025, 6, 1), QTime(23, 59, 59, 400), Qt::LocalTime);
+    clock.setNow(sameDay);
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+
+    // Act: tick
+    tracker.onTick(sameDay);
+
+    // Assert: no revoke, dialog still open
+    QCOMPARE(revokedSpy.count(), 0);
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    // Running variant: fresh tracker
+    FakeSessionStore fakeDb2;
+    TimeTracker tracker2(settings, fakeDb2);
+    FakeClock clock2(t0);
+    tracker2.setNowProvider_dbg([&clock2]() { return clock2.now(); });
+
+    tracker2.useTimerViaButton(Button::Start);
+    QVERIFY(tracker2.isActive());
+
+    tracker2.beginExclusiveEdit();
+    QVERIFY(tracker2.isDialogOpen_dbg());
+
+    clock2.setNow(sameDay);
+
+    QSignalSpy revokedSpy2(&tracker2, &TimeTracker::exclusiveEditRevoked);
+
+    // Act: tick
+    tracker2.onTick(sameDay);
+
+    // Assert: no revoke, dialog still open
+    QCOMPARE(revokedSpy2.count(), 0);
+    QVERIFY(tracker2.isDialogOpen_dbg());
+}
+
+// S3: a backward date step does not revoke. Begin edit on 2025-06-02, tick
+// with clock at 2025-06-01. Assert: spy 0, dialog still open.
+void TimerTest::test_S3_backward_date_step_does_not_revoke()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 2), QTime(10, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    // Move backward to previous day
+    const QDateTime prevDay(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    clock.setNow(prevDay);
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+
+    // Act: tick
+    tracker.onTick(prevDay);
+
+    // Assert: no revoke, dialog still open
+    QCOMPARE(revokedSpy.count(), 0);
+    QVERIFY(tracker.isDialogOpen_dbg());
+}
+
 // F2: an on-time stop (same day) must NOT discard the checkpoint — it gets
 // finalized by commitSession's upsert instead.
 void TimerTest::test_F2_ontime_stop_does_not_discard_checkpoint()

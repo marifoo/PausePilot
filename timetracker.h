@@ -275,6 +275,8 @@ private:
     bool dialog_open_;   // True while HistoryDialog is open. Midnight triggers now
                          // revoke it (WP2); other triggers still suspend mutation
                          // until later packages.
+    QDate exclusive_edit_date_;  // WP4: the date when beginExclusiveEdit() was called.
+                                 // Used to detect when the date moves forward (>) and revoke the edit.
     bool shutdown_called_ = false;  // Set once shutdown() has torn down the engine.
     /// D5 review fix (finding 1, R15-002): monotonic counter incremented on
     /// every shutdown() call (never by cancelShutdown()). HistoryDialog

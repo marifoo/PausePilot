@@ -107,6 +107,10 @@ void TimeTracker::DayBoundaryWatcher::tick(const QDateTime& now)
     // WP2: an open History edit no longer suspends this -- it is revoked
     // inside discardCrossMidnightOngoingAndStop() itself, which then runs
     // exactly as it would with no dialog.
+    // WP4: if the date moves forward (>) while editing, revoke the edit first.
+    if (owner_.dialog_open_ && now.date() > owner_.exclusive_edit_date_) {
+        owner_.revokeExclusiveEdit();
+    }
     owner_.discardCrossMidnightOngoingAndStop(now);
 }
 
@@ -1705,6 +1709,7 @@ void TimeTracker::beginExclusiveEdit()
 {
     QMutexLocker locker(&mutex_);
     dialog_open_ = true;
+    exclusive_edit_date_ = now_provider_().date();
     checkpointTimer_.stop();
     Logger::Log("[CHECKPOINT] Checkpoints paused (dialog open)");
 }

@@ -252,6 +252,15 @@ private slots:
     void test_N8_early_midnight_fire_does_not_revoke();
     void test_N9_repeated_endExclusiveEdit_after_revoke_changes_nothing();
 
+    // ========================================================================
+    // WP4 (midnight_close_plan.md): revoke History when the date moves forward
+    // (any mode, timer stopped or running, any trigger). Only forward moves
+    // revoke (>); same-day and backward steps do not.
+    // ========================================================================
+    void test_S1_date_forward_tick_revokes_edit_while_stopped();
+    void test_S2_same_day_tick_does_not_revoke_stopped_or_running();
+    void test_S3_backward_date_step_does_not_revoke();
+
     // A deferred lock correction and a deferred midnight event pending
     // together replay chronologically by captured timestamp; both orders.
     void test_A1_lock_before_midnight_replays_lock_first();
