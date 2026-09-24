@@ -1581,3 +1581,66 @@ void AppShellTest::test_history_closes_at_midnight_under_nested_prompt()
     QCOMPARE(fakeDb.storedDurations.front().endTime,
              QDateTime(today, QTime(23, 59, 59, 500), Qt::LocalTime));
 }
+
+// ============================================================================
+// WP5: a real Lock event while a real HistoryDialog is open (idle, no
+// autopause maturation yet) revokes the edit immediately, closing History
+// and letting the desktop-lock bookkeeping (is_locked_, checkpoint suspend)
+// run exactly as it would with no dialog.
+// ============================================================================
+
+void AppShellTest::test_history_closes_on_lock_while_idle()
+{
+    // Arrange: a real MainWin/ContentWidget wired to a real TimeTracker,
+    // running.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    const QDate today = QDate::currentDate();
+    FakeClock clock(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+    MainWin mainWin(settings, tracker, fakeDb, coordinator);
+    QSignalSpy warn(&tracker, &TimeTracker::userWarning);
+    tracker.useTimerViaButton(Button::Start);
+
+    // Act: open History (a real modal exec()); from a 5 ms poller, once it
+    // becomes the active modal, fire a real Lock event. A ~5 s watchdog
+    // rejects whatever is open and fails the test instead of hanging the
+    // suite if the modal never appears.
+    bool locked = false;
+    int ticks = 0;
+    QTimer poll;
+    poll.setInterval(5);
+    QObject::connect(&poll, &QTimer::timeout, [&]() {
+        if (++ticks > 1000) { // ~5 s watchdog
+            poll.stop();
+            while (QDialog* d = qobject_cast<QDialog*>(QApplication::activeModalWidget()))
+                d->reject();
+            qWarning("watchdog: test_history_closes_on_lock_while_idle did not see the "
+                     "History modal in time");
+            return;
+        }
+        if (qobject_cast<HistoryDialog*>(QApplication::activeModalWidget()) && !locked) {
+            locked = true;
+            clock.setNow(QDateTime(today, QTime(9, 20, 0), Qt::LocalTime));
+            tracker.useTimerViaLockEvent(LockEvent::Lock, clock.now());
+        }
+    });
+    poll.start();
+    mainWin.findChild<ContentWidget*>()->pressedShowHistoryButton();
+    poll.stop();
+
+    // Assert
+    QVERIFY(locked);
+    QVERIFY(!QApplication::activeModalWidget());
+    QVERIFY(tracker.isActive());
+    QVERIFY(tracker.isLocked_dbg());
+    QVERIFY(!tracker.isDialogOpen_dbg());
+    QCOMPARE(warn.count(), 1);
+    QCOMPARE(warn.first().first().toString(), kWP3RevokedNotice);
+
+    tracker.useTimerViaButton(Button::Stop);
+}

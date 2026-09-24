@@ -530,8 +530,9 @@ private:
     void emitTransition(Mode from, Mode to, TransitionCause cause);
 
     // D10/plan4 B16: useTimerViaLockEvent's per-event-kind behavior, each
-    // owning its complete logic (including the autopause/dialog gates)
-    // rather than a shared fall-through block.
+    // owning its complete logic (including the autopause gate; the dialog
+    // gate is handled once, before the switch, by WP5's revoke) rather than
+    // a shared fall-through block.
     void onLockDetected(const QDateTime& now);
     void onUnlockDetected(const QDateTime& now);
     void onLongOngoingLockDetected(const QDateTime& now, const QDateTime& lockTime);

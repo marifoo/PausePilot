@@ -121,16 +121,19 @@ private slots:
     void test_X_stop_persists_via_commitSession_only();
 
     // beginExclusiveEdit suspends mutations while dialog is open
-    void test_dialog_open_blocks_backpause();
     void test_dialog_open_defers_midnight_stop();
-    void test_dialog_open_allows_lock_bookkeeping();
 
-    // F4: Unlock during a dialog-open LongOngoingLock must replay as Pause at
-    // true timestamps, not cancel the correction.
-    void test_F4_unlock_during_dialog_replays_lock_interval_at_true_timestamps();
-    void test_F4_still_locked_at_dialog_close_replays_unchanged();
-    void test_F4_ongoing_edited_away_skips_lock_correction_replay();
-    void test_F4_replay_rearms_midnight_stop_at_real_time();
+    // WP5: every lock-watcher event revokes an open History edit first, so
+    // lock/backpause/resume bookkeeping always runs as if History had never
+    // been open.
+    void test_lock_with_history_open_revokes_then_backpauses_normally();
+    void test_lock_with_history_open_while_stopped_revokes_without_writes();
+    void test_unlock_with_history_open_revokes_and_resumes_pending_autopause();
+
+    // WP5: end-to-end check that a lock -> auto-pause -> unlock interval
+    // starting while History is open is recorded at true timestamps,
+    // unchanged since before WP5 (no replay involved any more).
+    void test_lock_interval_with_history_open_is_recorded_at_true_timestamps();
 
     // Unpause creates a new Pause segment with a fresh id (no segment reuse)
     void test_T1_unpause_creates_new_pause_segment_with_fresh_id();
@@ -260,11 +263,6 @@ private slots:
     void test_S1_date_forward_tick_revokes_edit_while_stopped();
     void test_S2_same_day_tick_does_not_revoke_stopped_or_running();
     void test_S3_backward_date_step_does_not_revoke();
-
-    // A deferred lock correction and a deferred midnight event pending
-    // together replay chronologically by captured timestamp; both orders.
-    void test_A1_lock_before_midnight_replays_lock_first();
-    void test_A1_midnight_before_lock_replays_midnight_first();
 
     // ========================================================================
     // A3 (R11-001): TimeTracker::drainForShutdown() retries a pending commit
@@ -485,18 +483,13 @@ private slots:
     // independent notifications a caller must know not to double-act on.
     // Pinned by test_QF1_lock_resume_is_LockResume_cause_emitted_once() above.
 
-    // D10/plan4 B4: a deferred midnight event and a deferred lock correction
-    // pending together still replay chronologically through the new
-    // DeferredEditEvents owner -- guards the consolidation against silently
-    // dropping the A1 priority rule.
-    void test_D10_deferred_events_replay_chronologically_lock_first();
-    void test_D10_deferred_events_replay_chronologically_midnight_first();
-
     // Regression guard for a real ordering bug caught while restructuring
     // useTimerViaLockEvent (plan4 B16): when autopause is disabled, a
     // LongOngoingLock arriving while the History dialog is open must be
     // dropped outright, exactly as when the dialog is not open -- NOT
-    // deferred and replayed once autopause is re-enabled.
+    // deferred and replayed once autopause is re-enabled. WP5: the dialog is
+    // also already revoked by then, since any real lock-watcher event closes
+    // it before this handler runs.
     void test_D10_longlock_disabled_autopause_dialog_open_is_dropped_not_deferred();
 
     // Round-2 review (finding 1): every source of a transitioned() event

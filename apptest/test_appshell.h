@@ -124,6 +124,11 @@ private slots:
     // on top of it -- the engine's revoke-then-normal-code outcome must not
     // depend on how deeply the dialog is buried in nested event loops.
     void test_history_closes_at_midnight_under_nested_prompt();
+
+    // WP5 (midnight_close_plan.md): a real Lock event closes a real
+    // HistoryDialog immediately, so lock bookkeeping runs exactly as it
+    // would with no dialog open.
+    void test_history_closes_on_lock_while_idle();
 };
 
 #endif // TEST_APPSHELL_H

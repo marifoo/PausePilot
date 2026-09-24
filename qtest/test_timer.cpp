@@ -1533,50 +1533,177 @@ void TimerTest::test_X_stop_persists_via_commitSession_only()
              "Stop must call commitSession to persist the session");
 }
 
-// Issue 3 Layer A: while dialog is open, LongOngoingLock must not call backpauseTimer.
-// After endExclusiveEdit(), the deferred event must be replayed.
-void TimerTest::test_dialog_open_blocks_backpause()
+// WP5: a Lock arriving while History is open revokes the edit immediately,
+// then runs the ordinary no-dialog lock checkpoint and, once
+// LongOngoingLock/Unlock arrive, the ordinary backpause/resume -- exactly as
+// if History had never been open.
+void TimerTest::test_lock_with_history_open_revokes_then_backpauses_normally()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
-
     QSettings writer(settingsPath, QSettings::IniFormat);
     writer.setValue("uTimer/autopause_enabled", true);
-    writer.setValue("uTimer/autopause_threshold_minutes", 1);
+    writer.setValue("uTimer/autopause_threshold_minutes", 15);
     writer.sync();
-
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
     TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
+    // Arrange
     tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
-    const size_t dursBefore = tracker.completedTimeline().completed().size();
-
-    // Open dialog — suspends mutation
     tracker.beginExclusiveEdit();
     QVERIFY(tracker.isDialogOpen_dbg());
 
-    // Fire LongOngoingLock while dialog is open
-    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock);
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+    const QDateTime lockTime(QDate(2025, 6, 1), QTime(9, 20, 0), Qt::LocalTime);
+    clock.setNow(lockTime);
 
-    // backpause must NOT have been applied
-    QCOMPARE(tracker.completedTimeline().completed().size(), dursBefore);
+    // Act: Lock arrives while History is open.
+    tracker.useTimerViaLockEvent(LockEvent::Lock);
+
+    // Assert: revoked, a lock checkpoint saved, the dialog closed.
+    QCOMPARE(revokedSpy.count(), 1);
+    QVERIFY(!tracker.isDialogOpen_dbg());
+    QVERIFY(fakeDb.callLog.contains("saveCheckpoint"));
     QVERIFY(tracker.isActive());
 
-    // Pending correction recorded, still locked (no Unlock yet)
-    auto pending = tracker.pendingLockCorrection_dbg();
-    QVERIFY(pending.has_value());
-    QVERIFY(!pending->unlock_time.isValid());
+    // Act: LongOngoingLock matures the backpause.
+    const QDateTime maturedTime(QDate(2025, 6, 1), QTime(9, 35, 0), Qt::LocalTime);
+    clock.setNow(maturedTime);
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
 
-    // Close dialog — replay deferred LongOngoingLock
-    tracker.endExclusiveEdit();
-    QVERIFY(!tracker.isDialogOpen_dbg());
-    QVERIFY(!tracker.pendingLockCorrection_dbg().has_value());
-
-    // After replay, timer should be in Pause (backpause applied)
+    // Assert: A [09:00, 09:20] and P [09:20, 09:35] both completed -- the
+    // backpause retroactively accounts the locked interval up to "now"
+    // (09:35), then a fresh Pause segment starts ongoing from there.
     QVERIFY(tracker.isPaused());
+    const auto completedNow = tracker.completedTimeline();
+    const auto& d = completedNow.completed();
+    bool foundActivity = false, foundPause = false;
+    for (const auto& seg : d) {
+        if (seg.type == DurationType::Activity && seg.startTime == t0 && seg.endTime == lockTime)
+            foundActivity = true;
+        if (seg.type == DurationType::Pause && seg.startTime == lockTime && seg.endTime == maturedTime)
+            foundPause = true;
+    }
+    QVERIFY2(foundActivity, "Expected completed Activity segment 09:00->09:20");
+    QVERIFY2(foundPause, "Expected completed Pause segment 09:20->09:35");
+    const auto ongoing = tracker.getOngoingDuration();
+    QVERIFY(ongoing.has_value());
+    QCOMPARE(ongoing->type, DurationType::Pause);
+    QCOMPARE(ongoing->startTime, maturedTime);
+
+    // Act: Unlock resumes.
+    const QDateTime unlockTime(QDate(2025, 6, 1), QTime(9, 50, 0), Qt::LocalTime);
+    clock.setNow(unlockTime);
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
+    tracker.useTimerViaLockEvent(LockEvent::Unlock);
+
+    // Assert: LockResume.
+    QVERIFY(tracker.isActive());
+    QCOMPARE(transitionedSpy.count(), 1);
+    QCOMPARE(transitionedSpy.first().first().value<TimeTracker::Transition>().cause,
+             TimeTracker::TransitionCause::LockResume);
+
+    tracker.useTimerViaButton(Button::Stop);
+}
+
+// WP5: a Lock arriving while History is open and the timer is stopped still
+// revokes the edit, but writes nothing -- there is no Activity segment to
+// checkpoint.
+void TimerTest::test_lock_with_history_open_while_stopped_revokes_without_writes()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Arrange: timer stopped, History open.
+    QVERIFY(tracker.isStopped());
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+    fakeDb.callLog.clear();
+
+    // Act
+    tracker.useTimerViaLockEvent(LockEvent::Lock);
+
+    // Assert: revoked, dialog closed, still stopped, nothing written.
+    QCOMPARE(revokedSpy.count(), 1);
+    QVERIFY(!tracker.isDialogOpen_dbg());
+    QVERIFY(tracker.isStopped());
+    QVERIFY(!fakeDb.callLog.contains("saveCheckpoint"));
+    QVERIFY(fakeDb.storedDurations.empty());
+}
+
+// WP5 lag window: History can only be open while unlocked, so the only way a
+// LongOngoingLock/Unlock revokes is the lag between an already-debounced
+// Unlock and the moment it is processed. Arranged with no dialog first (Lock,
+// then LongOngoingLock, matching the plan's heartbeat order), then History
+// opens while Paused with a resume pending; the Unlock that follows revokes
+// History and resumes normally instead of HEAD's silently-dropped Unlock.
+void TimerTest::test_unlock_with_history_open_revokes_and_resumes_pending_autopause()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/autopause_enabled", true);
+    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Arrange: no dialog yet. Lock, then the matured LongOngoingLock -- the
+    // timer backpauses into Pause with a resume pending.
+    tracker.useTimerViaButton(Button::Start);
+    const QDateTime lockTime(QDate(2025, 6, 1), QTime(9, 20, 0), Qt::LocalTime);
+    clock.setNow(lockTime);
+    tracker.useTimerViaLockEvent(LockEvent::Lock);
+    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(9, 35, 0), Qt::LocalTime));
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
+    QVERIFY(tracker.isPaused());
+    QVERIFY(tracker.isAutopausePendingResume_dbg());
+
+    // History opens in the lag window (unlocked in the OS, still Paused
+    // here), then the debounced Unlock finally arrives.
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
+
+    const QDateTime unlockTime(QDate(2025, 6, 1), QTime(9, 50, 0), Qt::LocalTime);
+    clock.setNow(unlockTime);
+
+    // Act
+    tracker.useTimerViaLockEvent(LockEvent::Unlock);
+
+    // Assert: revoked, and back in Activity via LockResume -- HEAD stays
+    // Paused with the Unlock silently dropped.
+    QCOMPARE(revokedSpy.count(), 1);
+    QVERIFY(!tracker.isDialogOpen_dbg());
+    QVERIFY(tracker.isActive());
+    QCOMPARE(transitionedSpy.count(), 1);
+    QCOMPARE(transitionedSpy.first().first().value<TimeTracker::Transition>().cause,
+             TimeTracker::TransitionCause::LockResume);
+
+    tracker.useTimerViaButton(Button::Stop);
 }
 
 // Issue 3 Layer A: a deferred midnight event set directly, endExclusiveEdit replays it.
@@ -1605,48 +1732,16 @@ void TimerTest::test_dialog_open_defers_midnight_stop()
     QVERIFY(tracker.isStopped());
 }
 
-// Issue 3 Layer A: Lock bookkeeping (is_locked_) must still run even when dialog is open,
-// but saveCheckpoint_locked must not be called.
-void TimerTest::test_dialog_open_allows_lock_bookkeeping()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    QString settingsPath = createSettingsFile(tempDir.path(), 7);
-
-    Settings settings(settingsPath);
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-
-    tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
-
-    tracker.beginExclusiveEdit();
-    QVERIFY(!tracker.isLocked_dbg());
-
-    const int checksBefore = fakeDb.callLog.count("saveCheckpoint");
-
-    // Fire Lock while dialog is open
-    tracker.useTimerViaLockEvent(LockEvent::Lock);
-
-    // is_locked_ must be set (bookkeeping)
-    QVERIFY(tracker.isLocked_dbg());
-
-    // saveCheckpoint (i.e. saveCheckpoint_locked path via DB) must not have fired
-    QCOMPARE(fakeDb.callLog.count("saveCheckpoint"), checksBefore);
-
-    tracker.endExclusiveEdit();
-}
 
 // ============================================================================
-// F4: an Unlock while HistoryDialog is open must not cancel a pending
-// LongOngoingLock correction — it must replay as Pause at the true
-// lock/unlock timestamps once the dialog closes.
+// WP5: end-to-end check that a lock -> auto-pause -> unlock interval starting
+// while History is open is recorded unchanged. The LongOngoingLock revokes
+// History immediately (no replay any more), so the ordinary no-dialog code
+// produces Activity[start->lock], Pause[lock->unlock], then a fresh Activity
+// segment anchored at the true unlock time.
 // ============================================================================
 
-// Headline fix: Lock then Unlock both happen during the dialog. Replay must
-// produce Activity[start->lock], Pause[lock->unlock], then a fresh Activity
-// segment anchored at unlock_time (not at dialog-close time).
-void TimerTest::test_F4_unlock_during_dialog_replays_lock_interval_at_true_timestamps()
+void TimerTest::test_lock_interval_with_history_open_is_recorded_at_true_timestamps()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -1704,288 +1799,6 @@ void TimerTest::test_F4_unlock_during_dialog_replays_lock_interval_at_true_times
     const auto ongoing = tracker.getOngoingDuration();
     QVERIFY(ongoing.has_value());
     QCOMPARE(ongoing->startTime, unlockTime);
-
-    tracker.useTimerViaButton(Button::Stop);
-}
-
-// Still-locked case: no Unlock arrives before the dialog closes. Behavior
-// must equal today's — backpause replays, engine ends in Pause with
-// autopause_pending_resume_ armed for a later real Unlock.
-void TimerTest::test_F4_still_locked_at_dialog_close_replays_unchanged()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
-    writer.setValue("uTimer/autopause_threshold_minutes", 15);
-    writer.sync();
-    Settings settings(settingsPath);
-    FakeSessionStore fakeDb;
-
-    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    tracker.beginExclusiveEdit();
-
-    const QDateTime lockTime(QDate(2025, 6, 1), QTime(9, 20, 0), Qt::LocalTime);
-    clock.setNow(lockTime);
-    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
-
-    // No Unlock before the dialog closes.
-    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::LocalTime));
-    tracker.endExclusiveEdit();
-
-    QVERIFY(tracker.isPaused());
-    QVERIFY(tracker.isAutopausePendingResume_dbg());
-    QVERIFY(!tracker.pendingLockCorrection_dbg().has_value());
-
-    // Bind before iterating (see the dangling-reference trap noted in P5b,
-    // commit a58dfea): completedTimeline() returns by value and completed()
-    // returns a reference into it.
-    const auto completedNow = tracker.completedTimeline();
-    const auto& d = completedNow.completed();
-    bool foundActivity = false;
-    for (const auto& seg : d)
-        if (seg.type == DurationType::Activity && seg.startTime == t0 && seg.endTime == lockTime)
-            foundActivity = true;
-    QVERIFY2(foundActivity, "Expected completed Activity segment 09:00->09:20");
-
-    tracker.useTimerViaButton(Button::Stop);
-}
-
-// A1 (R11-002): a deferred lock correction captured BEFORE the deferred
-// midnight cutoff must replay first — Activity/Pause/Activity — and the
-// midnight event then finalizes the resulting Activity segment exactly at
-// its captured cutoff. This supersedes the old "midnight always wins, lock
-// correction dropped" behavior with true chronological replay.
-void TimerTest::test_A1_lock_before_midnight_replays_lock_first()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
-    writer.setValue("uTimer/autopause_threshold_minutes", 15);
-    writer.sync();
-    Settings settings(settingsPath);
-    FakeSessionStore fakeDb;
-
-    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    tracker.beginExclusiveEdit();
-
-    const QDateTime lockTime(QDate(2025, 6, 1), QTime(23, 20, 0), Qt::LocalTime);
-    clock.setNow(lockTime);
-    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
-
-    const QDateTime unlockTime(QDate(2025, 6, 1), QTime(23, 40, 0), Qt::LocalTime);
-    clock.setNow(unlockTime);
-    tracker.useTimerViaLockEvent(LockEvent::Unlock);
-
-    QVERIFY(tracker.pendingLockCorrection_dbg().has_value());
-    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
-    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightScheduled, cutoff);
-
-    const QDateTime afterMidnight(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime);
-    clock.setNow(afterMidnight);
-    tracker.endExclusiveEdit();
-
-    QVERIFY(tracker.isStopped());
-    QVERIFY(!tracker.pendingMidnightEvent_dbg().has_value());
-    QVERIFY(!tracker.pendingLockCorrection_dbg().has_value());
-
-    // Lock correction replayed first (lock_time 23:20 < cutoff 23:59:59.500):
-    // Activity[23:00->23:20], Pause[23:20->23:40], then the midnight event
-    // finalizes the fresh post-unlock Activity segment exactly at the
-    // cutoff — never at afterMidnight (00:10 the next day). The final stop
-    // succeeded, so session_.durations was reset for the next session;
-    // inspect what was actually committed to the store instead.
-    const auto& d = fakeDb.storedDurations;
-    bool foundPreLockActivity = false, foundPause = false, foundPostUnlockActivity = false;
-    for (const auto& seg : d) {
-        if (seg.type == DurationType::Activity && seg.startTime == t0 && seg.endTime == lockTime)
-            foundPreLockActivity = true;
-        if (seg.type == DurationType::Pause && seg.startTime == lockTime && seg.endTime == unlockTime)
-            foundPause = true;
-        if (seg.type == DurationType::Activity && seg.startTime == unlockTime && seg.endTime == cutoff)
-            foundPostUnlockActivity = true;
-        QVERIFY2(seg.endTime != afterMidnight,
-                 "No segment may be credited through the post-dialog-close time");
-    }
-    QVERIFY2(foundPreLockActivity, "Expected completed Activity segment 23:00->23:20");
-    QVERIFY2(foundPause, "Expected completed Pause segment 23:20->23:40");
-    QVERIFY2(foundPostUnlockActivity, "Expected Activity segment 23:40->cutoff (23:59:59.500)");
-}
-
-// A1 (R11-002): a deferred midnight cutoff captured BEFORE a later deferred
-// lock correction must replay first, stopping the engine. The lock
-// correction then sees mode_ == None (exactly as a real, non-deferred
-// LongOngoingLock arriving after a real midnight stop would) and no-ops
-// rather than reconstructing a backpause on top of an already-stopped engine.
-void TimerTest::test_A1_midnight_before_lock_replays_midnight_first()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
-    writer.setValue("uTimer/autopause_threshold_minutes", 15);
-    writer.sync();
-    Settings settings(settingsPath);
-    FakeSessionStore fakeDb;
-
-    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    tracker.beginExclusiveEdit();
-
-    // Scheduled midnight fires first (captured cutoff earlier than the lock).
-    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
-    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightScheduled, cutoff);
-
-    // A LongOngoingLock arrives later (chronologically after the captured
-    // cutoff), still while the dialog remains open. Kept on the same civil
-    // day as t0 so this capture call itself does not trip the unrelated
-    // top-of-method cross-midnight safety net in useTimerViaLockEvent (which
-    // compares against real "now", not against either deferred event) —
-    // that guard is orthogonal to R11-002/A1 and out of this packet's scope.
-    const QDateTime lockTime(QDate(2025, 6, 1), QTime(23, 59, 59, 900), Qt::LocalTime);
-    clock.setNow(lockTime);
-    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
-    QVERIFY(tracker.pendingLockCorrection_dbg().has_value());
-
-    const QDateTime afterMidnight(QDate(2025, 6, 2), QTime(1, 0, 0), Qt::LocalTime);
-    clock.setNow(afterMidnight);
-    tracker.endExclusiveEdit();
-
-    QVERIFY(tracker.isStopped());
-    QVERIFY(!tracker.pendingMidnightEvent_dbg().has_value());
-    QVERIFY(!tracker.pendingLockCorrection_dbg().has_value());
-
-    // Exactly one committed Activity segment, ending precisely at the
-    // captured cutoff; the later lock correction contributed nothing.
-    QCOMPARE(fakeDb.storedDurations.size(), size_t(1));
-    const auto& seg = fakeDb.storedDurations.front();
-    QCOMPARE(seg.type, DurationType::Activity);
-    QCOMPARE(seg.startTime, t0);
-    QCOMPARE(seg.endTime, cutoff);
-}
-
-// If the ongoing segment was edited away during the dialog (mode_ == None),
-// the correction must be dropped without crashing or adding segments —
-// matching today's autopause_pending_resume_-only-armed-in-Activity rule.
-void TimerTest::test_F4_ongoing_edited_away_skips_lock_correction_replay()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
-    writer.setValue("uTimer/autopause_threshold_minutes", 15);
-    writer.sync();
-    Settings settings(settingsPath);
-    FakeSessionStore fakeDb;
-
-    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    tracker.beginExclusiveEdit();
-
-    const QDateTime lockTime(QDate(2025, 6, 1), QTime(9, 20, 0), Qt::LocalTime);
-    clock.setNow(lockTime);
-    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
-
-    const QDateTime unlockTime(QDate(2025, 6, 1), QTime(10, 30, 0), Qt::LocalTime);
-    clock.setNow(unlockTime);
-    tracker.useTimerViaLockEvent(LockEvent::Unlock);
-
-    // Simulate the ongoing segment being edited away while the dialog is
-    // still open (mode_ becomes None).
-    tracker.useTimerViaButton(Button::Stop);
-    QVERIFY(tracker.isStopped());
-
-    const size_t dursBefore = tracker.completedTimeline().completed().size();
-    tracker.endExclusiveEdit();
-
-    QCOMPARE(tracker.completedTimeline().completed().size(), dursBefore);
-    QVERIFY(!tracker.pendingLockCorrection_dbg().has_value());
-    QVERIFY(tracker.isStopped());
-}
-
-// F4 followup: the "lock AND unlock both happened during the dialog" replay
-// branch calls startTimer(corr.unlock_time) with a HISTORICAL timestamp.
-// startTimer's Pause->Activity path re-arms the scheduled midnight stop via
-// armScheduledStop(now) using that same historical "now" — but the
-// underlying QTimer counts real wall-clock ms from the moment it starts, so
-// the scheduled stop ends up armed for the wrong duration (computed from the
-// unlock instant's time-of-day, not from when the dialog actually closed).
-// If the dialog stays open a long time after the unlock, this makes the
-// midnight stop fire hours later than 23:59:59.500, risking a missed
-// day-boundary stop. This test checks the scheduled-stop timer's remaining
-// interval right after endExclusiveEdit() and asserts it reflects the REAL
-// dialog-close time, not the historical unlock time.
-void TimerTest::test_F4_replay_rearms_midnight_stop_at_real_time()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
-    writer.setValue("uTimer/autopause_threshold_minutes", 15);
-    writer.sync();
-    Settings settings(settingsPath);
-    FakeSessionStore fakeDb;
-
-    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    QVERIFY(tracker.isActive());
-
-    tracker.beginExclusiveEdit();
-
-    const QDateTime lockTime(QDate(2025, 6, 1), QTime(9, 20, 0), Qt::LocalTime);
-    clock.setNow(lockTime);
-    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
-
-    const QDateTime unlockTime(QDate(2025, 6, 1), QTime(10, 30, 0), Qt::LocalTime);
-    clock.setNow(unlockTime);
-    tracker.useTimerViaLockEvent(LockEvent::Unlock);
-
-    // Dialog stays open for hours after the unlock before being closed.
-    const QDateTime dialogCloseTime(QDate(2025, 6, 1), QTime(14, 0, 0), Qt::LocalTime);
-    clock.setNow(dialogCloseTime);
-    tracker.endExclusiveEdit();
-
-    QVERIFY(tracker.isActive());
-
-    // Expected remaining interval if armed at the real dialog-close time
-    // (14:00:00 -> 23:59:59.500 = 9h59m59.5s).
-    const qint64 expectedMs =
-        QTime(14, 0, 0).msecsTo(QTime(23, 59, 59, 500));
-    const qint64 actualMs = tracker.dayBoundaryWatcher_dbg().remainingMs_dbg();
-
-    QVERIFY2(actualMs >= 0, "Scheduled stop must be armed after replay");
-    QVERIFY2(qAbs(actualMs - expectedMs) < 5000,
-        qPrintable(QString("Scheduled stop armed for %1 ms remaining, expected ~%2 ms "
-                            "(armed at real dialog-close time, not the historical unlock time)")
-                       .arg(actualMs).arg(expectedMs)));
 
     tracker.useTimerViaButton(Button::Stop);
 }
@@ -3579,8 +3392,9 @@ void TimerTest::test_N5_scheduled_stop_after_autopause_revokes_and_credits_all_s
     const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
     clock.setNow(cutoff);
 
-    // Act: the deferred lock correction and the scheduled stop are both
-    // resolved by this one fire (see the plan's §1.3 heartbeat-order note).
+    // Act: WP5 means the Lock above already revoked History and ran the
+    // lock/autopause bookkeeping as ordinary no-dialog code, so this fire is
+    // just the scheduled stop -- no deferred correction is involved any more.
     tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
 
     // Assert: rows
@@ -3665,11 +3479,12 @@ void TimerTest::test_N5b_scheduled_stop_while_still_locked_revokes_and_stops_pau
 }
 
 // N6 (*HEAD-red*; the Medium; tick-first): a watchdog tick fires before an
-// Unlock arrives, while a LongOngoingLock correction is still deferred
-// (still locked). The tick's revoke replays the "still locked" correction,
-// which itself immediately hits the cross-midnight guard and stops the
-// engine -- the whole overnight segment is discarded, matching the no-dialog
-// watchdog policy. HEAD instead resumes Activity at 08:00.
+// Unlock arrives. WP5 means the Lock itself already revoked History (no
+// deferral): the Lock checkpoint and the LongOngoingLock backpause run as
+// ordinary no-dialog code, producing completed Activity and Pause segments.
+// The overnight tick then discards only the still-ongoing Pause segment that
+// crosses midnight, exactly as the no-dialog watchdog would. HEAD instead
+// resumes Activity at 08:00.
 void TimerTest::test_N6_watchdog_tick_before_unlock_revokes_and_discards_whole_segment()
 {
     QTemporaryDir tempDir;
@@ -3708,9 +3523,21 @@ void TimerTest::test_N6_watchdog_tick_before_unlock_revokes_and_discards_whole_s
     // Assert
     QVERIFY(tracker.isStopped());
     QVERIFY(!tracker.isAutopausePendingResume_dbg());
+    bool foundActivity = false, foundPause = false;
     for (const auto& seg : fakeDb.storedDurations) {
         QVERIFY2(seg.endTime.date() == t0.date(), "No row may end after midnight");
+        if (seg.type == DurationType::Activity && seg.startTime == t0 && seg.endTime == lockTime)
+            foundActivity = true;
+        if (seg.type == DurationType::Pause && seg.startTime == lockTime
+            && seg.endTime == QDateTime(QDate(2025, 6, 1), QTime(22, 20, 0), Qt::LocalTime))
+            foundPause = true;
     }
+    // WP5: the Lock closed History immediately, so this matches the
+    // no-dialog outcome exactly -- the evening's Activity and the Pause up
+    // to the LongOngoingLock maturation are stored; only the still-ongoing
+    // Pause is discarded by the overnight watchdog.
+    QVERIFY2(foundActivity, "Expected completed Activity segment 21:00->22:05");
+    QVERIFY2(foundPause, "Expected completed Pause segment 22:05->22:20");
 }
 
 // N7 (*HEAD-red*; the Medium): once a scheduled stop has already revoked and
@@ -6170,107 +5997,6 @@ void TimerTest::test_D10_onStartPausePressed_delegates_to_button_dispatch()
     QCOMPARE(trackerToggle.isStopped(), trackerButton.isStopped());
 }
 
-void TimerTest::test_D10_deferred_events_replay_chronologically_lock_first()
-{
-    // Arrange: lock (23:20) captured before the midnight cutoff (23:59:59.5),
-    // with a real Unlock (23:40) also arriving before the dialog closes.
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    const QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
-    writer.setValue("uTimer/autopause_threshold_minutes", 15);
-    writer.sync();
-    Settings settings(settingsPath);
-    FakeSessionStore fakeDb;
-
-    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    tracker.beginExclusiveEdit();
-
-    const QDateTime lockTime(QDate(2025, 6, 1), QTime(23, 20, 0), Qt::LocalTime);
-    clock.setNow(lockTime);
-    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
-
-    const QDateTime unlockTime(QDate(2025, 6, 1), QTime(23, 40, 0), Qt::LocalTime);
-    clock.setNow(unlockTime);
-    tracker.useTimerViaLockEvent(LockEvent::Unlock);
-
-    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
-    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightScheduled, cutoff);
-
-    QSignalSpy spy(&tracker, &TimeTracker::transitioned);
-
-    // Act
-    const QDateTime afterMidnight(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime);
-    clock.setNow(afterMidnight);
-    tracker.endExclusiveEdit();
-
-    // Assert: lock correction (autopause then resume) replays first, THEN
-    // the midnight cutoff stops the fresh post-unlock Activity segment.
-    QCOMPARE(spy.count(), 3);
-    QCOMPARE(spy.at(0).first().value<TimeTracker::Transition>().cause, TimeTracker::TransitionCause::LockAutopause);
-    QCOMPARE(spy.at(1).first().value<TimeTracker::Transition>().cause, TimeTracker::TransitionCause::LockResume);
-    const auto stopEvent = spy.at(2).first().value<TimeTracker::Transition>();
-    QCOMPARE(stopEvent.cause, TimeTracker::TransitionCause::MidnightScheduled);
-    QCOMPARE(stopEvent.to, TimeTracker::Mode::None);
-    QVERIFY(tracker.isStopped());
-}
-
-void TimerTest::test_D10_deferred_events_replay_chronologically_midnight_first()
-{
-    // Arrange: the scheduled midnight cutoff (23:59:59.5) is captured first;
-    // a LongOngoingLock arrives later (23:59:59.9), still while the dialog
-    // is open, and is never unlocked before the dialog closes.
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    const QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
-    writer.setValue("uTimer/autopause_threshold_minutes", 15);
-    writer.sync();
-    Settings settings(settingsPath);
-    FakeSessionStore fakeDb;
-
-    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    tracker.beginExclusiveEdit();
-
-    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
-    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightScheduled, cutoff);
-
-    const QDateTime lockTime(QDate(2025, 6, 1), QTime(23, 59, 59, 900), Qt::LocalTime);
-    clock.setNow(lockTime);
-    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
-    QVERIFY(tracker.pendingLockCorrection_dbg().has_value());
-
-    QSignalSpy spy(&tracker, &TimeTracker::transitioned);
-
-    // Act
-    const QDateTime afterMidnight(QDate(2025, 6, 2), QTime(1, 0, 0), Qt::LocalTime);
-    clock.setNow(afterMidnight);
-    tracker.endExclusiveEdit();
-
-    // Assert: the midnight stop is the only real transition; the
-    // later-captured lock correction sees an already-stopped engine and
-    // contributes nothing (its own Activity-only gate no-ops).
-    QCOMPARE(spy.count(), 1);
-    const auto stopEvent = spy.first().first().value<TimeTracker::Transition>();
-    QCOMPARE(stopEvent.cause, TimeTracker::TransitionCause::MidnightScheduled);
-    QCOMPARE(stopEvent.to, TimeTracker::Mode::None);
-    QVERIFY(tracker.isStopped());
-    QVERIFY(!tracker.pendingMidnightEvent_dbg().has_value());
-    QVERIFY(!tracker.pendingLockCorrection_dbg().has_value());
-}
-
 void TimerTest::test_D10_longlock_disabled_autopause_dialog_open_is_dropped_not_deferred()
 {
     // Arrange: autopause explicitly disabled, Activity running, History
@@ -6298,8 +6024,10 @@ void TimerTest::test_D10_longlock_disabled_autopause_dialog_open_is_dropped_not_
 
     // Assert: dropped outright -- exactly the non-dialog-open behavior --
     // not captured for a later replay that would resurrect it if autopause
-    // is subsequently re-enabled.
+    // is subsequently re-enabled. The dialog is also already revoked (WP5),
+    // since any real lock-watcher event closes it before this handler runs.
     QVERIFY(!tracker.pendingLockCorrection_dbg().has_value());
+    QVERIFY(!tracker.isDialogOpen_dbg());
 
     tracker.endExclusiveEdit();
     QVERIFY(tracker.isActive());

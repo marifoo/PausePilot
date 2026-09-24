@@ -27,6 +27,11 @@
  * Backpause behavior:
  * - When PC locked for longer than threshold, retroactively converts last N minutes to Pause
  * - Triggered by LockEvent::LongOngoingLock from LockStateWatcher
+ *
+ * History interaction:
+ * - Any lock-watcher event (Lock, LongOngoingLock, Unlock) first revokes an
+ *   open History edit (WP5), so lock/backpause bookkeeping always runs as
+ *   if History had never been open.
  */
 
 #include "timetracker.h"
@@ -961,6 +966,10 @@ void TimeTracker::onStopPressed()
 /**
  * Handles desktop lock/unlock events from LockStateWatcher.
  *
+ * WP5: any real event first revokes an open History edit, so the rest of
+ * this function -- the cross-midnight check and the event switch -- always
+ * runs exactly as it would with no dialog open.
+ *
  * Event handling:
  * - Lock: Saves final checkpoint, suspends further checkpoints via is_locked_
  * - LongOngoingLock: Triggers backpause if timer was in Activity mode
@@ -973,6 +982,7 @@ void TimeTracker::useTimerViaLockEvent(LockEvent event, const QDateTime& lockTim
 {
     QMutexLocker locker(&mutex_);
     const QDateTime now = now_provider_();
+    if (dialog_open_ && event != LockEvent::None) revokeExclusiveEdit();
     if (discardCrossMidnightOngoingAndStop(now)) {
         // Already-forced stopped — ignore the lock event for engine
         // purposes. autopause_pending_resume_ is already cleared inside
@@ -982,9 +992,10 @@ void TimeTracker::useTimerViaLockEvent(LockEvent event, const QDateTime& lockTim
 #endif
         return;
     }
-    // D10/plan4 B16: each event kind owns its complete behavior, including
-    // the dialog/autopause gates, instead of a shared block two of the three
-    // cases fall through into.
+    // D10/plan4 B16: each event kind owns its complete behavior. The dialog
+    // gate that used to live in each case (WP5) is gone: the revoke above
+    // already closed History before this switch runs, so only the
+    // autopause gate remains here.
     switch (event) {
     case LockEvent::Lock:            onLockDetected(now); break;
     case LockEvent::Unlock:          onUnlockDetected(now); break;
@@ -999,10 +1010,6 @@ void TimeTracker::useTimerViaLockEvent(LockEvent event, const QDateTime& lockTim
 void TimeTracker::onLockDetected(const QDateTime& now)
 {
     is_locked_ = true;
-    if (dialog_open_) {
-        Logger::Log("[LOCK] suspended during history edit (Lock)");
-        return;
-    }
     // Save a checkpoint when lock is detected (only if actively tracking time)
     if (mode_ == Mode::Activity) {
         saveCheckpoint_locked(now);
@@ -1015,14 +1022,6 @@ void TimeTracker::onLockDetected(const QDateTime& now)
 void TimeTracker::onUnlockDetected(const QDateTime& now)
 {
     is_locked_ = false;
-    if (dialog_open_) {
-        // The locked interval still happened and must become Pause, so an
-        // Unlock stamps the pending correction's unlock time instead of
-        // cancelling it (only if a LongOngoingLock is actually pending).
-        deferred_edit_events_.stampLockUnlock(now);
-        Logger::Log("[LOCK] suspended during history edit (Unlock)");
-        return;
-    }
     Logger::Log("[LOCK] Desktop unlocked - checkpoint saving resumed");
     if (!settings_.isAutopauseEnabled()) {
         Logger::Log("[DEBUG] Autopause disabled; lock event ignored");
@@ -1038,15 +1037,6 @@ void TimeTracker::onLongOngoingLockDetected(const QDateTime& now, const QDateTim
 {
     if (!settings_.isAutopauseEnabled()) {
         Logger::Log("[DEBUG] Autopause disabled; lock event ignored");
-        return;
-    }
-    if (dialog_open_) {
-        if (deferred_edit_events_.hasLock()) {
-            Logger::Log("[LOCK] a LongOngoingLock was already pending during this "
-                         "history edit - dropping it in favor of the new one");
-        }
-        deferred_edit_events_.beginLock(lockTime);
-        Logger::Log("[LOCK] suspended during history edit (LongOngoingLock)");
         return;
     }
     autopause_pending_resume_ = (mode_ == Mode::Activity);
