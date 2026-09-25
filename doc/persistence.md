@@ -56,9 +56,13 @@ exits.
 ## Checkpoints
 
 A checkpoint is a periodic save of the **in-progress** Activity segment.
-The cadence is `checkpoint_interval_msec_` from settings (5 minutes by
-default; `0` disables checkpoints entirely). On each tick of
-`TimeTracker::checkpointTimer_`, the engine calls
+The cadence is a fixed 5 minutes (`TimeTracker::kCheckpointIntervalMsec`);
+there is no setting to change or disable it. `TimeTracker` also attempts an
+immediate checkpoint the moment a long lock is detected, and suppresses
+further periodic checkpoints while the desktop is locked. This is not a
+guaranteed maximum data-loss window: a failed write, disabled History
+persistence, or a long locked stretch can all lengthen the actual gap. On
+each tick of `TimeTracker::checkpointTimer_`, the engine calls
 `SessionStore::saveCheckpoint(...)` with the current `segment_id`. The store
 treats this as an upsert keyed by `segment_id`:
 

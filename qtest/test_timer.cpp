@@ -187,6 +187,118 @@ void TimerTest::test_timer_lock_events_checkpoint_and_resume()
     QVERIFY(!tracker.isLocked_dbg());
 }
 
+// C12c: the checkpoint interval is a fixed 5 minutes at the engine, not a
+// setting -- confirm both the configured interval and that the timer is
+// actually running in Activity.
+void TimerTest::test_C12c_checkpoint_timer_interval_is_fixed_five_minutes()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    tracker.useTimerViaButton(Button::Start);
+
+    QCOMPARE(tracker.checkpointTimerIntervalMsec_dbg(), 5 * 60 * 1000);
+    QVERIFY(tracker.isCheckpointTimerActive_dbg());
+}
+
+// C12c: a pre-existing ini with the now-removed key, including the legacy
+// "0 = off" value, must not disable checkpoints -- the cadence is fixed at
+// the engine and no longer reads this setting at all.
+void TimerTest::test_C12c_legacy_zero_interval_setting_no_longer_disables_checkpoints()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/checkpoint_interval_minutes", 0);
+    writer.sync();
+
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    tracker.useTimerViaButton(Button::Start);
+
+    QCOMPARE(tracker.checkpointTimerIntervalMsec_dbg(), 5 * 60 * 1000);
+    QVERIFY(tracker.isCheckpointTimerActive_dbg());
+
+    // A legacy non-zero value (e.g. 60) must likewise have no effect on the
+    // fixed cadence.
+    QTemporaryDir tempDir2;
+    QVERIFY(tempDir2.isValid());
+    QString settingsPath2 = createSettingsFile(tempDir2.path(), 7);
+    QSettings writer2(settingsPath2, QSettings::IniFormat);
+    writer2.setValue("uTimer/checkpoint_interval_minutes", 60);
+    writer2.sync();
+
+    Settings settings2(settingsPath2);
+    FakeSessionStore fakeDb2;
+    TimeTracker tracker2(settings2, fakeDb2);
+    tracker2.useTimerViaButton(Button::Start);
+
+    QCOMPARE(tracker2.checkpointTimerIntervalMsec_dbg(), 5 * 60 * 1000);
+    QVERIFY(tracker2.isCheckpointTimerActive_dbg());
+}
+
+// C12c: the periodic checkpoint timer must not run outside Activity -- it
+// stops on Pause and on Stop.
+void TimerTest::test_C12c_checkpoint_timer_stops_in_pause_and_after_stop()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isCheckpointTimerActive_dbg());
+
+    tracker.useTimerViaButton(Button::Pause);
+    QVERIFY(tracker.isPaused());
+    QVERIFY(!tracker.isCheckpointTimerActive_dbg());
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    QVERIFY(tracker.isCheckpointTimerActive_dbg());
+
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.isStopped());
+    QVERIFY(!tracker.isCheckpointTimerActive_dbg());
+}
+
+// C12c: the immediate lock-instant checkpoint attempt (onLockDetected) is
+// retained unconditionally -- it no longer depends on any configurable
+// interval, so a Lock while Active must still write a checkpoint row.
+void TimerTest::test_C12c_lock_writes_immediate_checkpoint()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    FakeClock clock(fixedNow());
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(1000);
+
+    QCOMPARE(fakeDb.savedCheckpoints.size(), static_cast<size_t>(0));
+
+    tracker.useTimerViaLockEvent(LockEvent::Lock);
+
+    QVERIFY(tracker.isLocked_dbg());
+    QCOMPARE(fakeDb.savedCheckpoints.size(), static_cast<size_t>(1));
+
+    // No further periodic checkpoints while locked -- even a manually
+    // triggered tick (as the QTimer would fire) is suppressed.
+    clock.advance(60ll * 1000ll);
+    tracker.triggerCheckpoint_dbg();
+    QCOMPARE(fakeDb.savedCheckpoints.size(), static_cast<size_t>(1));
+}
+
 void TimerTest::test_timer_ongoing_duration()
 {
     QTemporaryDir tempDir;
@@ -2244,46 +2356,6 @@ void TimerTest::test_D10_editApplied_pause_to_activity_emits_transitioned()
     QCOMPARE(t.from, TimeTracker::Mode::Pause);
     QCOMPARE(t.to, TimeTracker::Mode::Activity);
     QCOMPARE(t.cause, TimeTracker::TransitionCause::EditApplied);
-}
-
-// M7: checkpoint interval 0 disables checkpoints; edit must not arm a zero-interval timer
-void TimerTest::test_M7_zero_checkpoint_interval_edit_to_activity_does_not_arm_timer()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    QString settingsPath = createSettingsFile(tempDir.path(), 7);
-
-    // Set checkpoint interval to 0 (disabled)
-    QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/checkpoint_interval_minutes", 0);
-    writer.sync();
-
-    Settings settings(settingsPath);
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-
-    tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
-    tracker.useTimerViaButton(Button::Pause);
-    QVERIFY(tracker.isPaused());
-    QVERIFY(!tracker.isCheckpointTimerActive_dbg());
-
-    auto liveOngoing = tracker.getOngoingDuration();
-    QVERIFY(liveOngoing.has_value());
-    QCOMPARE(liveOngoing->type, DurationType::Pause);
-    TimeDuration editedOngoing = TimeDuration::fromLiveSession(
-        DurationType::Activity,
-        liveOngoing->startTime,
-        QDateTime::currentDateTime(),
-        liveOngoing->segment_id);
-
-    const auto result = tracker.commitEditedTimeline(Timeline({}, editedOngoing));
-
-    QVERIFY(result.ok);
-    QVERIFY(tracker.isActive());
-    QVERIFY2(!tracker.isCheckpointTimerActive_dbg(), "checkpoint interval 0 disables checkpoints; the edit must not arm a zero-interval repeating QTimer");
-
-    tracker.useTimerViaButton(Button::Stop);
 }
 
 // M7: guard against re-arming timer during exclusive edit

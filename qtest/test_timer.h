@@ -31,6 +31,13 @@ private slots:
     void test_timer_stop_transitions_to_stopped();
     void test_timer_backpause_resets_checkpoint_and_splits();
     void test_timer_lock_events_checkpoint_and_resume();
+
+    // C12c: fixed 5-minute Activity checkpoint cadence (no configurable interval)
+    void test_C12c_checkpoint_timer_interval_is_fixed_five_minutes();
+    void test_C12c_legacy_zero_interval_setting_no_longer_disables_checkpoints();
+    void test_C12c_checkpoint_timer_stops_in_pause_and_after_stop();
+    void test_C12c_lock_writes_immediate_checkpoint();
+
     void test_timer_ongoing_duration();
     void test_timer_set_duration_type();
     void test_timer_checkpoints_paused();
@@ -154,8 +161,7 @@ private slots:
     void test_commitEditedTimeline_mode_aligns_with_edited_ongoing_type();
     void test_D10_editApplied_pause_to_activity_emits_transitioned();
 
-    // M7: zero checkpoint interval and exclusive-edit guards
-    void test_M7_zero_checkpoint_interval_edit_to_activity_does_not_arm_timer();
+    // M7: exclusive-edit guard
     void test_M7_edit_to_activity_during_exclusive_edit_does_not_arm_timer();
 
     // Disabled history is a no-op, not a save/checkpoint failure

@@ -365,22 +365,13 @@ TimeTracker::TimeTracker(const Settings &settings, SessionStore& db, QObject *pa
       session_(), mode_(Mode::None),
       autopause_pending_resume_(false), is_locked_(false),
       dialog_open_(false), db_(db),
-      checkpoint_interval_msec_(settings.getCheckpointIntervalMsec()),
       startup_recovered_msec_(0), startup_recovery_notification_needed_(false),
       startup_policy_dropped_count_(0),
       day_boundary_watcher_(*this)
 {
-    // Setup checkpoint timer (disabled if interval is 0)
-    if (checkpoint_interval_msec_ > 0) {
-        checkpointTimer_.setInterval(checkpoint_interval_msec_);
-    }
+    checkpointTimer_.setInterval(kCheckpointIntervalMsec);
     checkpointTimer_.setSingleShot(false);
     connect(&checkpointTimer_, &QTimer::timeout, this, &TimeTracker::saveCheckpoint);
-
-    // Log when checkpoints are disabled
-    if (checkpoint_interval_msec_ == 0) {
-        Logger::Log("[CHECKPOINT] Checkpoints disabled (interval = 0)");
-    }
 
     // No persistence side effects in the constructor.
     // Call initializeFromStore() after checkSchemaOnStartup() returns Ready/Created.
@@ -525,9 +516,7 @@ void TimeTracker::startTimer(const QDateTime& now, TransitionCause cause)
             return;
         }
 
-        if (checkpoint_interval_msec_ > 0) {
-            checkpointTimer_.start(); // Resume periodic checkpoint saving
-        }
+        checkpointTimer_.start(); // Resume periodic checkpoint saving
         Logger::Log("[TIMER] > TimeTracker unpaused");
         emitTransition(Mode::Pause, Mode::Activity, cause);
         return;
@@ -586,9 +575,7 @@ void TimeTracker::startTimer(const QDateTime& now, TransitionCause cause)
         }
         mode_ = Mode::Activity;
         session_.beginNewSegment(now);
-        if (checkpoint_interval_msec_ > 0) {
-            checkpointTimer_.start(); // Start periodic checkpoint saving
-        }
+        checkpointTimer_.start(); // Start periodic checkpoint saving
         Logger::Log("[TIMER] >> TimeTracker started");
         emitTransition(Mode::None, Mode::Activity, cause);
         return;
@@ -1027,10 +1014,10 @@ void TimeTracker::setDurationType(size_t idx, DurationType type)
 /**
  * Attempts to write a fresh checkpoint re-anchored to the given ongoing segment.
  *
- * No-op (returns true) when checkpoints are not applicable: checkpoint interval
- * disabled, not in Activity mode, the segment is not an Activity segment, the
- * segment has no positive duration / invalid timestamps, or a dialog is open /
- * the session is locked. Disabled history is also treated as success. Returns
+ * No-op (returns true) when checkpoints are not applicable: not in Activity
+ * mode, the segment is not an Activity segment, the segment has no positive
+ * duration / invalid timestamps, or a dialog is open / the session is
+ * locked. Disabled history is also treated as success. Returns
  * false only on a real checkpoint write failure (caller bug or DB error).
  *
  * C4 fix round 2 (MEDIUM-4 audit): a Fatal result here calls enterFatalState()
@@ -1043,7 +1030,7 @@ void TimeTracker::setDurationType(size_t idx, DurationType type)
  */
 bool TimeTracker::maybeReanchorCheckpoint(const TimeDuration& seg)
 {
-    if (checkpoint_interval_msec_ == 0 || mode_ != Mode::Activity || seg.type != DurationType::Activity)
+    if (mode_ != Mode::Activity || seg.type != DurationType::Activity)
         return true;
     if (seg.duration() <= 0 || !seg.startTime.isValid() || !seg.endTime.isValid())
         return true;
@@ -1112,8 +1099,8 @@ TimeTracker::EditCommitResult TimeTracker::commitEditedTimeline(const Timeline& 
             const Mode from = mode_;
             mode_ = desired;
             if (desired == Mode::Activity) {
-                if (checkpoint_interval_msec_ > 0 && !is_locked_ && !dialog_open_) {
-                    checkpointTimer_.start();   // checkpoints run only in Activity and only while enabled and not suspended
+                if (!is_locked_ && !dialog_open_) {
+                    checkpointTimer_.start();   // checkpoints run only in Activity and only while not suspended
                 }
             } else {
                 checkpointTimer_.stop();
@@ -1568,7 +1555,6 @@ void TimeTracker::saveCheckpoint_locked(const QDateTime& now)
 {
     // NOTE: This function assumes the mutex is already held by the caller
 
-    if (checkpoint_interval_msec_ == 0) return;
     if (mode_ != Mode::Activity)        return;
     if (discardCrossMidnightOngoingAndStop(now)) return;
 
@@ -1637,7 +1623,7 @@ void TimeTracker::endExclusiveEdit()
     QMutexLocker locker(&mutex_);
     dialog_open_ = false;
     Logger::Log("[CHECKPOINT] Checkpoints resumed (dialog closed)");
-    if (checkpoint_interval_msec_ > 0 && mode_ == Mode::Activity && !is_locked_) {
+    if (mode_ == Mode::Activity && !is_locked_) {
         checkpointTimer_.start();
     }
 }

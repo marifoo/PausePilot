@@ -265,7 +265,7 @@ private:
     SessionStore& db_;
     mutable QRecursiveMutex mutex_;  // Protects state transitions from concurrent access
     QTimer checkpointTimer_;  // TimeTracker for periodic checkpoint saving
-    qint64 checkpoint_interval_msec_; // Checkpoint interval (0 = disabled)
+    static constexpr int kCheckpointIntervalMsec = 5 * 60 * 1000; // Fixed 5-minute Activity checkpoint cadence
     qint64 startup_recovered_msec_;
     bool startup_recovery_notification_needed_;
     int startup_policy_dropped_count_;
@@ -678,6 +678,9 @@ public:
 
     /// Returns whether the periodic checkpoint QTimer is currently running.
     bool isCheckpointTimerActive_dbg() const { return checkpointTimer_.isActive(); }
+
+    /// Returns the periodic checkpoint QTimer's configured interval, in milliseconds.
+    int checkpointTimerIntervalMsec_dbg() const { return checkpointTimer_.interval(); }
 
     /// Triggers the periodic checkpoint slot directly (bypasses timer interval).
     void triggerCheckpoint_dbg() { saveCheckpoint(); }
