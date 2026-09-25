@@ -362,10 +362,6 @@ void HistoryDialogTest::test_historydialog_save_unrelated_edit_preserves_row_and
     QVERIFY(tempDir.isValid());
 
     const QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/checkpoint_interval_minutes", 1);
-    writer.sync();
-
     Settings settings(settingsPath);
     SqliteSessionStore db2(settings);
     // FakeClock declared before TimeTracker so it outlives it (see the
@@ -449,10 +445,6 @@ void HistoryDialogTest::test_historydialog_pauses_checkpoint_timer_for_dialog_li
     QVERIFY(tempDir.isValid());
 
     const QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/checkpoint_interval_minutes", 1);
-    writer.sync();
-
     Settings settings(settingsPath);
     SqliteSessionStore db2(settings);
     // FakeClock declared before TimeTracker so it outlives it (see the

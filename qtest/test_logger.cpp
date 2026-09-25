@@ -180,7 +180,7 @@ void LoggerTest::test_settings_repair_diagnostics_reach_the_log()
 {
     QSettings ini(settingsDir_.filePath("repair.ini"), QSettings::IniFormat);
     ini.setValue("uTimer/debug_log_to_file", true);
-    ini.setValue("uTimer/checkpoint_interval_minutes", "notanumber");
+    ini.setValue("uTimer/autopause_threshold_minutes", "notanumber");
     ini.setValue("uTimer/history_days_to_keep", -5);
     ini.sync();
 
@@ -203,7 +203,7 @@ void LoggerTest::test_settings_repair_diagnostics_reach_the_log()
     after.close();
     const QString appended = contentAfter.mid(contentBefore.size());
 
-    QVERIFY2(appended.contains("malformed integer for uTimer/checkpoint_interval_minutes"),
+    QVERIFY2(appended.contains("malformed integer for uTimer/autopause_threshold_minutes"),
              qPrintable(appended));
     QVERIFY2(appended.contains("out-of-range value for uTimer/history_days_to_keep"),
              qPrintable(appended));

@@ -225,8 +225,12 @@ void TimerTest::test_C12c_legacy_zero_interval_setting_no_longer_disables_checkp
     QCOMPARE(tracker.checkpointTimerIntervalMsec_dbg(), 5 * 60 * 1000);
     QVERIFY(tracker.isCheckpointTimerActive_dbg());
 
+    // Settings' constructor must have removed the obsolete key from the ini.
+    QSettings verify(settingsPath, QSettings::IniFormat);
+    QVERIFY(!verify.contains("uTimer/checkpoint_interval_minutes"));
+
     // A legacy non-zero value (e.g. 60) must likewise have no effect on the
-    // fixed cadence.
+    // fixed cadence, and must also be removed from the ini.
     QTemporaryDir tempDir2;
     QVERIFY(tempDir2.isValid());
     QString settingsPath2 = createSettingsFile(tempDir2.path(), 7);
@@ -241,6 +245,9 @@ void TimerTest::test_C12c_legacy_zero_interval_setting_no_longer_disables_checkp
 
     QCOMPARE(tracker2.checkpointTimerIntervalMsec_dbg(), 5 * 60 * 1000);
     QVERIFY(tracker2.isCheckpointTimerActive_dbg());
+
+    QSettings verify2(settingsPath2, QSettings::IniFormat);
+    QVERIFY(!verify2.contains("uTimer/checkpoint_interval_minutes"));
 }
 
 // C12c: the periodic checkpoint timer must not run outside Activity -- it
@@ -259,6 +266,12 @@ void TimerTest::test_C12c_checkpoint_timer_stops_in_pause_and_after_stop()
     tracker.useTimerViaButton(Button::Pause);
     QVERIFY(tracker.isPaused());
     QVERIFY(!tracker.isCheckpointTimerActive_dbg());
+
+    // No periodic checkpoint write while paused, even if manually triggered
+    // (as the stopped QTimer would have, had it still been running).
+    const size_t savedBeforeTrigger = fakeDb.savedCheckpoints.size();
+    tracker.triggerCheckpoint_dbg();
+    QCOMPARE(fakeDb.savedCheckpoints.size(), savedBeforeTrigger);
 
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -369,11 +382,7 @@ void TimerTest::test_timer_checkpoints_paused()
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    // Enable checkpoints (interval = 1 minute, but we'll trigger manually)
-    QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/checkpoint_interval_minutes", 1);
-    writer.sync();
-
+    // Checkpoints run on the engine's fixed cadence; here we trigger manually.
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
@@ -1192,10 +1201,6 @@ void TimerTest::test_saveCheckpoint_locked_does_not_write_cross_midnight_row()
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/checkpoint_interval_minutes", 1);
-    writer.sync();
-
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
     // FakeClock declared before TimeTracker so it outlives it (see the
@@ -2016,10 +2021,6 @@ void TimerTest::test_T8_destructor_does_not_crash_while_active()
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/checkpoint_interval_minutes", 1);
-    writer.sync();
-
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
 
@@ -2044,10 +2045,6 @@ void TimerTest::test_T2_replaceCurrentDurations_skips_checkpoint_while_dialog_op
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/checkpoint_interval_minutes", 1);
-    writer.sync();
-
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
@@ -2079,10 +2076,6 @@ void TimerTest::test_C6_replaceCurrentDurations_writes_checkpoint_after_endExclu
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/checkpoint_interval_minutes", 1);
-    writer.sync();
-
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);

@@ -20,6 +20,10 @@ private slots:
     // documented default instead of silently becoming 0/false.
     void test_settings_malformed_int_uses_default();
     void test_settings_malformed_bool_uses_default();
+    // C12c: the removed checkpoint-interval key must be deleted from the ini
+    // for every legacy value (including the old "0 = off" sentinel and a
+    // malformed value), while other known keys and an unknown key survive.
+    void test_settings_obsolete_checkpoint_key_removed();
     // M1: the static pre-pass reader must agree with the constructor for
     // every debug_log_to_file value, since Logger::configure() is now called
     // from it before Settings is constructed.

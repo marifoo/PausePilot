@@ -22,7 +22,6 @@ private:
 	bool log_to_file_;
 	int history_days_to_keep_;
 	unsigned int boot_time_sec_;
-	int checkpoint_interval_min_;
 	QSettings::Status last_sync_status_ = QSettings::NoError;
 	void readSettingsFile();
 	void writeAndSync();
@@ -48,7 +47,6 @@ public:
 	qint64 getNoPauseWarningActivityThresholdMsec() const;
 	qint64 getExcessiveActivityThresholdMsec() const;
 	unsigned int getBootTimeSec() const;
-	qint64 getCheckpointIntervalMsec() const;
 	/// Persists the new state, then applies it in-memory only if the write
 	/// succeeded. Returns the resulting syncStatus() (NoError on success);
 	/// on failure the setting keeps its prior value.

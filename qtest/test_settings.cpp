@@ -70,7 +70,6 @@ void SettingsTest::test_settings_defaults_and_bounds()
     QCOMPARE(defaults.isAutopauseEnabled(), true);
     QCOMPARE(defaults.logToFile(), false);
     QCOMPARE(defaults.getBackpauseMsec(), convMinToMsec(15));
-    QCOMPARE(defaults.getCheckpointIntervalMsec(), convMinToMsec(5));
 
     // Negative history clamps to 0
     QSettings writer(settingsPath, QSettings::IniFormat);
@@ -78,18 +77,6 @@ void SettingsTest::test_settings_defaults_and_bounds()
     writer.sync();
     Settings clamped(settingsPath);
     QCOMPARE(clamped.getHistoryDays(), 0);
-
-    // Bounds for checkpoint interval [0,60]
-    writer.setValue("uTimer/checkpoint_interval_minutes", 120);
-    writer.sync();
-    Settings capped(settingsPath);
-    QCOMPARE(capped.getCheckpointIntervalMsec(), convMinToMsec(60));
-
-    // Zero is a valid sentinel value meaning "disabled"
-    writer.setValue("uTimer/checkpoint_interval_minutes", 0);
-    writer.sync();
-    Settings disabled(settingsPath);
-    QCOMPARE(disabled.getCheckpointIntervalMsec(), 0LL);
 }
 
 // A14: boot_time_sec_ is the only numeric key without a qBound; a garbage/huge
@@ -112,8 +99,37 @@ void SettingsTest::test_settings_boot_time_sec_bound()
     QCOMPARE(capped.getBootTimeSec(), 3600u);
 }
 
+// C12c: the checkpoint-interval key is obsolete -- Settings must delete it
+// from the ini for every legacy value it ever accepted, including the old
+// "0 = off" sentinel and a malformed value, while other known keys and an
+// unknown key survive the same load/save round-trip untouched.
+void SettingsTest::test_settings_obsolete_checkpoint_key_removed()
+{
+    const QStringList legacyValues = {"0", "1", "60", "notanumber"};
+    for (const QString& value : legacyValues) {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        QString settingsPath = QDir(tempDir.path()).filePath("user-settings.ini");
+
+        QSettings writer(settingsPath, QSettings::IniFormat);
+        writer.setValue("uTimer/checkpoint_interval_minutes", value);
+        writer.setValue("uTimer/history_days_to_keep", 30);
+        writer.setValue("uTimer/unknown_future_key", "preserve_me");
+        writer.sync();
+
+        Settings s(settingsPath);
+        QCOMPARE(s.syncStatus(), QSettings::NoError);
+
+        QSettings verify(settingsPath, QSettings::IniFormat);
+        QVERIFY2(!verify.contains("uTimer/checkpoint_interval_minutes"),
+                 qPrintable(QString("obsolete key must be removed for legacy value '%1'").arg(value)));
+        QCOMPARE(verify.value("uTimer/history_days_to_keep").toInt(), 30);
+        QCOMPARE(verify.value("uTimer/unknown_future_key").toString(), QString("preserve_me"));
+    }
+}
+
 // D12-1: a malformed (non-numeric) int key must fall back to the documented
-// default (5 min), not the 0 that QSettings::toInt() silently produces on
+// default (15 min), not the 0 that QSettings::toInt() silently produces on
 // failure (which would then wrongly clamp to 0 via qBound).
 void SettingsTest::test_settings_malformed_int_uses_default()
 {
@@ -121,12 +137,16 @@ void SettingsTest::test_settings_malformed_int_uses_default()
     QVERIFY(tempDir.isValid());
     QString settingsPath = QDir(tempDir.path()).filePath("user-settings.ini");
 
+    // Arrange
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/checkpoint_interval_minutes", "notanumber");
+    writer.setValue("uTimer/autopause_threshold_minutes", "notanumber");
     writer.sync();
 
+    // Act
     Settings s(settingsPath);
-    QCOMPARE(s.getCheckpointIntervalMsec(), convMinToMsec(5));
+
+    // Assert
+    QCOMPARE(s.getBackpauseMsec(), convMinToMsec(15));
 }
 
 // D12-1: QVariant::toBool() has no ok-overload and treats any non-empty

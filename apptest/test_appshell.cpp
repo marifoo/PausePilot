@@ -650,7 +650,7 @@ void AppShellTest::test_production_logs_settings_repairs_from_the_first_line()
     QVERIFY(tempDir.isValid());
     QSettings settings(createSettingsFile(tempDir.path(), 7), QSettings::IniFormat);
     settings.setValue("uTimer/debug_log_to_file", true);
-    settings.setValue("uTimer/checkpoint_interval_minutes", "notanumber");
+    settings.setValue("uTimer/autopause_threshold_minutes", "notanumber");
     settings.sync();
 
     // Act
@@ -667,7 +667,7 @@ void AppShellTest::test_production_logs_settings_repairs_from_the_first_line()
     QVERIFY(logFile.open(QIODevice::ReadOnly | QIODevice::Text));
     const QString content = QString::fromUtf8(logFile.readAll());
     logFile.close();
-    QVERIFY2(content.contains("malformed integer for uTimer/checkpoint_interval_minutes"),
+    QVERIFY2(content.contains("malformed integer for uTimer/autopause_threshold_minutes"),
              qPrintable(content));
 }
 

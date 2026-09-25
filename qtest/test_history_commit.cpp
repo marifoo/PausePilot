@@ -167,10 +167,6 @@ void HistoryCommitTest::test_raii_guard_resumes_on_accept()
     QVERIFY(tempDir.isValid());
 
     const QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/checkpoint_interval_minutes", 1);
-    writer.sync();
-
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
     // D15/F1 (part 3, B2): the scheduled midnight stop is heartbeat-driven
@@ -214,10 +210,6 @@ void HistoryCommitTest::test_raii_guard_resumes_on_reject()
     QVERIFY(tempDir.isValid());
 
     const QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/checkpoint_interval_minutes", 1);
-    writer.sync();
-
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
     // D15/F1 (part 3, B2): the scheduled midnight stop is heartbeat-driven
@@ -261,10 +253,6 @@ void HistoryCommitTest::test_raii_guard_resumes_on_destruction()
     QVERIFY(tempDir.isValid());
 
     const QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/checkpoint_interval_minutes", 1);
-    writer.sync();
-
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
     // D15/F1 (part 3, B2): the scheduled midnight stop is heartbeat-driven

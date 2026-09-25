@@ -27,7 +27,10 @@ static const QString kKeyWarnActivity      = "uTimer/show_warning_after_9h45min_
 static const QString kKeyLogToFile         = "uTimer/debug_log_to_file";
 static const QString kKeyHistoryDays       = "uTimer/history_days_to_keep";
 static const QString kKeyBootTimeSec       = "uTimer/boot_time_seconds";
-static const QString kKeyCheckpointMin     = "uTimer/checkpoint_interval_minutes";
+/// Obsolete: the checkpoint cadence is now fixed at the engine
+/// (TimeTracker::kCheckpointIntervalMsec) and no longer a setting. Kept only
+/// so writeAndSync() can remove it from pre-existing user-settings.ini files.
+static const QString kObsoleteKeyCheckpointMin = "uTimer/checkpoint_interval_minutes";
 
 /// Reads an int setting, falling back to default_val (with a Logger note,
 /// no UI) if the key is present but not a valid integer. Range clamping is
@@ -124,8 +127,6 @@ void Settings::readSettingsFile()
 	log_to_file_ = readBoolChecked(sfile_, kKeyLogToFile, false);
 	const unsigned int boot_time = readUIntChecked(sfile_, kKeyBootTimeSec, 0u);
 	boot_time_sec_ = noteRepair(kKeyBootTimeSec, boot_time, qBound(0u, boot_time, 3600u));
-	const int checkpoint_min = readIntChecked(sfile_, kKeyCheckpointMin, 5);
-	checkpoint_interval_min_ = noteRepair(kKeyCheckpointMin, checkpoint_min, qBound(0, checkpoint_min, 60));
 }
 
 void Settings::writeAndSync()
@@ -140,7 +141,10 @@ void Settings::writeAndSync()
 	sfile_.setValue(kKeyLogToFile, log_to_file_);
 	sfile_.setValue(kKeyHistoryDays, history_days_to_keep_);
 	sfile_.setValue(kKeyBootTimeSec, boot_time_sec_);
-	sfile_.setValue(kKeyCheckpointMin, checkpoint_interval_min_);
+	// Remove the obsolete checkpoint-interval key from pre-existing files;
+	// merely ceasing to read/write it would leave it behind, since unknown
+	// keys are otherwise preserved.
+	sfile_.remove(kObsoleteKeyCheckpointMin);
 
 	sfile_.sync();
 	last_sync_status_ = sfile_.status();
@@ -241,9 +245,4 @@ QSettings::Status Settings::setPinToTopState(const bool pinned_to_top)
 unsigned int Settings::getBootTimeSec() const
 {
 	return boot_time_sec_;
-}
-
-qint64 Settings::getCheckpointIntervalMsec() const
-{
-	return convMinToMsec(checkpoint_interval_min_);
 }
