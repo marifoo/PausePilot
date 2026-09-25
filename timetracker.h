@@ -272,9 +272,7 @@ private:
     Mode mode_;
     bool autopause_pending_resume_;
     bool is_locked_;     // Track if desktop is currently locked (to prevent checkpoints while locked)
-    bool dialog_open_;   // True while HistoryDialog is open. Midnight triggers now
-                         // revoke it (WP2); other triggers still suspend mutation
-                         // until later packages.
+    bool dialog_open_;   // True while HistoryDialog is open. Checkpoints are suspended; lock-watcher events, a forward date change, the midnight stop/discard and shutdown revoke it first (revokeExclusiveEdit()).
     QDate exclusive_edit_date_;  // WP4: the date when beginExclusiveEdit() was called.
                                  // Used to detect when the date moves forward (>) and revoke the edit.
     bool shutdown_called_ = false;  // Set once shutdown() has torn down the engine.
@@ -361,9 +359,9 @@ private:
 
     // If the ongoing segment is cross-midnight, forces the engine into None,
     // discarding the in-flight segment. If a History edit is open, first
-    // revokes it (WP2), then re-evaluates, so the discard runs exactly as
-    // it would with no dialog. Returns true when it fired. Safe to call
-    // multiple times; only the first call does real work.
+    // revokes it, then falls through to the discard exactly as with no dialog.
+    // Returns true when it fired. Safe to call multiple times; only the first
+    // call does real work.
     bool discardCrossMidnightOngoingAndStop(const QDateTime& now);
     // WP2: force-closes an open History edit (see the definition for the
     // full contract) and runs the caller's own no-dialog code next.
@@ -616,12 +614,12 @@ public slots:
 
 signals:
     void userWarning(const QString& text);
-    /// WP1: the edit has been revoked (at lock, sleep, midnight, shutdown or
-    /// fatal DB error). HistoryDialog's onExclusiveEditRevoked() slot receives
-    /// this synchronously (direct connection) to set editRevoked_, then queues
-    /// closeRevoked() to run on the next event-loop turn so nested modals
-    /// (QMessageBox::question, QMenu::exec) can unwind first. If the dialog
-    /// is destroyed before that turn, the queued call is dropped with it.
+    /// WP1: the edit has been revoked (at lock, sleep, midnight, shutdown, or
+    /// when the date moves forward). HistoryDialog's onExclusiveEditRevoked()
+    /// slot receives this synchronously (direct connection) to set editRevoked_,
+    /// then queues closeRevoked() to run on the next event-loop turn so nested
+    /// modals (QMessageBox::question, QMenu::exec) can unwind first. If the
+    /// dialog is destroyed before that turn, the queued call is dropped with it.
     void exclusiveEditRevoked();
     /// C4 fix round 2 (HIGH-1): the ONE modal error C4/R05-006 requires.
     /// Emitted by enterFatalState() on the first latch only, in place of

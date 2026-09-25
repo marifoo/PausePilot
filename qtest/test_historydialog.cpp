@@ -2748,7 +2748,7 @@ void HistoryDialogTest::test_dialog_closes_on_shutdown_and_stays_closed_after_ca
     QTRY_COMPARE(dialogFinished.count(), 1);
     QCOMPARE(dialogFinished.last().at(0).toInt(), int(QDialog::Rejected));
 
-    // Assert: retry via accept() is refused by editRevoked_ check.
+    // Assert: retry via accept() is refused by D5's shutdown-epoch check.
     dialog.setResult(QDialog::Accepted);
     QVERIFY(!dialog.saveChanges());
     QCOMPARE(fakeDb.callLog.count("replaceAll"), 0);

@@ -129,8 +129,7 @@ to close any open child dialogs and menus, then closes History itself with
 database writes, so no partial save or retry can succeed.
 
 A tray notification (`userWarning` signal) is sent whenever History closes:
-`"History was closed (screen lock, sleep, midnight, shutdown or a database error); any unsaved
-changes were discarded."` This notification appears in the tray balloon and
+`"History was closed (screen lock, sleep, midnight or shutdown); any unsaved changes were discarded."` This notification appears in the tray balloon and
 status bar for ~10 seconds and may go unseen if the user is away (e.g. at
 lock time or overnight).
 

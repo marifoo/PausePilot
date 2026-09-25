@@ -14,10 +14,10 @@
  *   save or a declined merge confirmation leaves the dialog open so the user
  *   can correct the situation or cancel explicitly.
  * - Close on edit revoke (WP1): when the engine revokes the edit (at lock,
- *   sleep, midnight, shutdown or fatal DB error), onExclusiveEditRevoked()
- *   sets editRevoked_, queues closeRevoked() to reject child dialogs/menus,
- *   then rejects History itself. saveChanges() refuses with a single
- *   editRevoked_ check placed before Step 4 (DB persist).
+ *   sleep, midnight, shutdown, or when the date moves forward),
+ *   onExclusiveEditRevoked() sets editRevoked_, queues closeRevoked() to
+ *   reject child dialogs/menus, then rejects History itself. saveChanges()
+ *   refuses with a single editRevoked_ check placed before Step 4 (DB persist).
  */
 
 #include "historydialog.h"
@@ -272,9 +272,9 @@ bool HistoryDialog::saveChanges()
 
     bool backupMissing = false;
 
-    // WP1: if the edit was revoked (at lock, sleep, midnight, shutdown or fatal
-    // DB error), refuse the save and discard all edits. This check gates both
-    // Step 4 (DB persist) and Step 5 (memory-only commit).
+    // WP1: if the edit was revoked (at lock, sleep, midnight, shutdown, or
+    // when the date moves forward), refuse the save and discard all edits.
+    // This check gates both Step 4 (DB persist) and Step 5 (memory-only commit).
     if (editRevoked_) {
         Logger::Log("[HISTORY] Edit was revoked; discarding changes");
         return false;

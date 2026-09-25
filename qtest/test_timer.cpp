@@ -2792,14 +2792,13 @@ void TimerTest::test_F2_shutdown_after_midnight_discards_checkpoint()
 
 // ============================================================================
 // WP2 (midnight_close_plan.md): the engine revokes an open History edit at
-// the midnight boundary, then runs its normal no-dialog code. The final
-// notice text is pinned here (LOW-2 of the plan) -- no later package changes
-// it or the assertions below that compare it.
+// the midnight boundary, then runs its normal no-dialog code. The notice
+// text mirrors kHistoryRevokedNotice in timetracker.cpp.
 // ============================================================================
 
 namespace {
 const QString kWP2RevokedNotice =
-    "History was closed (screen lock, sleep, midnight, shutdown or a database error); any unsaved changes were discarded.";
+    "History was closed (screen lock, sleep, midnight or shutdown); any unsaved changes were discarded.";
 }
 
 // N1: a scheduled stop revokes an open edit and credits Activity through the
@@ -3344,8 +3343,8 @@ void TimerTest::test_S2_same_day_tick_does_not_revoke_stopped_or_running()
 
     // Running variant: fresh tracker
     FakeSessionStore fakeDb2;
-    TimeTracker tracker2(settings, fakeDb2);
     FakeClock clock2(t0);
+    TimeTracker tracker2(settings, fakeDb2);
     tracker2.setNowProvider_dbg([&clock2]() { return clock2.now(); });
 
     tracker2.useTimerViaButton(Button::Start);

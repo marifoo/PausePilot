@@ -56,9 +56,9 @@ private:
     TimerExclusiveEditGuard exclusiveEditGuard_;
 
     /// WP1: set synchronously by onExclusiveEditRevoked() when the engine
-    /// revokes the edit (at lock, sleep, midnight, shutdown or fatal DB error).
-    /// saveChanges() refuses with a single check placed before Step 4, also
-    /// gating Step 5's memory-only commit when nothing is written to the DB.
+    /// revokes the edit (at lock, sleep, midnight, shutdown, or when the date
+    /// moves forward). saveChanges() refuses with a single check placed before
+    /// Step 4, also gating Step 5's memory-only commit when nothing is written.
     bool editRevoked_ = false;
 
     /// Non-widget model owning all edit state: pages, pending timelines, origin tracking.

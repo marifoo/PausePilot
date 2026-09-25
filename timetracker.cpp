@@ -44,10 +44,9 @@
 
 namespace {
 // WP2: one neutral notice for every trigger that force-closes an open
-// History edit (lock, sleep, midnight, shutdown or a database error). Final
-// text -- no later package changes it or the tests that compare it.
+// History edit. One neutral text for every revoke trigger.
 const QString kHistoryRevokedNotice =
-    "History was closed (screen lock, sleep, midnight, shutdown or a database error); any unsaved changes were discarded.";
+    "History was closed (screen lock, sleep, midnight or shutdown); any unsaved changes were discarded.";
 
 // D10: the only translation needed between the pre-existing StopReason
 // vocabulary (still used wherever a stop's own reason is threaded through --
@@ -1577,9 +1576,9 @@ bool TimeTracker::isOngoingSegmentCrossMidnight() const
  * Forces the engine into the stopped state when the ongoing segment has
  * crossed midnight, discarding the in-flight segment.
  *
- * If a History edit is open, first revokes it (WP2's
- * TimeTracker::revokeExclusiveEdit()), then re-evaluates: the discard below
- * then runs exactly as it would with no dialog having intervened.
+ * If a History edit is open, first revokes it (revokeExclusiveEdit()),
+ * then falls through: the discard below runs exactly as it would with no
+ * dialog having intervened.
  *
  * Returns true when it fired (telling the caller to abandon any pending
  * transition). Safe to call multiple times; only the first call does real work.
@@ -1693,12 +1692,12 @@ void TimeTracker::beginExclusiveEdit()
 
 /**
  * WP2: force-closes an open History edit so the engine can run its normal,
- * no-dialog code for whatever event is intervening (midnight, lock, sleep,
- * shutdown or a fatal DB error -- later packages add the other triggers).
- * Called with mutex_ already held. exclusiveEditRevoked() reaches
- * HistoryDialog synchronously so it can flag the refusal before the dialog
- * is actually closed on the next event-loop turn; endExclusiveEdit() then
- * clears dialog_open_ so the caller's own no-dialog code runs unimpeded.
+ * no-dialog code for whatever event is intervening (lock-watcher events,
+ * forward date change, midnight, or shutdown). Called with mutex_ already held.
+ * exclusiveEditRevoked() reaches HistoryDialog synchronously so it can flag
+ * the refusal before the dialog is actually closed on the next event-loop
+ * turn; endExclusiveEdit() then clears dialog_open_ so the caller's own
+ * no-dialog code runs unimpeded.
  */
 void TimeTracker::revokeExclusiveEdit()
 {

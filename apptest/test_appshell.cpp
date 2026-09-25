@@ -1503,7 +1503,7 @@ void AppShellTest::test_mainwin_stopped_rearms_health_monitor_through_real_wirin
 
 namespace {
 const QString kWP3RevokedNotice =
-    "History was closed (screen lock, sleep, midnight, shutdown or a database error); any unsaved changes were discarded.";
+    "History was closed (screen lock, sleep, midnight or shutdown); any unsaved changes were discarded.";
 }
 
 void AppShellTest::test_history_closes_at_midnight_under_nested_prompt()
