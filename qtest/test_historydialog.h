@@ -159,6 +159,13 @@ private slots:
     // ========================================================================
     void test_revoked_dialog_refuses_save_and_leaves_store_untouched();
     void test_revoked_dialog_accept_does_not_commit();
+    void test_revoked_editless_accept_same_turn_never_accepts();
+
+    // ========================================================================
+    // S1: HistoryDialog's constructor reads the store only once (via
+    // session_.buildFromTimer()); it must not also call loadHistoryFromStore().
+    // ========================================================================
+    void test_historydialog_construction_loads_store_exactly_once();
 
     // ========================================================================
     // WP2 (midnight_close_plan.md): a live scheduled midnight stop revokes

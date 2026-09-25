@@ -2613,6 +2613,84 @@ void HistoryDialogTest::test_revoked_dialog_accept_does_not_commit()
     QCOMPARE(dialog.result(), QDialog::Rejected);
 }
 
+void HistoryDialogTest::test_revoked_editless_accept_same_turn_never_accepts()
+{
+    // WP1 H1: an editless dialog must not slip through saveChanges()'s
+    // no-edit early return when the edit was revoked in the same event turn
+    // as accept() -- before the queued closeRevoked() has run.
+    // onExclusiveEditRevoked() sets editRevoked_ synchronously (direct
+    // connection) but only queues closeRevoked(); without the early
+    // editRevoked_ check, accept() -> saveChanges() would return true at
+    // the no-edit early return and finish Accepted before the queued
+    // rejection ever ran.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime now = fixedNow();
+    fakeDb.loadDurationsResult.durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
+
+    // FakeClock declared before TimeTracker so it outlives it.
+    FakeClock clock(now);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(5); // Ensure positive-length ongoing
+
+    HistoryDialog dialog(tracker, settings);
+    // No edits made: exercises saveChanges()'s no-edit early return.
+
+    // Arrange: create the finished spy before Act (per MEDIUM-1 rule).
+    QSignalSpy finished(&dialog, &QDialog::finished);
+    fakeDb.callLog.clear();
+
+    // Act: revoke and accept in the same event turn, before the queued
+    // closeRevoked() runs.
+    emit tracker.exclusiveEditRevoked();
+    dialog.accept();
+
+    // Assert immediately: accept() must not have finished Accepted.
+    QCOMPARE(finished.count(), 0);
+    QVERIFY(dialog.result() != QDialog::Accepted);
+
+    // Process the queued close: final state is Rejected.
+    QTRY_COMPARE(finished.count(), 1);
+    QCOMPARE(finished.last().at(0).toInt(), int(QDialog::Rejected));
+    QCOMPARE(dialog.result(), QDialog::Rejected);
+
+    // No DB writes occurred at any point.
+    QCOMPARE(fakeDb.callLog.count("replaceAll"), 0);
+    QCOMPARE(fakeDb.callLog.count("commitSession"), 0);
+}
+
+void HistoryDialogTest::test_historydialog_construction_loads_store_exactly_once()
+{
+    // S1: the constructor builds the displayed model via
+    // session_.buildFromTimer() (which itself calls loadHistoryFromStore()
+    // once) and must not read the store a second time just for a log count.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime now = fixedNow();
+    fakeDb.loadDurationsResult.durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
+
+    TimeTracker tracker(settings, fakeDb);
+
+    fakeDb.callLog.clear();
+    HistoryDialog dialog(tracker, settings);
+
+    QCOMPARE(fakeDb.callLog.count("loadDurations"), 1);
+
+    // Displayed rows unchanged: the seeded DB row still shows on page 0.
+    QVERIFY(dialog.table_dbg()->rowCount() >= 1);
+}
+
 // ============================================================================
 // WP2 (midnight_close_plan.md): a live scheduled midnight stop revokes an
 // open edit and closes the dialog, and the cutoff segment is committed via

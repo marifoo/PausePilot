@@ -17,7 +17,11 @@
  *   sleep, midnight, shutdown, or when the date moves forward),
  *   onExclusiveEditRevoked() sets editRevoked_, queues closeRevoked() to
  *   reject child dialogs/menus, then rejects History itself. saveChanges()
- *   refuses with a single editRevoked_ check placed before Step 4 (DB persist).
+ *   checks editRevoked_ twice: once right after the result() guard, so an
+ *   accept() landing before the queued closeRevoked() runs cannot slip past
+ *   the no-edit early return, and again immediately before Step 4 (DB
+ *   persist), since the Step 2.6/Step 3 prompts run nested event loops that
+ *   can revoke after the early check.
  */
 
 #include "historydialog.h"
@@ -66,9 +70,6 @@ HistoryDialog::HistoryDialog(TimeTracker& timetracker, const Settings& settings,
     // Log initial state for debugging
     Logger::Log("[HISTORY] Dialog opened");
     {
-        auto historyDurations = timetracker_.loadHistoryFromStore();
-        Logger::Log(QString("[HISTORY] Loaded %1 total durations from DB").arg(historyDurations.durations.size()));
-
         const auto& pages = session_.pages();
         for (size_t i = 0; i < pages.size(); ++i) {
             Logger::Log(QString("[HISTORY] Page %1 - Title: %2, IsCurrent: %3")
@@ -118,6 +119,8 @@ void HistoryDialog::accept()
  *
  * Strategy:
  * 1. Check result() — return false if Rejected (cancel path).
+ * 1a. Check editRevoked_ — return false if the edit was revoked (early check;
+ *     see the class-level "Close on edit revoke" note above).
  * 2. Refresh ongoing end-time from engine (preserving any user type edit).
  * 3. Delegate payload construction (normalization, origin re-split) to session_.
  * 3a. If the save would replace the DB and drop a display-only cross-midnight
@@ -130,6 +133,19 @@ bool HistoryDialog::saveChanges()
 {
     if (result() != QDialog::Accepted) {
         Logger::Log("[HISTORY] Dialog cancelled, discarding changes");
+        return false;
+    }
+
+    // WP1 (H1 fix): if the edit was revoked, refuse immediately -- even for
+    // an editless dialog. onExclusiveEditRevoked() sets editRevoked_
+    // synchronously (direct connection) but only queues closeRevoked() to
+    // reject the dialog; an accept() landing in the same event turn, before
+    // that queued reject runs, must not slip through the no-edit early
+    // return below and finish Accepted. The Step 4 check further down stays
+    // for edited sessions, since the Step 2.6/Step 3 prompts run nested
+    // event loops that can revoke after this early check.
+    if (editRevoked_) {
+        Logger::Log("[HISTORY] Edit was revoked; discarding changes");
         return false;
     }
 
@@ -394,11 +410,6 @@ void HistoryDialog::setupUI()
     loadReconciliationLabel_ = new QLabel(this);
     loadReconciliationLabel_->setWordWrap(true);
     loadReconciliationLabel_->setStyleSheet("QLabel { color: #9A6B00; }");
-    // Rich text enables the clickable log-file link embedded by buildLoadReconciliationMessage().
-    // setOpenExternalLinks delegates the click to QDesktopServices::openUrl(), which
-    // hands "file:///" URLs to the OS file manager without extra plumbing.
-    loadReconciliationLabel_->setTextFormat(Qt::RichText);
-    loadReconciliationLabel_->setOpenExternalLinks(true);
     const QString reconciliationMessage = buildLoadReconciliationMessage();
     loadReconciliationLabel_->setText(reconciliationMessage);
     loadReconciliationLabel_->setVisible(!reconciliationMessage.isEmpty());
@@ -444,11 +455,6 @@ void HistoryDialog::setupUI()
 
 /**
  * Builds the banner message shown when loadDurations encountered corrupt rows.
- *
- * If debug logging is enabled and the log file exists on disk, appends an HTML
- * anchor so the user can click through to the log for details. The label is
- * configured for Rich Text and external-link handling in setupUI(), so the
- * anchor is opened by the OS file manager / text editor automatically.
  */
 QString HistoryDialog::buildLoadReconciliationMessage() const
 {
@@ -762,11 +768,6 @@ void HistoryDialog::onSplitRow()
         || row >= static_cast<int>(pendingTimelines[idx].completed().size())) {
         Logger::Log(QString("[HISTORY] Error: onSplitRow: Invalid indices - page: %1, row: %2")
             .arg(idx).arg(row));
-        return;
-    }
-    // Don't allow split on the ongoing row
-    if (row == static_cast<int>(pendingTimelines[idx].completed().size())
-        && pendingTimelines[idx].ongoing().has_value()) {
         return;
     }
 
