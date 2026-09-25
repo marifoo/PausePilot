@@ -105,8 +105,6 @@ private slots:
     void test_startTimer_drops_cross_midnight_boot_time_entry();
 
     void test_getOngoingDuration_returns_nullopt_when_cross_midnight();
-    void test_getOngoingDuration_capped_at_deferred_scheduled_cutoff();
-    void test_getOngoingDuration_stays_nullopt_for_deferred_watchdog_midnight();
 
     // TimeTracker public surface regression guard and initializeFromStore tests
     void test_D_timetracker_public_surface_regression();
@@ -119,9 +117,6 @@ private slots:
 
     // Stop persists state via commitSession only (no direct DB write methods).
     void test_X_stop_persists_via_commitSession_only();
-
-    // beginExclusiveEdit suspends mutations while dialog is open
-    void test_dialog_open_defers_midnight_stop();
 
     // WP5: every lock-watcher event revokes an open History edit first, so
     // lock/backpause/resume bookkeeping always runs as if History had never
@@ -216,29 +211,6 @@ private slots:
     // F1: loadHistoryFromStore() forwards the store's LoadResult status
     // instead of discarding it (the contract violation the rest of F1 follows from).
     void test_F1_loadHistoryFromStore_forwards_status();
-
-    // ========================================================================
-    // A1 (R11-002): a deferred midnight event replayed at endExclusiveEdit()
-    // must preserve the original policy — scheduled deferral credits exactly
-    // through the captured 23:59:59.500 cutoff; watchdog deferral
-    // conservatively discards the whole ongoing segment. Neither may use the
-    // post-dialog-close "now" as a segment endpoint.
-    // ========================================================================
-
-    // Scheduled deferral credits exactly through the captured cutoff.
-    void test_A1_scheduled_deferred_credits_activity_through_cutoff_with_checkpoint();
-    void test_A1_scheduled_deferred_credits_activity_through_cutoff_no_checkpoint();
-    void test_A1_scheduled_deferred_credits_pause_through_cutoff();
-
-    // Watchdog deferral conservatively discards the whole segment.
-    void test_A1_watchdog_deferred_discards_entire_segment_with_checkpoint();
-    void test_A1_watchdog_deferred_discards_entire_segment_no_checkpoint();
-
-    // An unrelated in-memory History edit made during the deferral survives replay.
-    void test_A1_unrelated_history_edit_preserved_during_deferred_midnight();
-
-    // endExclusiveEdit() is idempotent: a second call must not replay again.
-    void test_A1_repeated_endExclusiveEdit_does_not_replay_twice();
 
     // ========================================================================
     // WP2 (midnight_close_plan.md): the engine revokes an open History edit
@@ -456,9 +428,8 @@ private slots:
     void test_D5_cancelShutdown_retains_pending_commit_for_next_start();
 
     // ========================================================================
-    // D10 (R10-001/R10-002): one typed input dispatcher, one cause-carrying
-    // transition event sufficient for a UI reducer, and one typed owner of
-    // deferred-event replay priority.
+    // D10 (R10-001/R10-002): one typed input dispatcher, and one cause-carrying
+    // transition event sufficient for a UI reducer.
     // ========================================================================
 
     // Every valid mode/input/cause pair emits exactly one transitioned()
@@ -493,8 +464,7 @@ private slots:
     void test_D10_longlock_disabled_autopause_dialog_open_is_dropped_not_deferred();
 
     // Round-2 review (finding 1): every source of a transitioned() event
-    // driven through its REAL live path (not dbg-injected), not just the
-    // deferred-replay path exercised above.
+    // driven through its REAL live path (not dbg-injected).
     // A live scheduled midnight stop.
     void test_D10_midnight_scheduled_live_emits_transitioned();
     // A live watchdog cross-midnight discard, driven through the real

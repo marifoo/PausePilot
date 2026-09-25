@@ -304,98 +304,6 @@ private:
     /// reachable from SqliteSessionStore, and are exercised in tests only
     /// via FakeSessionStore injecting FatalError from those operations.
     bool fatal_state_latched_ = false;
-    /// A midnight boundary event captured while dialog_open_, to be replayed
-    /// exactly once by endExclusiveEdit(). Distinguishes the two deferral
-    /// policies: a scheduled cutoff credits the segment through the captured
-    /// instant (nominally 23:59:59.500); a watchdog detection conservatively
-    /// discards the whole ongoing segment, matching the non-deferred watchdog
-    /// path. `timestamp` also orders replay against a simultaneously deferred
-    /// PendingLockCorrection (chronological, earliest captured event first).
-    struct PendingMidnightEvent {
-        StopReason reason;    // MidnightScheduled or MidnightWatchdog
-        QDateTime timestamp;  // Scheduled: the captured cutoff. Watchdog: the
-                               // instant the crossing was detected.
-    };
-    /// A LongOngoingLock that arrived while HistoryDialog was open, to be applied
-    /// when the dialog closes. unlock_time stays invalid while the desktop is
-    /// still locked; an Unlock during the dialog stamps it instead of cancelling
-    /// the correction (the locked interval still happened and must become Pause).
-    struct PendingLockCorrection {
-        QDateTime lock_time;
-        QDateTime unlock_time;   // invalid ⇒ still locked at dialog close
-    };
-
-    /**
-     * DeferredEditEvents — the one typed owner of exclusive-edit deferral
-     * and its replay priority (D10/plan4 B4).
-     *
-     * A midnight boundary event and a LongOngoingLock correction can each be
-     * captured at most once while dialog_open_, and both may be pending at
-     * the same time. Previously this was two independent std::optional
-     * members with the chronological-replay rule (A1/R11-002) written out
-     * inline at every call site that needed it. Collapsing the bookkeeping
-     * AND the ordering rule into one class keeps "which event replays first"
-     * in a single place, while still allowing two concurrently pending
-     * events of different types -- a literal single-slot design would
-     * regress A1's "lock and midnight pending together replay
-     * chronologically" invariant.
-     */
-    class DeferredEditEvents {
-    public:
-        /// Records a midnight deferral iff none is already pending
-        /// (first-wins: the first-detected boundary is the true one).
-        void deferMidnightIfAbsent(StopReason reason, const QDateTime& timestamp) {
-            if (!midnight_.has_value())
-                midnight_ = PendingMidnightEvent{reason, timestamp};
-        }
-        bool hasMidnight() const { return midnight_.has_value(); }
-        std::optional<PendingMidnightEvent> midnight() const { return midnight_; }
-#ifndef QT_NO_DEBUG
-        /// Test-only direct injection (mirrors the old setPendingMidnightEvent_dbg()).
-        void setMidnight_dbg(StopReason reason, const QDateTime& timestamp) {
-            midnight_ = PendingMidnightEvent{reason, timestamp};
-        }
-#endif // QT_NO_DEBUG
-
-        /// Begins (or supersedes) a pending LongOngoingLock correction.
-        void beginLock(const QDateTime& lockTime) {
-            lock_ = PendingLockCorrection{lockTime, QDateTime()};
-        }
-        bool hasLock() const { return lock_.has_value(); }
-        std::optional<PendingLockCorrection> lock() const { return lock_; }
-        /// Stamps the unlock time on an already-pending lock correction; a
-        /// no-op if none is pending.
-        void stampLockUnlock(const QDateTime& unlockTime) {
-            if (lock_.has_value()) lock_->unlock_time = unlockTime;
-        }
-
-        /// Snapshots and clears both events (so a re-entrant/duplicate call
-        /// cannot replay either twice), then invokes applyMidnight/applyLock
-        /// in the A1 chronological order: earliest captured instant first. A
-        /// lock correction's instant is when the LongOngoingLock fired.
-        template <class ApplyMidnight, class ApplyLock>
-        void replay(ApplyMidnight&& applyMidnight, ApplyLock&& applyLock) {
-            const std::optional<PendingMidnightEvent> midnight = midnight_;
-            midnight_.reset();
-            const std::optional<PendingLockCorrection> lock = lock_;
-            lock_.reset();
-
-            if (midnight.has_value() && lock.has_value() && lock->lock_time < midnight->timestamp) {
-                applyLock(*lock);
-                applyMidnight(*midnight);
-            } else if (midnight.has_value()) {
-                applyMidnight(*midnight);
-                if (lock.has_value()) applyLock(*lock);
-            } else if (lock.has_value()) {
-                applyLock(*lock);
-            }
-        }
-
-    private:
-        std::optional<PendingMidnightEvent> midnight_;
-        std::optional<PendingLockCorrection> lock_;
-    };
-    DeferredEditEvents deferred_edit_events_;
     SessionStore& db_;
     mutable QRecursiveMutex mutex_;  // Protects state transitions from concurrent access
     QTimer checkpointTimer_;  // TimeTracker for periodic checkpoint saving
@@ -405,8 +313,8 @@ private:
     int startup_policy_dropped_count_;
     DayBoundaryWatcher day_boundary_watcher_; // Must be last: constructed after all other members
 
-    // cause defaults to the button/toggle path; lock-resume callers (Unlock
-    // handling, deferred-lock replay) pass TransitionCause::LockResume so the
+    // cause defaults to the button/toggle path; the lock-resume caller (Unlock
+    // handling) passes TransitionCause::LockResume so the
     // one transitioned() emission this method performs carries the right cause.
     void startTimer(const QDateTime& now, TransitionCause cause = TransitionCause::ButtonStart);
     // observedFromOverride: the mode observers last saw via transitioned()/
@@ -514,13 +422,6 @@ private:
     // Atomically replaces the live session with `edited`. Delegates to
     // commitEditedTimeline; use commitEditedTimeline directly from outside TimeTracker.
     void commit(const Timeline& edited);
-    // Applies a deferred midnight event captured while dialog_open_. No-op if
-    // an earlier-replayed event already stopped the engine (mode_ == None).
-    void replayDeferredMidnightEvent(const PendingMidnightEvent& event, const QDateTime& now);
-    // Applies a deferred LongOngoingLock/Unlock correction captured while
-    // dialog_open_. Called by endExclusiveEdit() in chronological order
-    // relative to a co-pending PendingMidnightEvent, if any.
-    void replayDeferredLockCorrection(const PendingLockCorrection& corr, const QDateTime& now);
 
     // D10: the one place that emits a real mode transition. Emits the
     // transitioned(Transition) event, then derives the one remaining legacy
@@ -654,9 +555,9 @@ public:
     int getStartupPolicyDroppedCount() const;
     void setDurationType(size_t idx, DurationType type);
     SessionStoreResult replaceAll(const Timeline& history, const Timeline& session);
-    /// Freezes checkpoints and defers midnight/lock events. Call before opening HistoryDialog.
+    /// Freezes checkpoints. Call before opening HistoryDialog.
     void beginExclusiveEdit();
-    /// Resumes checkpoints and replays deferred events. Call after closing HistoryDialog.
+    /// Resumes checkpoints. Call after closing HistoryDialog.
     void endExclusiveEdit();
     /// True once a FatalError result has latched TimeTracker into the
     /// unavailable state (C4/R05-006). Start refuses to run while this is
@@ -824,14 +725,6 @@ public:
 
     /// Returns whether the periodic checkpoint QTimer is currently running.
     bool isCheckpointTimerActive_dbg() const { return checkpointTimer_.isActive(); }
-
-    /// Exposes the pending deferred lock correction (set while dialog_open_).
-    auto pendingLockCorrection_dbg() const { return deferred_edit_events_.lock(); }
-    /// Exposes/injects the pending deferred midnight event (set while dialog_open_).
-    void setPendingMidnightEvent_dbg(StopReason reason, const QDateTime& timestamp) {
-        deferred_edit_events_.setMidnight_dbg(reason, timestamp);
-    }
-    auto pendingMidnightEvent_dbg() const { return deferred_edit_events_.midnight(); }
 
     /// Triggers the periodic checkpoint slot directly (bypasses timer interval).
     void triggerCheckpoint_dbg() { saveCheckpoint(); }

@@ -143,9 +143,8 @@ void TimeTracker::DayBoundaryWatcher::armScheduledStop(const QDateTime& now)
         // Already past 23:59:59.500 — fire in 1 ms to trigger the watchdog
         // path. The intended boundary for revalidation is `now` itself, not
         // a past 23:59:59.500: this arm already starts past the nominal
-        // boundary (e.g. Start pressed at 23:59:59.6, or endExclusiveEdit()
-        // re-arming after a long dialog), and treating `now` as "before the
-        // boundary" would make onMidnightTimerFired() misclassify this
+        // boundary (e.g. Start pressed at 23:59:59.6), and treating `now` as
+        // "before the boundary" would make onMidnightTimerFired() misclassify this
         // entirely ordinary end-of-day stop as a clock reversal.
         msecs_until_stop = 1;
         intended_boundary_ = now;
@@ -761,7 +760,7 @@ void TimeTracker::backpauseTimer(const QDateTime& now, const QDateTime& lockTime
     // real wall-clock lock instant when it is known: the LongOngoingLock event
     // may arrive long after the lock (e.g. after a suspend), so now−backpause
     // would credit the suspended interval as Activity. Fall back to now−backpause
-    // only when no lock time was plumbed through (e.g. deferred replay).
+    // only when no lock time was plumbed through by the caller.
     QDateTime activity_end = lockTime.isValid() ? lockTime : now.addMSecs(-backpause_msec);
 
     // Ensure activity_end is not before segment_start_time
@@ -1264,16 +1263,6 @@ std::optional<TimeDuration> TimeTracker::getOngoingDuration_locked() const
     if (isCrossMidnight(session_.segment_start_time, now)) {
         // Cross-midnight ongoing — about to be force-stopped by the
         // watchdog within ~100 ms. Don't expose this transient state.
-        // Exception (H1): if History is open and a MidnightScheduled
-        // deferral already captured the true cutoff, no one is going to
-        // stop it — expose the segment capped at that cutoff instead of
-        // hiding it, so a history-edit save re-anchors it rather than
-        // treating it as gone.
-        const auto pending = deferred_edit_events_.midnight();
-        if (pending.has_value() && pending->reason == StopReason::MidnightScheduled
-            && session_.segment_start_time < pending->timestamp)
-            return TimeDuration::fromLiveSession(type, session_.segment_start_time,
-                                                 pending->timestamp, session_.segment_id);
         return std::nullopt;
     }
     return TimeDuration::fromLiveSession(type, session_.segment_start_time, now, session_.segment_id);
@@ -1604,10 +1593,7 @@ bool TimeTracker::discardCrossMidnightOngoingAndStop(const QDateTime& now)
     if (!session_.segment_start_time.isValid()) return false;
     if (!isCrossMidnight(session_.segment_start_time, now)) return false;
 
-    if (dialog_open_) {
-        revokeExclusiveEdit();
-        return discardCrossMidnightOngoingAndStop(now) || mode_ == Mode::None;
-    }
+    if (dialog_open_) revokeExclusiveEdit();
 
     Logger::Log(QString("[MIDNIGHT] Cross-midnight ongoing detected "
                         "(segment_start=%1, now=%2) — discarding segment, forcing stop")
@@ -1727,71 +1713,8 @@ void TimeTracker::endExclusiveEdit()
     QMutexLocker locker(&mutex_);
     dialog_open_ = false;
     Logger::Log("[CHECKPOINT] Checkpoints resumed (dialog closed)");
-
-    // D2 (MEDIUM-7): one civil `now` for this whole operation, passed down
-    // to both replay helpers below, rather than each reading now_provider_()
-    // independently -- the first reading drives a persisted discard
-    // decision (replayDeferredMidnightEvent's watchdog branch).
-    const QDateTime now = now_provider_();
-
-    // D10/plan4 B4: the chronological-replay ordering rule (A1/R11-002) now
-    // lives in DeferredEditEvents::replay() -- earliest captured instant
-    // first, so the outcome matches exactly what would have happened had the
-    // dialog never been open. A lock correction's event instant is when the
-    // LongOngoingLock fired.
-    deferred_edit_events_.replay(
-        [this, now](const PendingMidnightEvent& event) { replayDeferredMidnightEvent(event, now); },
-        [this, now](const PendingLockCorrection& corr) { replayDeferredLockCorrection(corr, now); });
-
-    // Restart checkpoint timer only after deferred events are replayed, so
-    // stopTimer/backpauseTimer can set mode_ before we decide whether to arm.
     if (checkpoint_interval_msec_ > 0 && mode_ == Mode::Activity && !is_locked_) {
         checkpointTimer_.start();
-    }
-}
-
-void TimeTracker::replayDeferredMidnightEvent(const PendingMidnightEvent& event, const QDateTime& now)
-{
-    if (mode_ == Mode::None) {
-        // Already stopped by an earlier-replayed event; nothing to do.
-        return;
-    }
-    if (event.reason == StopReason::MidnightWatchdog) {
-        // Conservative discard, matching the non-deferred watchdog path:
-        // the whole ongoing segment is dropped, never credited.
-        Logger::Log("[MIDNIGHT] Replaying deferred watchdog cross-midnight discard after dialog close");
-        discardCrossMidnightOngoingAndStop(now);
-    } else {
-        // Scheduled stop: finalize exactly at the captured cutoff, not at
-        // whatever wall time is current now.
-        Logger::Log("[MIDNIGHT] Replaying deferred midnight stop at captured cutoff after dialog close");
-        stopTimer(event.timestamp, StopReason::MidnightScheduled);
-    }
-}
-
-void TimeTracker::replayDeferredLockCorrection(const PendingLockCorrection& corr, const QDateTime& now)
-{
-    if (!corr.unlock_time.isValid()) {
-        // Still locked: identical to today's replay path.
-        Logger::Log("[LOCK] Replaying deferred LongOngoingLock after dialog close");
-        useTimerViaLockEvent(LockEvent::LongOngoingLock, corr.lock_time);
-    } else if (mode_ == Mode::Activity && settings_.isAutopauseEnabled()) {
-        // Lock AND unlock both happened during the dialog: replay both at
-        // their true wall-clock instants. backpauseTimer converts
-        // [lock_time -> unlock_time] to Pause; startTimer(unlock_time) then
-        // reopens an Activity segment exactly at the unlock, so the user's
-        // post-unlock work stays Activity.
-        Logger::Log("[LOCK] Replaying deferred lock interval as Pause after dialog close");
-        backpauseTimer(corr.unlock_time, corr.lock_time);
-        startTimer(corr.unlock_time, TransitionCause::LockResume);
-        // startTimer() just re-armed the scheduled midnight stop using
-        // corr.unlock_time as "now" (needed so the Pause->Activity
-        // duration math is correct) — but the underlying QTimer counts
-        // real wall-clock ms from when it starts, so arming it against a
-        // historical instant makes it fire late. Re-arm against the same
-        // civil `now` captured once by endExclusiveEdit() (D2/MEDIUM-7) so
-        // it still fires at 23:59:59.500 relative to real current time.
-        day_boundary_watcher_.armScheduledStop(now);
     }
 }
 

@@ -1186,70 +1186,6 @@ void TimerTest::test_getOngoingDuration_returns_nullopt_when_cross_midnight()
     QVERIFY(!result.has_value());
 }
 
-void TimerTest::test_getOngoingDuration_capped_at_deferred_scheduled_cutoff()
-{
-    // Arrange: start yesterday just before midnight, defer a MidnightScheduled
-    // cutoff (as onMidnightTimerFired() would while History is open), then
-    // advance the clock past midnight.
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    FakeClock clock(QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0), Qt::LocalTime));
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    const auto before = tracker.getOngoingDuration();
-    QVERIFY(before.has_value());
-    const QDateTime segStart = before->startTime;
-    const auto segId = before->segment_id;
-
-    tracker.beginExclusiveEdit();
-    const QDateTime cutoff(QDate::currentDate().addDays(-1), QTime(23, 59, 59, 500), Qt::LocalTime);
-    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightScheduled, cutoff);
-    clock.setNow(QDateTime(QDate::currentDate(), QTime(0, 10, 0, 0), Qt::LocalTime));
-
-    // Act
-    const auto ongoing = tracker.getOngoingDuration();
-
-    // Assert: capped at the captured cutoff rather than hidden
-    QVERIFY(ongoing.has_value());
-    QCOMPARE(ongoing->endTime, cutoff);
-    QCOMPARE(ongoing->startTime, segStart);
-    QCOMPARE(ongoing->segment_id, segId);
-
-    tracker.endExclusiveEdit();
-}
-
-void TimerTest::test_getOngoingDuration_stays_nullopt_for_deferred_watchdog_midnight()
-{
-    // Same as above but with MidnightWatchdog: the discard policy must
-    // remain untouched by the fix.
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    FakeClock clock(QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0), Qt::LocalTime));
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-
-    tracker.beginExclusiveEdit();
-    const QDateTime cutoff(QDate::currentDate().addDays(-1), QTime(23, 59, 59, 500), Qt::LocalTime);
-    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightWatchdog, cutoff);
-    clock.setNow(QDateTime(QDate::currentDate(), QTime(0, 10, 0, 0), Qt::LocalTime));
-
-    // Act
-    const auto ongoing = tracker.getOngoingDuration();
-
-    // Assert: still hidden — a watchdog deferral discards the whole segment
-    QVERIFY(!ongoing.has_value());
-
-    tracker.endExclusiveEdit();
-}
-
 // ============================================================================
 // TimeTracker public surface regression guard
 // ============================================================================
@@ -1705,33 +1641,6 @@ void TimerTest::test_unlock_with_history_open_revokes_and_resumes_pending_autopa
 
     tracker.useTimerViaButton(Button::Stop);
 }
-
-// Issue 3 Layer A: a deferred midnight event set directly, endExclusiveEdit replays it.
-void TimerTest::test_dialog_open_defers_midnight_stop()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    QString settingsPath = createSettingsFile(tempDir.path(), 7);
-
-    Settings settings(settingsPath);
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-
-    tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
-
-    // Simulate: dialog is open and midnight fired (deferred)
-    tracker.beginExclusiveEdit();
-    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightScheduled,
-                                         QDateTime::currentDateTime());
-
-    // Close dialog — replay deferred midnight stop
-    tracker.endExclusiveEdit();
-
-    QVERIFY(!tracker.pendingMidnightEvent_dbg().has_value());
-    QVERIFY(tracker.isStopped());
-}
-
 
 // ============================================================================
 // WP5: end-to-end check that a lock -> auto-pause -> unlock interval starting
@@ -2881,306 +2790,6 @@ void TimerTest::test_F2_shutdown_after_midnight_discards_checkpoint()
     QVERIFY(!stillPresent);
 }
 
-// A1 (R11-002): the deferred-midnight-stop replay in endExclusiveEdit() must
-// CREDIT the segment through the captured 23:59:59.500 cutoff — not discard
-// it. This replaces the old (buggy) expectation that replay discarded the
-// whole segment/checkpoint whenever the dialog stayed open past midnight;
-// that was exactly the data-loss bug R11-002 reports. A pre-existing
-// checkpoint must be left for the ordinary commitSession upsert to finalize,
-// not explicitly discarded.
-void TimerTest::test_A1_scheduled_deferred_credits_activity_through_cutoff_with_checkpoint()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
-    FakeClock clock(preMidnight);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    QVERIFY(tracker.isActive());
-    clock.advance(60ll * 1000ll); // elapse a minute so the checkpoint isn't zero-length
-    tracker.triggerCheckpoint_dbg();
-    QVERIFY(fakeDb.callLog.contains("saveCheckpoint"));
-
-    // Dialog opens before midnight; the scheduled stop fires while it's open,
-    // capturing a typed deferred event with the cutoff instant instead of
-    // just setting a flag.
-    tracker.beginExclusiveEdit();
-    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
-    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightScheduled, cutoff);
-
-    // Dialog stays open well past midnight before closing.
-    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime));
-    fakeDb.callLog.clear();
-    tracker.endExclusiveEdit();
-
-    // Assert: credited through the cutoff via the normal commit path — no
-    // discard. Mode is None; nothing after the cutoff is credited.
-    QVERIFY(tracker.isStopped());
-    QVERIFY(!tracker.pendingMidnightEvent_dbg().has_value());
-    QVERIFY(fakeDb.callLog.contains("commitSession"));
-    QVERIFY2(!fakeDb.callLog.contains("discardCheckpoint"),
-             "Scheduled deferral must credit through the cutoff, not discard the checkpoint");
-    QCOMPARE(fakeDb.storedDurations.size(), size_t(1));
-    const auto& seg = fakeDb.storedDurations.front();
-    QCOMPARE(seg.type, DurationType::Activity);
-    QCOMPARE(seg.startTime, preMidnight);
-    QCOMPARE(seg.endTime, cutoff);
-}
-
-// A1 (R11-002): same scheduled-credit policy, but with no checkpoint ever
-// saved before the dialog opened.
-void TimerTest::test_A1_scheduled_deferred_credits_activity_through_cutoff_no_checkpoint()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
-    FakeClock clock(preMidnight);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    QVERIFY(tracker.isActive());
-
-    tracker.beginExclusiveEdit();
-    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
-    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightScheduled, cutoff);
-
-    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime));
-    tracker.endExclusiveEdit();
-
-    QVERIFY(tracker.isStopped());
-    QVERIFY(!fakeDb.callLog.contains("discardCheckpoint"));
-    QCOMPARE(fakeDb.storedDurations.size(), size_t(1));
-    const auto& seg = fakeDb.storedDurations.front();
-    QCOMPARE(seg.type, DurationType::Activity);
-    QCOMPARE(seg.startTime, preMidnight);
-    QCOMPARE(seg.endTime, cutoff);
-}
-
-// A1 (R11-002): the same scheduled-credit policy applies to a Pause segment
-// (Pause segments never have checkpoints, so this also covers the
-// "no existing checkpoint" case for Pause).
-void TimerTest::test_A1_scheduled_deferred_credits_pause_through_cutoff()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
-    FakeClock clock(preMidnight);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    clock.advance(5ll * 60ll * 1000ll); // elapse 5 minutes so the Activity segment isn't zero-length
-    tracker.useTimerViaButton(Button::Pause);
-    QVERIFY(tracker.isPaused());
-    const QDateTime pauseStart = clock.now();
-    fakeDb.storedDurations.clear(); // ignore the crash-safety commit finalizePauseTransition just made
-
-    tracker.beginExclusiveEdit();
-    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
-    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightScheduled, cutoff);
-
-    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime));
-    tracker.endExclusiveEdit();
-
-    QVERIFY(tracker.isStopped());
-    QVERIFY(!fakeDb.callLog.contains("discardCheckpoint"));
-    // Both the completed pre-pause Activity segment and the Pause segment
-    // (credited through the cutoff) must be present.
-    bool foundActivity = false, foundPause = false;
-    for (const auto& seg : fakeDb.storedDurations) {
-        if (seg.type == DurationType::Activity && seg.startTime == preMidnight)
-            foundActivity = true;
-        if (seg.type == DurationType::Pause && seg.endTime == cutoff) {
-            foundPause = true;
-            QCOMPARE(seg.startTime, pauseStart);
-        }
-    }
-    QVERIFY2(foundActivity, "Expected the pre-pause Activity segment to survive");
-    QVERIFY2(foundPause, "Expected the Pause segment credited exactly through the cutoff");
-}
-
-// A1 (R11-002): watchdog deferral remains conservative — it discards the
-// whole ongoing segment rather than crediting any pre-midnight portion,
-// matching the non-deferred watchdog policy. Discard durability itself is
-// A4's scope; this only asserts non-crediting and that discard was invoked.
-void TimerTest::test_A1_watchdog_deferred_discards_entire_segment_with_checkpoint()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
-    FakeClock clock(preMidnight);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    clock.advance(60ll * 1000ll);
-    tracker.triggerCheckpoint_dbg();
-    const auto ongoingAtCheckpoint = tracker.getOngoingDuration();
-    QVERIFY(ongoingAtCheckpoint.has_value());
-    const SegmentId checkpointSegmentId = ongoingAtCheckpoint->segment_id;
-
-    tracker.beginExclusiveEdit();
-    const QDateTime afterMidnight(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime);
-    clock.setNow(afterMidnight);
-    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightWatchdog, afterMidnight);
-
-    fakeDb.callLog.clear();
-    tracker.endExclusiveEdit();
-
-    QVERIFY(tracker.isStopped());
-    QVERIFY(!tracker.pendingMidnightEvent_dbg().has_value());
-    QVERIFY2(!fakeDb.callLog.contains("commitSession"),
-             "Watchdog deferral must not credit any portion of the segment");
-    QVERIFY(fakeDb.callLog.contains("discardCheckpoint"));
-    const bool stillPresent = std::any_of(fakeDb.savedCheckpoints.begin(), fakeDb.savedCheckpoints.end(),
-        [&](const FakeSessionStore::CheckpointRecord& cp) { return cp.segmentId == checkpointSegmentId; });
-    QVERIFY(!stillPresent);
-}
-
-// A1 (R11-002): same conservative watchdog discard, with no checkpoint ever
-// saved before the dialog opened — discard is still attempted for the live
-// segment identity.
-void TimerTest::test_A1_watchdog_deferred_discards_entire_segment_no_checkpoint()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
-    FakeClock clock(preMidnight);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-
-    tracker.beginExclusiveEdit();
-    const QDateTime afterMidnight(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime);
-    clock.setNow(afterMidnight);
-    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightWatchdog, afterMidnight);
-
-    tracker.endExclusiveEdit();
-
-    QVERIFY(tracker.isStopped());
-    QVERIFY(!fakeDb.callLog.contains("commitSession"));
-    QVERIFY(fakeDb.callLog.contains("discardCheckpoint"));
-    QVERIFY(fakeDb.storedDurations.empty());
-}
-
-// A1 (R11-002): production capture path — onMidnightTimerFired() must record
-// a typed event (not just a bool) while dialog_open_, without stopping the
-// engine. Exercises the real QTimer firing, not a dbg poke.
-// A1 (R11-002): an unrelated in-memory History edit (e.g. reclassifying an
-// earlier completed segment) made while the dialog is open must survive the
-// deferred-midnight replay unchanged.
-void TimerTest::test_A1_unrelated_history_edit_preserved_during_deferred_midnight()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    const QDateTime t0(QDate(2025, 6, 1), QTime(20, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(20, 30, 0), Qt::LocalTime));
-    tracker.useTimerViaButton(Button::Pause);   // completed Activity[20:00->20:30]
-    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(20, 35, 0), Qt::LocalTime));
-    tracker.useTimerViaButton(Button::Start);   // completed Pause[20:30->20:35], fresh Activity from 20:35
-    QVERIFY(tracker.isActive());
-    // The pause/resume transitions above already committed intermediate
-    // crash-safety snapshots; clear them so only the final replay commit
-    // (checked below) is inspected.
-    fakeDb.storedDurations.clear();
-
-    tracker.beginExclusiveEdit();
-    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
-    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightScheduled, cutoff);
-
-    // An unrelated edit: reclassify the first completed segment's type.
-    QCOMPARE(tracker.completedTimeline().completed().size(), size_t(2));
-    tracker.setDurationType(0, DurationType::Pause);
-
-    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime));
-    tracker.endExclusiveEdit();
-
-    QVERIFY(tracker.isStopped());
-    // D13e: the edited first segment (now Pause) and the untouched second
-    // segment (already Pause) are adjacent same-type segments, so committing
-    // them normalizes -- like a real database would -- into ONE merged row
-    // spanning t0..20:35 under the edited segment's identity. This is not
-    // data loss: finding this exact merged row proves both that the edit
-    // (type flip) stuck and that the untouched segment's endTime survived
-    // intact into the merge.
-    bool foundMergedPause = false, foundFinalActivity = false;
-    for (const auto& seg : fakeDb.storedDurations) {
-        if (seg.type == DurationType::Pause
-            && seg.startTime == t0
-            && seg.endTime == QDateTime(QDate(2025, 6, 1), QTime(20, 35, 0), Qt::LocalTime)) {
-            foundMergedPause = true;
-        }
-        if (seg.type == DurationType::Activity
-            && seg.startTime == QDateTime(QDate(2025, 6, 1), QTime(20, 35, 0), Qt::LocalTime)
-            && seg.endTime == cutoff) {
-            foundFinalActivity = true;
-        }
-    }
-    QVERIFY2(foundMergedPause,
-             "Edited segment and the unrelated adjacent Pause segment must merge into one row spanning t0..20:35");
-    QVERIFY2(foundFinalActivity, "Ongoing segment must be credited exactly through the cutoff");
-}
-
-// A1 (R11-002): endExclusiveEdit() must be idempotent — a second call after
-// the first already replayed must not replay the same event again.
-void TimerTest::test_A1_repeated_endExclusiveEdit_does_not_replay_twice()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
-    FakeClock clock(preMidnight);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    tracker.beginExclusiveEdit();
-    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
-    tracker.setPendingMidnightEvent_dbg(TimeTracker::StopReason::MidnightScheduled, cutoff);
-    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime));
-
-    tracker.endExclusiveEdit();
-    QVERIFY(tracker.isStopped());
-    const int callsAfterFirst = fakeDb.callLog.size();
-    const size_t storedAfterFirst = fakeDb.storedDurations.size();
-
-    // Act: call endExclusiveEdit() again (no new dialog session opened).
-    tracker.endExclusiveEdit();
-
-    QVERIFY(tracker.isStopped());
-    QCOMPARE(fakeDb.callLog.size(), callsAfterFirst);
-    QCOMPARE(fakeDb.storedDurations.size(), storedAfterFirst);
-}
-
 // ============================================================================
 // WP2 (midnight_close_plan.md): the engine revokes an open History edit at
 // the midnight boundary, then runs its normal no-dialog code. The final
@@ -3354,9 +2963,9 @@ void TimerTest::test_N4_lock_event_revokes_edit_and_stops()
     QVERIFY(fakeDb.storedDurations.empty());
 }
 
-// N5 (*HEAD-red*): a LongOngoingLock/Unlock interval already deferred while
-// the dialog was open still replays normally when the scheduled stop later
-// revokes the edit. This test must stay unchanged through WP5 (when the
+// N5 (*HEAD-red*): a LongOngoingLock/Unlock interval that happens while the
+// dialog is open is still recorded normally by the time the scheduled stop
+// later revokes the edit. This test must stay unchanged through WP5 (when the
 // lock events themselves start revoking immediately, no deferral involved).
 void TimerTest::test_N5_scheduled_stop_after_autopause_revokes_and_credits_all_segments()
 {
@@ -3423,8 +3032,8 @@ void TimerTest::test_N5_scheduled_stop_after_autopause_revokes_and_credits_all_s
 }
 
 // N5b (*HEAD-red*): History stays open while still locked (no Unlock) right
-// up to the scheduled stop. The deferred LongOngoingLock replays as "still
-// locked", so the scheduled stop finalizes a Pause segment through the cutoff.
+// up to the scheduled stop. The LongOngoingLock is still "still locked" at
+// that point, so the scheduled stop finalizes a Pause segment through the cutoff.
 void TimerTest::test_N5b_scheduled_stop_while_still_locked_revokes_and_stops_paused()
 {
     QTemporaryDir tempDir;
@@ -5789,9 +5398,8 @@ void TimerTest::test_D5_cancelShutdown_retains_pending_commit_for_next_start()
 }
 
 // ============================================================================
-// D10 (R10-001/R10-002): one typed input dispatcher, one cause-carrying
-// transition event sufficient for a UI reducer, and one typed owner of
-// deferred-event replay priority.
+// D10 (R10-001/R10-002): one typed input dispatcher, and one cause-carrying
+// transition event sufficient for a UI reducer.
 // ============================================================================
 
 void TimerTest::test_D10_transitioned_emits_one_event_per_real_transition_data()
@@ -6026,7 +5634,6 @@ void TimerTest::test_D10_longlock_disabled_autopause_dialog_open_is_dropped_not_
     // not captured for a later replay that would resurrect it if autopause
     // is subsequently re-enabled. The dialog is also already revoked (WP5),
     // since any real lock-watcher event closes it before this handler runs.
-    QVERIFY(!tracker.pendingLockCorrection_dbg().has_value());
     QVERIFY(!tracker.isDialogOpen_dbg());
 
     tracker.endExclusiveEdit();

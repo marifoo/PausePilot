@@ -37,7 +37,6 @@ private slots:
     void test_historydialog_save_then_crash_reopen_retains_current_segment_row();
     void test_historydialog_save_uses_ongoing_snapshot_endtime_after_wait();
     void test_historydialog_save_failed_db_replace_keeps_runtime_state_unchanged();
-    void test_historydialog_save_preserves_deferred_midnight_segment();
 
     void test_splitdialog_default_types_and_bounds();
     void test_splitdialog_short_duration_disables_slider();
