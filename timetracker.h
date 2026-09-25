@@ -276,6 +276,7 @@ private:
     QDate exclusive_edit_date_;  // WP4: the date when beginExclusiveEdit() was called.
                                  // Used to detect when the date moves forward (>) and revoke the edit.
     bool shutdown_called_ = false;  // Set once shutdown() has torn down the engine.
+                                     // Cleared only by cancelShutdown(); while set, startTimer() refuses Start (log only).
     /// D5 review fix (finding 1, R15-002): monotonic counter incremented on
     /// every shutdown() call (never by cancelShutdown()). HistoryDialog
     /// snapshots this at construction and refuses to save if it changed --
@@ -460,7 +461,9 @@ public:
     bool isStopped() const { QMutexLocker lk(&mutex_); return mode_ == Mode::None; }
     /// True once shutdown() has run and not yet cancelled (cleared by
     /// cancelShutdown()). Distinct from isStopped(): a normally stopped
-    /// engine is still editable regardless of this flag. Test-only accessor
+    /// engine is still editable regardless of this flag. While set, Start
+    /// (button or lock-resume) is refused by startTimer() -- shutdown is
+    /// terminal until cancelShutdown() (C9b). Test-only accessor
     /// today -- History's own per-dialog save gate is shutdownEpoch(), not
     /// this flag (D5 review fix, R15-002).
     bool wasShutDown() const { QMutexLocker lk(&mutex_); return shutdown_called_; }
@@ -468,7 +471,8 @@ public:
     /// shutdown. Clears shutdown_called_ only -- mode_/session_/pending
     /// commit-or-discard state are untouched, so the ended session is neither
     /// reconstructed nor resumed and pending persistence stays governed by
-    /// A2/A3 (retried at the next Start, not here).
+    /// A2/A3 (retried at the next Start, not here). This is the only clearer
+    /// of shutdown_called_; after this, Start works again (C9b).
     void cancelShutdown();
     /// D5 review fix (finding 1, R15-002): monotonic, never reset by
     /// cancelShutdown() -- lets a caller (HistoryDialog) detect "a shutdown

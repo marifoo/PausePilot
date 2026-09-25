@@ -2724,35 +2724,124 @@ void TimerTest::test_A3_watchdog_discard_deletes_checkpoint_row()
     QCOMPARE(countUnfinalizedRows(db), 0);
 }
 
-void TimerTest::test_A4_shutdown_called_cleared_on_fresh_session_start()
+void TimerTest::test_C9b_start_refused_after_shutdown_until_cancel()
 {
-    // Arrange: timer with fake clock; call shutdown() to set shutdown_called_=true.
+    // Arrange: start, stop, then shutdown() -- shutdown_called_ set.
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore db;
+    FakeSessionStore fakeDb;
 
     const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
     FakeClock clock(t0);
-    TimeTracker tracker(settings, db);
+    TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
-    // Act: start timer, stop it, then call shutdown().
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
     tracker.useTimerViaButton(Button::Stop);
     QVERIFY(tracker.isStopped());
 
-    // Verify the flag is set after shutdown.
     tracker.shutdown();
     QVERIFY(tracker.wasShutDown());
 
-    // Act: start a fresh session (None → Activity), which should emit started(false).
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
+    const QStringList callLogBefore = fakeDb.callLog;
+
+    // Act: both Start entry points must be refused while shutdown_called_ is set.
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isStopped());
+    QVERIFY(tracker.wasShutDown());
+    QCOMPARE(transitionedSpy.count(), 0);
+    QCOMPARE(fakeDb.callLog, callLogBefore);
+
+    tracker.onStartPausePressed();
+    QVERIFY(tracker.isStopped());
+    QVERIFY(tracker.wasShutDown());
+    QCOMPARE(transitionedSpy.count(), 0);
+    QCOMPARE(fakeDb.callLog, callLogBefore);
+
+    // Act: cancelShutdown() re-arms the tracker -- Start now works.
+    tracker.cancelShutdown();
+    tracker.useTimerViaButton(Button::Start);
+
+    // Assert
+    QVERIFY(tracker.isActive());
+    QCOMPARE(transitionedSpy.count(), 1);
+}
+
+void TimerTest::test_C9b_start_refused_does_not_retry_pending_commit()
+{
+    // Arrange: a Stop-time commit failure leaves a pending payload, then
+    // shutdown() marks the tracker terminal without resolving it -- a
+    // refused Start must not touch that pending payload (mirrors D5's
+    // cancelShutdown pending-commit test, but for a refused Start).
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.hasPendingCommit_dbg());
+    tracker.shutdown();
+    QVERIFY(tracker.wasShutDown());
+    const int commitAttemptsBeforeStart = fakeDb.callLog.count("commitSession");
+
+    // Act
+    tracker.useTimerViaButton(Button::Start);
+
+    // Assert: refused Start left the pending commit exactly as it was.
+    QVERIFY(tracker.hasPendingCommit_dbg());
+    QCOMPARE(fakeDb.callLog.count("commitSession"), commitAttemptsBeforeStart);
+    QVERIFY(tracker.isStopped());
+
+    // Cleanup: resolve the payload so destruction finds no unresolved commit.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(tracker.drainForShutdown().clean());
+}
+
+void TimerTest::test_C9b_lock_resume_refused_after_shutdown()
+{
+    // Arrange: autopause enabled, running, shutdown() called, then a
+    // pending lock-resume arrives -- must be refused just like button Start.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/autopause_enabled", true);
+    writer.sync();
+
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
+    tracker.shutdown();
+    QVERIFY(tracker.wasShutDown());
+    QVERIFY(tracker.isStopped());
 
-    // Assert: shutdown_called_ is now cleared, so wasShutDown() returns false.
-    QVERIFY(!tracker.wasShutDown());
+    tracker.setAutopausePendingResume_dbg(true);
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
+    const QStringList callLogBefore = fakeDb.callLog;
+
+    // Act
+    tracker.useTimerViaLockEvent(LockEvent::Unlock);
+
+    // Assert
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(transitionedSpy.count(), 0);
+    QCOMPARE(fakeDb.callLog, callLogBefore);
 }
 
 // F2: shutdown() after a machine slept past midnight must discard the

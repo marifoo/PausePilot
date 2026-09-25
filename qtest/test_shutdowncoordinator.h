@@ -52,6 +52,11 @@ private slots:
     // Test N: a START click during the pump is re-stopped (A14 pump re-entrancy)
     void test_N_restart_during_pump_is_restopped();
 
+    // C9b: shutdown is terminal -- both a direct and a pump-queued Start
+    // after run() are refused, and a second run() just returns the cached
+    // result with no extra marker/flush call.
+    void test_C9b_start_refused_after_run_direct_and_queued();
+
     // ========================================================================
     // A3 (R11-001): ShutdownCoordinator::run()/retryDrain() consume the typed
     // DrainResult from TimeTracker::drainForShutdown(). Clean-marker

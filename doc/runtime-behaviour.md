@@ -172,6 +172,17 @@ is the single entry point into it, reached from three places:
 - Linux signal (`SIGTERM` / `SIGINT` / `SIGHUP`) → `MainWin::onAboutToQuit`
   via the signal-handling pattern described below.
 
+**Shutdown is terminal until cancelled (C9b):** once `TimeTracker::shutdown()`
+has run (via `ShutdownCoordinator::run()` on any of the three paths above),
+`shutdown_called_` stays set and `TimeTracker::startTimer()` refuses every
+Start -- button Start and a pending lock-resume (autopause unlock) alike --
+logging the refusal and returning without touching autopause state, the
+pending commit, the session, the store, or emitting a transition. Only
+`TimeTracker::cancelShutdown()` clears the flag. A cancelled Windows shutdown
+(`WM_ENDSESSION` with `wParam == 0`) is the one path that calls it: it re-arms
+both `ShutdownCoordinator`'s own `run()` guard and `TimeTracker`'s latch
+together, and only after that does Start work again.
+
 **History during shutdown:** If `HistoryDialog` is open, `TimeTracker::shutdown()`
 revokes the edit immediately after acquiring the engine lock and before the
 terminal flag or stop. The dialog is flagged to close, its edits are discarded,

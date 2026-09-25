@@ -550,6 +550,11 @@ bool TimeTracker::retryUnsavedDurations()
  */
 void TimeTracker::startTimer(const QDateTime& now, TransitionCause cause)
 {
+    if (shutdown_called_) {
+        Logger::Log("[TIMER] Start refused: shutdown in progress, until cancelShutdown()");
+        return;
+    }
+
     // Clear autopause flag at the top of startTimer so both Pause→Activity
     // and None→Activity paths start with a clean state.
     autopause_pending_resume_ = false;
@@ -656,7 +661,6 @@ void TimeTracker::startTimer(const QDateTime& now, TransitionCause cause)
         }
         day_boundary_watcher_.armScheduledStop(now);
         Logger::Log("[TIMER] >> TimeTracker started");
-        shutdown_called_ = false;
         emitTransition(Mode::None, Mode::Activity, cause);
         return;
     }

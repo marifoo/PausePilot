@@ -194,8 +194,11 @@ private slots:
     // unfinalized checkpoint row so it cannot be resurrected or dropped as stale.
     void test_A3_watchdog_discard_deletes_checkpoint_row();
 
-    // A4: shutdown_called_ is cleared on fresh session start to prevent silent data loss
-    void test_A4_shutdown_called_cleared_on_fresh_session_start();
+    // C9b: shutdown is terminal until cancelShutdown() -- Start is refused
+    // (button and lock-resume) while shutdown_called_ is set.
+    void test_C9b_start_refused_after_shutdown_until_cancel();
+    void test_C9b_start_refused_does_not_retry_pending_commit();
+    void test_C9b_lock_resume_refused_after_shutdown();
 
     // F2: a late (post-resume) stop that crosses midnight must discard the
     // in-flight segment's checkpoint row itself, not rely on the watchdog path.

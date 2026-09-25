@@ -2,6 +2,7 @@
 #include "fakesessionstore.h"
 #include "fakeclock.h"
 #include "shutdowncoordinator.h"
+#include <QCoreApplication>
 #include <QtTest>
 
 using TestCommon::createSettingsFile;
@@ -189,6 +190,7 @@ void ShutdownCoordinatorTest::test_K_cancelShutdown_allows_second_shutdown()
 
     // User keeps working: a fresh session starts.
     tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
     clock_->advance(20);
 
     fakeDb.callLog.clear();
@@ -282,6 +284,57 @@ void ShutdownCoordinatorTest::test_N_restart_during_pump_is_restopped()
 
     QVERIFY2(tracker.isStopped(),
              "a timer restarted during the shutdown pump must be re-stopped");
+}
+
+// ============================================================================
+// C9b: shutdown is terminal until cancelShutdown() -- a Start dispatched
+// directly, or queued to fire after run() returns, is refused. A second
+// run() just returns the cached result -- no extra marker/flush call.
+// ============================================================================
+
+void ShutdownCoordinatorTest::test_C9b_start_refused_after_run_direct_and_queued()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+
+    tracker.useTimerViaButton(Button::Start);
+    clock_->advance(20);
+
+    const DrainResult first = coordinator.run(ShutdownMode::Direct);
+    QVERIFY(first.clean());
+    QVERIFY(tracker.wasShutDown());
+
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
+    const int commitCountAfterShutdown = fakeDb.callLog.count("commitSession");
+
+    // Act: a direct Start after shutdown is refused.
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isStopped());
+    QVERIFY(tracker.wasShutDown());
+    QCOMPARE(transitionedSpy.count(), 0);
+    QCOMPARE(fakeDb.callLog.count("commitSession"), commitCountAfterShutdown);
+
+    // Act: a Start queued to fire on the next event-loop turn is also refused.
+    QTimer::singleShot(0, [&tracker]() {
+        tracker.useTimerViaButton(Button::Start);
+    });
+    QCoreApplication::processEvents();
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(transitionedSpy.count(), 0);
+
+    // Act: a second run() returns the cached result -- no extra work.
+    fakeDb.callLog.clear();
+    const DrainResult second = coordinator.run(ShutdownMode::Direct);
+
+    // Assert
+    QVERIFY(second.clean());
+    QVERIFY(!fakeDb.callLog.contains("flushToDisc"));
+    QVERIFY(!fakeDb.callLog.contains("setLastCleanShutdownMarker"));
 }
 
 // ============================================================================
