@@ -2805,17 +2805,20 @@ void DatabaseTest::test_schema_status_ready_recreates_missing_idx_start_utc()
     manager.closeConnection_dbg();
 }
 
-void DatabaseTest::test_schema_status_ready_creates_missing_app_settings_and_idx_segment_id()
+void DatabaseTest::test_schema_status_ready_enforces_unique_segment_id()
 {
-    // A valid existing DB that is missing app_settings and idx_segment_id must
-    // have them created on the Ready path (checkSchemaOnStartup ~:376-392).
+    // Arrange: a valid existing DB that is missing app_settings must have it
+    // created on the Ready path (checkSchemaOnStartup). The UNIQUE(segment_id)
+    // constraint (not an explicit idx_segment_id index) enforces segment_id
+    // uniqueness. A freshly created DB via ensureSchema should have no
+    // idx_segment_id either.
     resetDatabaseFile();
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
 
-    // Seed: create only the durations table with the full valid schema
-    // (columns + UNIQUE(segment_id) constraint), but no app_settings and no idx_segment_id.
+    // Arrange: create only the durations table with the full valid schema
+    // (columns + UNIQUE(segment_id) constraint), but no app_settings.
     const QString seedConn = "ready_additive_ddl_seed";
     {
         QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", seedConn);
@@ -2837,10 +2840,11 @@ void DatabaseTest::test_schema_status_ready_creates_missing_app_settings_and_idx
     }
     QSqlDatabase::removeDatabase(seedConn);
 
+    // Act: construct the store and check schema on startup.
     SqliteSessionStore manager(settings);
     QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Ready);
 
-    // Verify app_settings and idx_segment_id were created.
+    // Assert: app_settings was created.
     QVERIFY(manager.ensureOpen_dbg());
     QSqlQuery verify(manager.rawDb_dbg());
     QVERIFY(verify.exec(
@@ -2849,12 +2853,43 @@ void DatabaseTest::test_schema_status_ready_creates_missing_app_settings_and_idx
     QVERIFY(verify.next());
     QCOMPARE(verify.value(0).toInt(), 1);
 
+    // Assert: idx_segment_id does NOT exist (unique constraint handles it).
     QVERIFY(verify.exec(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_segment_id'"
     ));
     QVERIFY(verify.next());
-    QCOMPARE(verify.value(0).toInt(), 1);
+    QCOMPARE(verify.value(0).toInt(), 0);
+
+    // Assert: inserting a duplicate segment_id fails.
+    QSqlQuery insert1(manager.rawDb_dbg());
+    insert1.prepare(
+        "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+        "VALUES (:segment_id, 0, '2024-01-01T00:00:00.000', '2024-01-01T01:00:00.000', 0)"
+    );
+    insert1.bindValue(":segment_id", "test-segment-1");
+    QVERIFY(insert1.exec());
+
+    QSqlQuery insert2(manager.rawDb_dbg());
+    insert2.prepare(
+        "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+        "VALUES (:segment_id, 0, '2024-01-01T01:00:00.000', '2024-01-01T02:00:00.000', 0)"
+    );
+    insert2.bindValue(":segment_id", "test-segment-1");
+    QVERIFY(!insert2.exec()); // Should fail due to UNIQUE constraint
+
     manager.closeConnection_dbg();
+
+    // Assert: a freshly created DB (ensureSchema path) has no idx_segment_id.
+    resetDatabaseFile();
+    SqliteSessionStore freshManager(settings);
+    QVERIFY(freshManager.ensureOpen_dbg());
+    QSqlQuery freshVerify(freshManager.rawDb_dbg());
+    QVERIFY(freshVerify.exec(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_segment_id'"
+    ));
+    QVERIFY(freshVerify.next());
+    QCOMPARE(freshVerify.value(0).toInt(), 0);
+    freshManager.closeConnection_dbg();
 }
 
 void DatabaseTest::test_schema_status_inaccessible_readonly_file()

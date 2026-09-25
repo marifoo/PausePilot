@@ -121,7 +121,7 @@ private slots:
     void test_schema_status_outdated_missing_column();
     void test_schema_status_outdated_missing_unique_constraint();
     void test_schema_status_ready_recreates_missing_idx_start_utc();
-    void test_schema_status_ready_creates_missing_app_settings_and_idx_segment_id();
+    void test_schema_status_ready_enforces_unique_segment_id();
     void test_schema_status_inaccessible_readonly_file();
 
     // TimeTracker::initializeFromStore isolation: no side effects before recovery is called

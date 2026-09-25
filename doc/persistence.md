@@ -42,8 +42,8 @@ The schema is created on first open by `ensureSchema` in
 
 Indices: `idx_start_utc` on `durations.start_utc`, a partial index
 restricted to `WHERE is_finalized = 1` (used by `hasEntriesForDate` and
-orphan overlap probing), and `idx_segment_id` on `durations.segment_id`
-(used by every checkpoint/upsert write path).
+orphan overlap probing). Segment ID lookups and upserts use the implicit
+unique index created by the `UNIQUE(segment_id)` constraint.
 
 Journal mode is the SQLite default (rollback journal, **not** WAL).
 Single-process, single-threaded apps gain nothing from WAL, and rollback

@@ -216,7 +216,7 @@ private:
     bool ensureSettingsTable();
     // A4 (R05-001): the discard_intents table is a durable tombstone recording
     // that the engine has deliberately rejected a segment. Additive DDL, safe
-    // to (re)create on any DB (mirrors idx_segment_id/idx_start_utc).
+    // to (re)create on any DB (mirrors idx_start_utc).
     bool ensureDiscardIntentsTable();
     // Loads all durable discard-intent segment ids. nullopt on a real DB error
     // (distinct from "table empty").

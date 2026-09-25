@@ -318,11 +318,6 @@ bool SqliteSessionStore::ensureSchema()
         Logger::Log("[DB] Warning: Failed to ensure discard_intents table");
     }
 
-    QSqlQuery segmentIndexQuery(db);
-    if (!segmentIndexQuery.exec("CREATE INDEX IF NOT EXISTS idx_segment_id ON durations(segment_id)")) {
-        Logger::Log("[DB] Warning: Failed to create segment_id index: " + segmentIndexQuery.lastError().text());
-    }
-
     QSqlQuery startUtcIndexQuery(db);
     if (!startUtcIndexQuery.exec(QString("CREATE INDEX IF NOT EXISTS %1").arg(kIdxStartUtcTail))) {
         Logger::Log("[DB] Warning: Failed to create start_utc index: " + startUtcIndexQuery.lastError().text());
@@ -543,7 +538,7 @@ SchemaStatus SqliteSessionStore::checkSchemaOnStartup()
 
     // Additive DDL that is safe to (re)create on any validated existing DB.
     // These objects are absent when upgrading from older app versions that
-    // pre-date app_settings / idx_segment_id.  Running them here (after
+    // pre-date app_settings.  Running them here (after
     // validation passes) ensures no DDL touches an incompatible DB.
     //
     // D8 (R06-003): unlike the other additive objects, app_settings is not
@@ -560,13 +555,6 @@ SchemaStatus SqliteSessionStore::checkSchemaOnStartup()
     if (!ensureDiscardIntentsTable()) {
         Logger::Log("[DB] Warning: Failed to ensure discard_intents table on existing DB");
         // Non-fatal: log and continue (see ensureSchema() for rationale).
-    }
-
-    {
-        QSqlQuery segmentIndexQuery(db);
-        if (!segmentIndexQuery.exec("CREATE INDEX IF NOT EXISTS idx_segment_id ON durations(segment_id)")) {
-            Logger::Log("[DB] Warning: Failed to create segment_id index: " + segmentIndexQuery.lastError().text());
-        }
     }
 
     // (Re)create idx_start_utc if absent or just dropped above for having a
