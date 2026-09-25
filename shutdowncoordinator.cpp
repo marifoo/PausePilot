@@ -2,19 +2,10 @@
 #include "timetracker.h"
 #include "sessionstore.h"
 #include "logger.h"
-#include <QEventLoop>
-#include <QTimer>
 
 ShutdownCoordinator::ShutdownCoordinator(TimeTracker& timetracker, SessionStore& db)
     : timetracker_(timetracker), db_(db), shutdown_completed_(false)
 {
-}
-
-void ShutdownCoordinator::pumpEvents(int budgetMs)
-{
-    QEventLoop loop;
-    QTimer::singleShot(budgetMs, &loop, &QEventLoop::quit);
-    loop.exec();
 }
 
 void ShutdownCoordinator::cancelShutdown()
@@ -74,34 +65,21 @@ DrainResult ShutdownCoordinator::finishDrain(DrainResult result)
     return result;
 }
 
-DrainResult ShutdownCoordinator::run(ShutdownMode mode)
+DrainResult ShutdownCoordinator::run()
 {
     if (shutdown_completed_) {
         Logger::Log("[TIMER] Shutdown already completed, skipping");
         return last_result_;
     }
-    // Set the guard immediately after the check: a re-entrant run() dispatched
-    // inside pumpEvents(150) below must be short-circuited by the guard above,
-    // otherwise it would flush (and pump) a second time.
+    // Set the guard immediately after the check: any Start dispatched once
+    // run() returns (e.g. from a queued signal) must be refused by
+    // TimeTracker's own terminal shutdown_called_ flag (C9b) rather than
+    // reopening this drain.
     shutdown_completed_ = true;
 
-    Logger::Log(QString("[TIMER] Shutdown requested (mode=%1)")
-                .arg(mode == ShutdownMode::Direct ? "Direct" : "DrainEvents"));
+    Logger::Log("[TIMER] Shutdown requested");
 
-    DrainResult result = timetracker_.drainForShutdown();
-
-    if (mode == ShutdownMode::DrainEvents) {
-        // Normal shutdown: pump the event loop so connected signals
-        // (GUI sync, checkpoint flush) can fire before we proceed.
-        pumpEvents(150);
-        // Pump re-entrancy: a queued START click dispatched inside pumpEvents()
-        // can restart the timer after the drain. Re-check and re-drain so we
-        // never leave a live segment behind after shutdown.
-        if (!timetracker_.isStopped()) {
-            Logger::Log("[TIMER] TimeTracker restarted during shutdown pump; re-stopping");
-            result = timetracker_.drainForShutdown();
-        }
-    }
+    const DrainResult result = timetracker_.drainForShutdown();
 
     last_result_ = finishDrain(result);
     return last_result_;

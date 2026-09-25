@@ -5,13 +5,6 @@
 
 class TimeTracker;
 
-/// Controls which shutdown path ShutdownCoordinator::run() takes.
-/// DrainEvents: pump the Qt event loop for 150 ms so queued signals
-///              (GUI sync, checkpoint flush) can fire before cleanup.
-/// Direct:      skip the event-loop pump — required when the OS event loop
-///              is restricted (Windows WM_QUERYENDSESSION / WM_ENDSESSION).
-enum class ShutdownMode { DrainEvents, Direct };
-
 class ShutdownCoordinator
 {
 public:
@@ -21,7 +14,7 @@ public:
     /// internal completion flag; a second call is a no-op that returns the
     /// previous result). Returns the typed drain outcome so MainWin can
     /// decide whether to present a Retry/Exit Anyway choice.
-    DrainResult run(ShutdownMode mode = ShutdownMode::DrainEvents);
+    DrainResult run();
 
     /// One additional drain attempt requested by the user via Retry, after
     /// run() reported an incomplete drain. Not guarded by run()'s completion
@@ -43,7 +36,6 @@ public:
     void cancelShutdown();
 
 private:
-    void pumpEvents(int budgetMs);
     /// Shared tail used by both run() and retryDrain(): iff the drain
     /// result is clean, invokes the store's single durable shutdown
     /// operation (D6: marker write + FULL durability barrier); a failure

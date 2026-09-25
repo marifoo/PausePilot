@@ -1775,7 +1775,7 @@ void HistoryDialogTest::test_D5_dialog_opened_after_cancelShutdown_saves_success
     // dialog is ever opened.
     tracker.useTimerViaButton(Button::Start);
     clock.advance(20);
-    coordinator.run(ShutdownMode::Direct);
+    coordinator.run();
     coordinator.cancelShutdown();
     QVERIFY(!tracker.wasShutDown());
 
@@ -1830,7 +1830,7 @@ void HistoryDialogTest::test_D5_dialog_spanning_cancelled_shutdown_refuses_save(
     // WM_QUERYENDSESSION: the OS runs the Direct shutdown while the dialog
     // is still open (a nested modal event loop does not block nativeEvent
     // delivery). It stops and finalizes the live segment the dialog never saw.
-    coordinator.run(ShutdownMode::Direct);
+    coordinator.run();
     QVERIFY(tracker.wasShutDown());
     // WM_ENDSESSION(FALSE): the shutdown/logoff is cancelled.
     coordinator.cancelShutdown();
@@ -2819,7 +2819,7 @@ void HistoryDialogTest::test_dialog_closes_on_shutdown_and_stays_closed_after_ca
     fakeDb.callLog.clear();
 
     // Act: run shutdown, then cancel it.
-    coordinator.run(ShutdownMode::DrainEvents);
+    coordinator.run();
     coordinator.cancelShutdown();
 
     // Assert: the dialog closed (revoked).

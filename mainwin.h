@@ -11,6 +11,13 @@
 #include "sessionstore.h"
 #include "shutdowncoordinator.h"
 
+/// Controls which shutdown path MainWin::shutdown() takes.
+/// Interactive: normal quit path; on drain failure, shows the Retry / Exit
+///              Anyway modal.
+/// Direct:      OS-forced shutdown path -- no modal, since the OS event loop
+///              is restricted (Windows WM_QUERYENDSESSION / WM_ENDSESSION).
+enum class ShutdownMode { Interactive, Direct };
+
 /// D5 (R15-002): the pure decision produced from a Windows shutdown-related
 /// native message, independent of MSG/WPARAM types so it is unit-testable on
 /// any platform (mirrors LockStateWatcher::translateWtsSessionState, D3).

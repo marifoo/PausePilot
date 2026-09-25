@@ -222,7 +222,7 @@ void MainWin::start()
 /**
  * Delegates the application shutdown sequence to ShutdownCoordinator.
  *
- * Normal quit (DrainEvents): one drain attempt; on failure, a modal
+ * Normal quit (Interactive): one drain attempt; on failure, a modal
  * Retry / Exit Anyway choice is shown. Each Retry performs exactly one new
  * drain attempt. Exit Anyway stops asking and lets the process terminate
  * without a clean marker, leaving existing durable checkpoints untouched.
@@ -237,12 +237,12 @@ void MainWin::start()
  * OS-forced shutdown (Direct): exactly one attempt, no warning and no modal
  * on failure -- the OS event loop is restricted during this path.
  *
- * @param mode DrainEvents for normal quit; Direct for OS-restricted paths
+ * @param mode Interactive for normal quit; Direct for OS-restricted paths
  *             (Windows WM_QUERYENDSESSION / WM_ENDSESSION).
  */
 void MainWin::shutdown(ShutdownMode mode)
 {
-	DrainResult result = shutdown_coordinator_.run(mode);
+	DrainResult result = shutdown_coordinator_.run();
 	if (mode == ShutdownMode::Direct) {
 		return;
 	}
@@ -280,14 +280,14 @@ void MainWin::shutdown(ShutdownMode mode)
 void MainWin::onAboutToQuit()
 {
 	Logger::Log("[TIMER] AboutToQuit received");
-	shutdown(ShutdownMode::DrainEvents);
+	shutdown(ShutdownMode::Interactive);
 }
 
 void MainWin::closeEvent(QCloseEvent *event)
 {
 	Logger::Log("[TIMER] CloseEvent received");
 	// Handle manual window closing (Alt+F4, X button, etc.)
-	shutdown(ShutdownMode::DrainEvents);
+	shutdown(ShutdownMode::Interactive);
 	event->accept();
 }
 

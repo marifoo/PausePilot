@@ -33,29 +33,23 @@ private slots:
     // Test H: idempotent — second run() is a no-op
     void test_H_idempotent_second_run_is_noop();
 
-    // Test I: force-direct path skips the retry loop
-    void test_I_force_direct_skips_retry_loop();
-
-    // Test J: pump actually drains queued events
-    void test_J_pump_drains_queued_events();
-
     // Test K: cancelShutdown() re-arms the guard so a second shutdown
     // flushes again (A4), and clears the tracker's terminal flag (D5)
     void test_K_cancelShutdown_allows_second_shutdown();
 
-    // Test L: a re-entrant run() dispatched inside the pump flushes only once (A14)
-    void test_L_nested_run_during_pump_flushes_once();
-
     // Test M: timer already stopped -- coordinator still writes marker before flush (D6)
     void test_M_marker_before_flush_when_already_stopped();
 
-    // Test N: a START click during the pump is re-stopped (A14 pump re-entrancy)
-    void test_N_restart_during_pump_is_restopped();
-
-    // C9b: shutdown is terminal -- both a direct and a pump-queued Start
-    // after run() are refused, and a second run() just returns the cached
+    // C9b: shutdown is terminal -- both a direct Start and one queued after
+    // run() returns are refused, and a second run() just returns the cached
     // result with no extra marker/flush call.
     void test_C9b_start_refused_after_run_direct_and_queued();
+
+    // C9a: a Start queued (via QTimer::singleShot(0, ...)) before run() is
+    // called must not be dispatched by run() itself -- run() no longer pumps
+    // the event loop. Only once the caller's own processEvents() runs does
+    // it dispatch, and C9b's terminal guard refuses it.
+    void test_C9a_run_does_not_dispatch_start_queued_before_run();
 
     // ========================================================================
     // A3 (R11-001): ShutdownCoordinator::run()/retryDrain() consume the typed
@@ -70,9 +64,6 @@ private slots:
     void test_A3_run_incomplete_then_retryDrain_fails();
     // Already-stopped with no pending payload: a no-op success.
     void test_A3_run_already_stopped_no_pending_is_noop_success();
-    // Direct and DrainEvents modes produce the same persistence result for
-    // an identical failing setup.
-    void test_A3_direct_and_drainevents_modes_produce_same_result();
     // Forced OS shutdown (Direct) on failure: no user warning, no marker.
     void test_A3_direct_mode_failure_emits_no_warning_and_no_marker();
 

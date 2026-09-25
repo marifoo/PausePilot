@@ -850,8 +850,7 @@ void AppShellTest::test_two_simultaneous_starts_have_one_owner_and_one_loser()
 namespace {
 
 // Pumps the event loop in short bursts until predicate() is true or
-// budgetMs elapses, mirroring ShutdownCoordinator::pumpEvents()'s bounded
-// style rather than a real timed wait.
+// budgetMs elapses, in place of a real timed wait.
 bool pumpUntil(const std::function<bool()>& predicate, int budgetMs)
 {
     QElapsedTimer timer;

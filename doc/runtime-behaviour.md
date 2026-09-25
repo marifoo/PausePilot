@@ -157,14 +157,14 @@ The shutdown sequence is owned by `ShutdownCoordinator`. `MainWin::shutdown(Shut
 is the single entry point into it, reached from three places:
 
 - Normal close (`MainWin::closeEvent`, tray-menu Quit) calls
-  `shutdown(ShutdownMode::DrainEvents)` directly; `QCoreApplication::aboutToQuit`
+  `shutdown(ShutdownMode::Interactive)` directly; `QCoreApplication::aboutToQuit`
   → `MainWin::onAboutToQuit` calls it again once the last window closes. Both
   reach the same idempotent `ShutdownCoordinator::run`, so a normal quit
   always runs the sequence twice, harmlessly.
 - Windows session end (`WM_QUERYENDSESSION` / `WM_ENDSESSION` handled in
   `MainWin::nativeEvent`) → `shutdown(ShutdownMode::Direct)`, which skips the
-  event-loop pump since the OS event loop is restricted during this path.
-  A `WM_ENDSESSION` with `wParam == 0` means the shutdown was *cancelled*:
+  Retry/Exit Anyway modal since the OS event loop is restricted during this
+  path. A `WM_ENDSESSION` with `wParam == 0` means the shutdown was *cancelled*:
   `MainWin::nativeEvent` calls `ShutdownCoordinator::cancelShutdown()`
   instead, which clears the `run()` guard and `TimeTracker`'s shutdown-latch
   so the application returns to an ordinary, fully usable stopped state and
@@ -198,9 +198,8 @@ sequenceDiagram
     participant S as SessionStore
 
     Caller->>MW: onAboutToQuit() / shutdown(mode)
-    MW->>SC: run(mode)
+    MW->>SC: run()
     SC->>T: drainForShutdown()
-    Note over SC: pump event loop ~150 ms<br/>(skipped when mode == Direct)
     alt drain clean
         SC->>S: markCleanShutdown()
         Note over S: writes marker, then (only on success)<br/>runs the FULL durability barrier
@@ -213,7 +212,7 @@ sequenceDiagram
 
 `ShutdownCoordinator::run` is idempotent (`shutdown_completed_` guard) so
 multiple triggers fire it exactly once (until `cancelShutdown()` re-arms it).
-On a `DrainEvents` failure `MainWin::shutdown` shows a modal Retry / Exit
+On an `Interactive` failure `MainWin::shutdown` shows a modal Retry / Exit
 Anyway choice; each Retry calls `ShutdownCoordinator::retryDrain()` for one
 new attempt. The clean-shutdown marker is written
 by exactly one owner, `SqliteSessionStore::markCleanShutdown()`, and only

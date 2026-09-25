@@ -454,11 +454,10 @@ void IntegrationTest::test_F_shutdown_sequence_stop_flush_marker()
 {
     // Test F: shutdown sequence end-to-end through ShutdownCoordinator.
     //
-    // ShutdownCoordinator::run(DrainEvents) owns the sequence:
+    // ShutdownCoordinator::run() owns the sequence:
     //   1. timetracker_.drainForShutdown()  — stops the engine and retries any
     //                                         pending commit/discard intent (A3/A4)
-    //   2. pumpEvents(150)                   — drains queued signals
-    //   3. db_.markCleanShutdown(), iff the drain was clean (D6) — one store
+    //   2. db_.markCleanShutdown(), iff the drain was clean (D6) — one store
     //      operation that writes the marker then runs the FULL durability
     //      barrier (setLastCleanShutdownMarker() then flushToDisc(), in that
     //      order, inside FakeSessionStore's/SqliteSessionStore's own composition)
@@ -471,13 +470,12 @@ void IntegrationTest::test_F_shutdown_sequence_stop_flush_marker()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    // D15/F1 (part 4, B2 class): coordinator.run() below calls
-    // ShutdownCoordinator's real pumpEvents(150) -- the same
-    // Start()+real-armScheduledStop()+real-event-pump shape that made
-    // ShutdownCoordinatorTest's suite dangerous (see that file's header
-    // comment). Pinned for the same reason, even though this one test's own
-    // window is sub-second. FakeClock declared before TimeTracker so it
-    // outlives it (see the outlives-tracker note at test_integration.cpp:614).
+    // D15/F1 (part 4, B2 class): Start() arms a real armScheduledStop()
+    // QTimer (timetracker.cpp:654) that must not fire during this test's
+    // run -- pinned via FakeClock for the same reason as
+    // ShutdownCoordinatorTest's suite (see that file's header comment).
+    // FakeClock declared before TimeTracker so it outlives it (see the
+    // outlives-tracker note at test_integration.cpp:614).
     FakeClock clock(fixedNow());
     TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
@@ -492,7 +490,7 @@ void IntegrationTest::test_F_shutdown_sequence_stop_flush_marker()
     fakeDb.callLog.clear();
 
     // Act — drive the production lifecycle owner.
-    coordinator.run(ShutdownMode::DrainEvents);
+    coordinator.run();
 
     // Assert: engine stopped.
     QVERIFY(tracker.isStopped());
@@ -1441,7 +1439,7 @@ void IntegrationTest::test_A3_exit_anyway_leaves_checkpoint_untouched_for_recove
         QVERIFY(dbFile.setPermissions(QFile::ReadOwner | QFile::ReadUser | QFile::ReadGroup | QFile::ReadOther));
 
         ShutdownCoordinator coordinator(tracker, db);
-        const DrainResult result = coordinator.run(ShutdownMode::DrainEvents);
+        const DrainResult result = coordinator.run();
 
         QVERIFY(!result.clean());
         QVERIFY(tracker.hasPendingCommit_dbg());
@@ -1517,7 +1515,7 @@ void IntegrationTest::test_A4_watchdog_discard_failure_survives_reopen_never_cre
         db.setForceDiscardRowDeleteFailure_dbg(true);
 
         ShutdownCoordinator coordinator(tracker, db);
-        const DrainResult result = coordinator.run(ShutdownMode::DrainEvents);
+        const DrainResult result = coordinator.run();
 
         QVERIFY(!result.clean());
         QVERIFY(tracker.hasPendingDiscards_dbg());
@@ -1701,7 +1699,7 @@ void IntegrationTest::test_D6_real_sqlite_shutdown_marker_uses_injected_clock_an
         clock.setNow(shutdownTime);
 
         // Act: a real shutdown through the production owner.
-        const DrainResult result = coordinator.run(ShutdownMode::DrainEvents);
+        const DrainResult result = coordinator.run();
         QVERIFY(result.clean());
 
         // Assert: the marker holds the STORE's injected clock reading, not

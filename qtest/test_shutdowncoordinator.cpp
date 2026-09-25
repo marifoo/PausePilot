@@ -61,17 +61,21 @@ void ShutdownCoordinatorTest::test_G_happy_path_stop_flush_marker()
 
     fakeDb.callLog.clear();
 
-    coordinator.run(ShutdownMode::DrainEvents);
+    coordinator.run();
 
     QVERIFY(!tracker.getOngoingDuration().has_value());
+    QVERIFY(fakeDb.callLog.contains("commitSession"));
     QVERIFY(fakeDb.callLog.contains("flushToDisc"));
     QVERIFY(fakeDb.callLog.contains("setLastCleanShutdownMarker"));
 
-    int flushIdx  = fakeDb.callLog.lastIndexOf("flushToDisc");
-    int markerIdx = fakeDb.callLog.lastIndexOf("setLastCleanShutdownMarker");
-    // D6: markCleanShutdown() writes the marker, then only on success runs
-    // the FULL barrier -- so marker must precede flush.
-    QVERIFY2(markerIdx < flushIdx, "marker must precede flush (D6: markCleanShutdown writes marker then barrier)");
+    int commitIdx = fakeDb.callLog.indexOf("commitSession");
+    int markerIdx = fakeDb.callLog.indexOf("setLastCleanShutdownMarker");
+    int flushIdx  = fakeDb.callLog.indexOf("flushToDisc");
+    // C9a: run() is now fully synchronous (no event-loop pump between the
+    // drain and finishDrain()) -- assert the whole sequence's order:
+    // drain (commitSession) then the marker, then the FULL barrier.
+    QVERIFY2(commitIdx < markerIdx && markerIdx < flushIdx,
+             "run() must be synchronous: commitSession, then marker, then barrier, in that order");
 }
 
 // ============================================================================
@@ -91,72 +95,14 @@ void ShutdownCoordinatorTest::test_H_idempotent_second_run_is_noop()
     tracker.useTimerViaButton(Button::Start);
     clock_->advance(20);
 
-    coordinator.run(ShutdownMode::DrainEvents);
+    coordinator.run();
 
     fakeDb.callLog.clear();
 
-    coordinator.run(ShutdownMode::DrainEvents);
+    coordinator.run();
 
     QVERIFY(!fakeDb.callLog.contains("flushToDisc"));
     QVERIFY(!fakeDb.callLog.contains("setLastCleanShutdownMarker"));
-}
-
-// ============================================================================
-// Test J — pump drains queued events (regression for midnight wrap)
-// ============================================================================
-
-void ShutdownCoordinatorTest::test_J_pump_drains_queued_events()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-    ShutdownCoordinator coordinator(tracker, fakeDb);
-
-    // Queue a zero-delay slot; it only fires if the event loop is pumped.
-    bool slotRan = false;
-    QTimer::singleShot(0, [&slotRan]() { slotRan = true; });
-
-    // run(DrainEvents) calls pumpEvents(150) before flushToDisc.
-    coordinator.run(ShutdownMode::DrainEvents);
-
-    QVERIFY2(slotRan, "pumpEvents must drain queued events");
-}
-
-// ============================================================================
-// Test I — force-direct path skips retry loop (flushToDisc still happens)
-// ============================================================================
-
-void ShutdownCoordinatorTest::test_I_force_direct_skips_retry_loop()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
-    ShutdownCoordinator coordinator(tracker, fakeDb);
-
-    tracker.useTimerViaButton(Button::Start);
-    clock_->advance(20);
-    QVERIFY(tracker.getOngoingDuration().has_value());
-
-    fakeDb.callLog.clear();
-
-    // The Direct path must not block for 150 ms (no processEvents pump).
-    // We measure elapsed time: run(Direct) with FakeDb completes well under 50 ms.
-    QElapsedTimer elapsed;
-    elapsed.start();
-    coordinator.run(ShutdownMode::Direct);
-    qint64 elapsedMs = elapsed.elapsed();
-
-    QVERIFY2(elapsedMs < 100, qPrintable(QString("force-direct took %1 ms; expected < 100 ms").arg(elapsedMs)));
-    QVERIFY(!tracker.getOngoingDuration().has_value());
-    QVERIFY(fakeDb.callLog.contains("flushToDisc"));
-    QVERIFY(fakeDb.callLog.contains("setLastCleanShutdownMarker"));
-    QVERIFY2(fakeDb.callLog.lastIndexOf("setLastCleanShutdownMarker") < fakeDb.callLog.lastIndexOf("flushToDisc"),
-             "marker must precede flush (D6: markCleanShutdown writes marker then barrier)");
 }
 
 // ============================================================================
@@ -180,7 +126,7 @@ void ShutdownCoordinatorTest::test_K_cancelShutdown_allows_second_shutdown()
     tracker.useTimerViaButton(Button::Start);
     clock_->advance(20);
 
-    coordinator.run(ShutdownMode::DrainEvents);
+    coordinator.run();
     QVERIFY(fakeDb.callLog.contains("flushToDisc"));
     QVERIFY(tracker.wasShutDown());
 
@@ -194,37 +140,7 @@ void ShutdownCoordinatorTest::test_K_cancelShutdown_allows_second_shutdown()
     clock_->advance(20);
 
     fakeDb.callLog.clear();
-    coordinator.run(ShutdownMode::DrainEvents);
-
-    QCOMPARE(fakeDb.callLog.count("flushToDisc"), 1);
-}
-
-// ============================================================================
-// Test L — a re-entrant run() dispatched inside pumpEvents() flushes only once
-// (A14: shutdown_completed_ is set immediately after the guard check)
-// ============================================================================
-
-void ShutdownCoordinatorTest::test_L_nested_run_during_pump_flushes_once()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
-    ShutdownCoordinator coordinator(tracker, fakeDb);
-
-    tracker.useTimerViaButton(Button::Start);
-    clock_->advance(20);
-
-    fakeDb.callLog.clear();
-
-    // Queue a re-entrant run() that fires while the outer run() is pumping.
-    QTimer::singleShot(0, [&coordinator]() {
-        coordinator.run(ShutdownMode::DrainEvents);
-    });
-
-    coordinator.run(ShutdownMode::DrainEvents);
+    coordinator.run();
 
     QCOMPARE(fakeDb.callLog.count("flushToDisc"), 1);
 }
@@ -249,41 +165,12 @@ void ShutdownCoordinatorTest::test_M_marker_before_flush_when_already_stopped()
     // drainForShutdown() reports clean immediately.
     fakeDb.callLog.clear();
 
-    coordinator.run(ShutdownMode::DrainEvents);
+    coordinator.run();
 
     QVERIFY(fakeDb.callLog.contains("flushToDisc"));
     QVERIFY(fakeDb.callLog.contains("setLastCleanShutdownMarker"));
     QVERIFY2(fakeDb.callLog.lastIndexOf("setLastCleanShutdownMarker") < fakeDb.callLog.lastIndexOf("flushToDisc"),
              "marker must precede flush (D6: markCleanShutdown writes the marker, then the barrier)");
-}
-
-// ============================================================================
-// Test N — a START click dispatched inside pumpEvents() restarts the timer;
-// the coordinator must re-stop it so no live segment survives shutdown.
-// ============================================================================
-
-void ShutdownCoordinatorTest::test_N_restart_during_pump_is_restopped()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
-    ShutdownCoordinator coordinator(tracker, fakeDb);
-
-    tracker.useTimerViaButton(Button::Start);
-    clock_->advance(20);
-
-    // Queue a START click that fires inside pumpEvents(150), after shutdown().
-    QTimer::singleShot(0, [&tracker]() {
-        tracker.useTimerViaButton(Button::Start);
-    });
-
-    coordinator.run(ShutdownMode::DrainEvents);
-
-    QVERIFY2(tracker.isStopped(),
-             "a timer restarted during the shutdown pump must be re-stopped");
 }
 
 // ============================================================================
@@ -305,7 +192,7 @@ void ShutdownCoordinatorTest::test_C9b_start_refused_after_run_direct_and_queued
     tracker.useTimerViaButton(Button::Start);
     clock_->advance(20);
 
-    const DrainResult first = coordinator.run(ShutdownMode::Direct);
+    const DrainResult first = coordinator.run();
     QVERIFY(first.clean());
     QVERIFY(tracker.wasShutDown());
 
@@ -329,12 +216,74 @@ void ShutdownCoordinatorTest::test_C9b_start_refused_after_run_direct_and_queued
 
     // Act: a second run() returns the cached result -- no extra work.
     fakeDb.callLog.clear();
-    const DrainResult second = coordinator.run(ShutdownMode::Direct);
+    const DrainResult second = coordinator.run();
 
     // Assert
     QVERIFY(second.clean());
     QVERIFY(!fakeDb.callLog.contains("flushToDisc"));
     QVERIFY(!fakeDb.callLog.contains("setLastCleanShutdownMarker"));
+}
+
+// ============================================================================
+// C9a: run() no longer pumps the event loop, so a Start queued (via
+// QTimer::singleShot(0, ...)) before run() is called must not be dispatched
+// by run() itself -- only once the caller's own event loop turns does it
+// fire, and C9b's terminal guard then refuses it.
+// ============================================================================
+
+void ShutdownCoordinatorTest::test_C9a_run_does_not_dispatch_start_queued_before_run()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([this]() { return clock_->now(); });
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+
+    tracker.useTimerViaButton(Button::Start);
+    clock_->advance(20);
+
+    // Arrange: queue a Start before run() is called.
+    bool startDispatched = false;
+    QTimer::singleShot(0, [&tracker, &startDispatched]() {
+        startDispatched = true;
+        tracker.useTimerViaButton(Button::Start);
+    });
+
+    // Act: run() itself must not dispatch the queued slot -- it no longer
+    // pumps the event loop.
+    const DrainResult result = coordinator.run();
+
+    // Assert: the queued Start has not fired yet, and run()'s own drain
+    // stopped the tracker cleanly.
+    QVERIFY(!startDispatched);
+    QVERIFY(tracker.isStopped());
+    QVERIFY(result.clean());
+
+    // Spy created after run()'s own stop transition, so it only observes
+    // the queued Start's (refused) attempt below.
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
+    const int commitCountBefore = fakeDb.callLog.count("commitSession");
+
+    // Act: only now does the caller's own event loop turn dispatch it.
+    QCoreApplication::processEvents();
+
+    // Assert: it fired, but C9b's terminal guard refuses it -- no new
+    // transition and no new commitSession.
+    QVERIFY(startDispatched);
+    QVERIFY(tracker.isStopped());
+    QVERIFY(tracker.wasShutDown());
+    QCOMPARE(transitionedSpy.count(), 0);
+    QCOMPARE(fakeDb.callLog.count("commitSession"), commitCountBefore);
+
+    // Assert: a second run() returns the cached clean result -- no new
+    // marker/flush call.
+    fakeDb.callLog.clear();
+    const DrainResult second = coordinator.run();
+    QVERIFY(second.clean());
+    QVERIFY(!fakeDb.callLog.contains("setLastCleanShutdownMarker"));
+    QVERIFY(!fakeDb.callLog.contains("flushToDisc"));
 }
 
 // ============================================================================
@@ -357,7 +306,7 @@ void ShutdownCoordinatorTest::test_A3_run_incomplete_then_retryDrain_succeeds()
 
     // Act: the store fails, so run()'s own drain is incomplete.
     fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
-    const DrainResult first = coordinator.run(ShutdownMode::DrainEvents);
+    const DrainResult first = coordinator.run();
     QVERIFY(!first.clean());
     QVERIFY(!fakeDb.callLog.contains("setLastCleanShutdownMarker"));
 
@@ -386,7 +335,7 @@ void ShutdownCoordinatorTest::test_A3_run_incomplete_then_retryDrain_fails()
     clock_->advance(20);
 
     fakeDb.commitSessionResult = SessionStoreResult::transient("still failing");
-    const DrainResult first = coordinator.run(ShutdownMode::DrainEvents);
+    const DrainResult first = coordinator.run();
     QVERIFY(!first.clean());
 
     // Act: Retry, but the store still fails.
@@ -412,47 +361,10 @@ void ShutdownCoordinatorTest::test_A3_run_already_stopped_no_pending_is_noop_suc
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     // TimeTracker never started -> already Mode::None, no pending payload.
-    const DrainResult result = coordinator.run(ShutdownMode::DrainEvents);
+    const DrainResult result = coordinator.run();
 
     QVERIFY(result.clean());
     QVERIFY(fakeDb.callLog.contains("setLastCleanShutdownMarker"));
-}
-
-void ShutdownCoordinatorTest::test_A3_direct_and_drainevents_modes_produce_same_result()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-
-    FakeSessionStore fakeDbDrainEvents;
-    TimeTracker trackerDrainEvents(settings, fakeDbDrainEvents);
-    trackerDrainEvents.setNowProvider_dbg([this]() { return clock_->now(); });
-    ShutdownCoordinator coordinatorDrainEvents(trackerDrainEvents, fakeDbDrainEvents);
-    trackerDrainEvents.useTimerViaButton(Button::Start);
-    clock_->advance(20);
-    fakeDbDrainEvents.commitSessionResult = SessionStoreResult::transient("injected failure");
-    const DrainResult drainEventsResult = coordinatorDrainEvents.run(ShutdownMode::DrainEvents);
-
-    FakeSessionStore fakeDbDirect;
-    TimeTracker trackerDirect(settings, fakeDbDirect);
-    trackerDirect.setNowProvider_dbg([this]() { return clock_->now(); });
-    ShutdownCoordinator coordinatorDirect(trackerDirect, fakeDbDirect);
-    trackerDirect.useTimerViaButton(Button::Start);
-    clock_->advance(20);
-    fakeDbDirect.commitSessionResult = SessionStoreResult::transient("injected failure");
-    const DrainResult directResult = coordinatorDirect.run(ShutdownMode::Direct);
-
-    // Assert: identical persistence outcome regardless of pump mode.
-    QCOMPARE(directResult.clean(), drainEventsResult.clean());
-    QCOMPARE(directResult.category, drainEventsResult.category);
-    QVERIFY(trackerDrainEvents.isStopped());
-    QVERIFY(trackerDirect.isStopped());
-
-    // Cleanup so destruction does not find an unresolved commit.
-    fakeDbDrainEvents.commitSessionResult = SessionStoreResult::success();
-    QVERIFY(coordinatorDrainEvents.retryDrain().clean());
-    fakeDbDirect.commitSessionResult = SessionStoreResult::success();
-    QVERIFY(coordinatorDirect.retryDrain().clean());
 }
 
 void ShutdownCoordinatorTest::test_A3_direct_mode_failure_emits_no_warning_and_no_marker()
@@ -472,7 +384,7 @@ void ShutdownCoordinatorTest::test_A3_direct_mode_failure_emits_no_warning_and_n
     // Act: OS-forced shutdown; the store fails. Per policy, a forced
     // shutdown attempts once and exits with no warning and no clean marker.
     fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
-    const DrainResult result = coordinator.run(ShutdownMode::Direct);
+    const DrainResult result = coordinator.run();
 
     // Assert
     QVERIFY(!result.clean());
@@ -518,7 +430,7 @@ void ShutdownCoordinatorTest::test_A4_forced_shutdown_with_unresolved_discard_wr
     // Act: OS-forced shutdown attempts once; per policy it shows no warning
     // on failure, but it must also NOT write a clean marker -- the discard
     // intent is still unresolved.
-    const DrainResult result = coordinator.run(ShutdownMode::Direct);
+    const DrainResult result = coordinator.run();
 
     // Assert
     QVERIFY(!result.clean());
@@ -549,7 +461,7 @@ void ShutdownCoordinatorTest::test_D5_cancelShutdown_makes_history_available_wit
     // Arrange: an active session shut down as if by WM_QUERYENDSESSION.
     tracker.useTimerViaButton(Button::Start);
     clock_->advance(20);
-    coordinator.run(ShutdownMode::Direct);
+    coordinator.run();
     QVERIFY(tracker.wasShutDown());
 
     // Act: WM_ENDSESSION(FALSE) -- the shutdown was cancelled.
@@ -588,7 +500,7 @@ void ShutdownCoordinatorTest::test_D6_incomplete_drain_skips_marker_but_still_ba
     fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
     fakeDb.callLog.clear();
 
-    const DrainResult result = coordinator.run(ShutdownMode::DrainEvents);
+    const DrainResult result = coordinator.run();
 
     QVERIFY(!result.clean());
     QVERIFY2(fakeDb.callLog.contains("flushToDisc"),
@@ -625,7 +537,7 @@ void ShutdownCoordinatorTest::test_D6_marker_failure_is_not_clean_and_skips_barr
     fakeDb.callLog.clear();
 
     // Act
-    const DrainResult result = coordinator.run(ShutdownMode::DrainEvents);
+    const DrainResult result = coordinator.run();
 
     // Assert: not clean, but the failure is attributed to the marker only --
     // session data itself was drained successfully (Medium-3).
@@ -661,7 +573,7 @@ void ShutdownCoordinatorTest::test_D6_barrier_failure_after_successful_marker_is
     fakeDb.callLog.clear();
 
     // Act
-    const DrainResult result = coordinator.run(ShutdownMode::DrainEvents);
+    const DrainResult result = coordinator.run();
 
     // Assert: marker WAS written (it precedes the barrier), but the whole
     // result is still non-clean since the barrier that must cover it failed
@@ -693,7 +605,7 @@ void ShutdownCoordinatorTest::test_D6_disabled_history_marker_keeps_drain_clean(
     fakeDb.callLog.clear();
 
     // Act
-    const DrainResult result = coordinator.run(ShutdownMode::DrainEvents);
+    const DrainResult result = coordinator.run();
 
     // Assert
     QVERIFY(result.clean());
@@ -709,7 +621,7 @@ void ShutdownCoordinatorTest::test_D5_cancelShutdown_while_already_stopped()
     ShutdownCoordinator coordinator(tracker, fakeDb);
 
     // Arrange: shutdown runs on a tracker that was never started.
-    coordinator.run(ShutdownMode::Direct);
+    coordinator.run();
     QVERIFY(tracker.wasShutDown());
 
     // Act
