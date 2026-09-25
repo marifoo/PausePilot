@@ -1312,6 +1312,7 @@ void TimeTracker::cancelShutdown()
 TimeTracker::ShutdownResult TimeTracker::shutdown()
 {
     QMutexLocker locker(&mutex_);
+    if (dialog_open_) revokeExclusiveEdit();
     shutdown_called_ = true;
     ++shutdown_epoch_;
     if (mode_ != Mode::None) {

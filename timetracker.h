@@ -669,8 +669,9 @@ public:
     struct ShutdownResult {
         bool stopped;     ///< true iff timer is now in Mode::None
     };
-    /// Stops the timer if running and returns the resulting state.
-    /// Thread-safe; may be called multiple times (idempotent on an already-stopped timer).
+    /// Revokes an open History edit first (if any), then stops the timer if running
+    /// and returns the resulting state. Thread-safe; may be called multiple times
+    /// (idempotent on an already-stopped timer).
     ShutdownResult shutdown();
 
     /// Why drainForShutdown() is being called.

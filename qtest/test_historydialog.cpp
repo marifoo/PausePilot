@@ -2798,3 +2798,48 @@ void HistoryDialogTest::test_D1_scheduled_midnight_closes_dialog_and_keeps_cutof
     }
     QSqlDatabase::removeDatabase(QString("test_D1_%1").arg(reinterpret_cast<quintptr>(&db)));
 }
+
+void HistoryDialogTest::test_dialog_closes_on_shutdown_and_stays_closed_after_cancel()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    // FakeClock declared before TimeTracker so it outlives it (lifetime rule).
+    FakeClock clock(QDateTime(QDate::currentDate(), QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(20);
+
+    // Arrange: a completed segment to edit.
+    const QDateTime now = clock.now();
+    tracker.seedCompletedDuration_dbg(
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-150)));
+
+    // Open the dialog and begin an edit.
+    HistoryDialog dialog(tracker, settings);
+    dialog.editSession_dbg().setPageTimeline(0,
+        dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+
+    // Create the finished spy AFTER arranging the dialog, BEFORE the shutdown.
+    QSignalSpy dialogFinished(&dialog, &QDialog::finished);
+
+    fakeDb.callLog.clear();
+
+    // Act: run shutdown, then cancel it.
+    coordinator.run(ShutdownMode::DrainEvents);
+    coordinator.cancelShutdown();
+
+    // Assert: the dialog closed (revoked).
+    QTRY_COMPARE(dialogFinished.count(), 1);
+    QCOMPARE(dialogFinished.last().at(0).toInt(), int(QDialog::Rejected));
+
+    // Assert: retry via accept() is refused by editRevoked_ check.
+    dialog.setResult(QDialog::Accepted);
+    QVERIFY(!dialog.saveChanges());
+    QCOMPARE(fakeDb.callLog.count("replaceAll"), 0);
+    QCOMPARE(dialogFinished.count(), 1); // No finished(Accepted) emitted.
+}

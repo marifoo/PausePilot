@@ -6241,3 +6241,52 @@ void TimerTest::test_D10_onStartPausePressed_cross_midnight_discard_matches_butt
     QCOMPARE(a.cause, b.cause);
     QCOMPARE(a.to, b.to);
 }
+
+void TimerTest::test_shutdown_with_history_open_revokes_before_stopping()
+{
+    // Arrange: event recording vector declared before the tracker (lifetime rule).
+    QStringList events;
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore db;
+    TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Start and begin exclusive edit.
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    // Connect to record event order.
+    QObject::connect(&tracker, &TimeTracker::exclusiveEditRevoked, [&events]() {
+        events.append("revoked");
+    });
+    QObject::connect(&tracker, &TimeTracker::transitioned, [&events](const TimeTracker::Transition& t) {
+        if (t.to == TimeTracker::Mode::None) {
+            events.append(QString("transitioned_none_%1").arg(int(t.cause)));
+        }
+    });
+    QSignalSpy userWarningSpy(&tracker, &TimeTracker::userWarning);
+
+    // Act: shutdown.
+    tracker.shutdown();
+
+    // Assert: revoked once, before transition to None with cause Shutdown.
+    QCOMPARE(events.count(), 2);
+    QCOMPARE(events.at(0), "revoked");
+    QCOMPARE(events.at(1), QString("transitioned_none_%1").arg(int(TimeTracker::TransitionCause::Shutdown)));
+    QVERIFY(!tracker.isDialogOpen_dbg());
+    QCOMPARE(userWarningSpy.count(), 1);
+
+    // Act: second shutdown.
+    userWarningSpy.clear();
+    events.clear();
+    tracker.shutdown();
+
+    // Assert: no additional revoke.
+    QCOMPARE(events.count(), 0);
+    QCOMPARE(userWarningSpy.count(), 0);
+}

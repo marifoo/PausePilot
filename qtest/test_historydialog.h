@@ -166,6 +166,11 @@ private slots:
     // an open edit and closes the dialog.
     // ========================================================================
     void test_D1_scheduled_midnight_closes_dialog_and_keeps_cutoff_segment();
+
+    // ========================================================================
+    // WP6 (midnight_close_plan.md): shutdown revokes an open edit.
+    // ========================================================================
+    void test_dialog_closes_on_shutdown_and_stays_closed_after_cancel();
 };
 
 #endif // TEST_HISTORYDIALOG_H

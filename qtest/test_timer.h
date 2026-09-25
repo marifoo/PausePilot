@@ -515,6 +515,9 @@ private slots:
     // a hand-rolled toggle body that dropped the guard would still pass the
     // three mode rows above.
     void test_D10_onStartPausePressed_cross_midnight_discard_matches_button_dispatch();
+
+    // WP6: shutdown revokes History first.
+    void test_shutdown_with_history_open_revokes_before_stopping();
 };
 
 #endif // TEST_TIMER_H
