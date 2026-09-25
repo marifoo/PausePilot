@@ -263,9 +263,6 @@ private slots:
     // payload identity or the failure category.
     void test_A3_drain_idempotent_repeated_calls_after_success();
     void test_A3_drain_idempotent_repeated_calls_after_failure();
-    // An explicit user Retry is a new attempt, so it reports a fresh message
-    // rather than the one latched by the drain that prompted it.
-    void test_A3_user_retry_reports_fresh_failure_message();
     // The destructor is a no-op on the normal path (drain already resolved).
     void test_A3_destructor_is_noop_after_successful_drain();
 

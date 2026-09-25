@@ -4085,48 +4085,9 @@ void TimerTest::test_A3_drain_idempotent_repeated_calls_after_failure()
     for (size_t i = 0; i < payloadAfterFirst.size(); ++i) {
         QCOMPARE(payloadAfterSecond[i].segment_id.toString(), payloadAfterFirst[i].segment_id.toString());
     }
-    // ...nor the FIRST failure message (plan A3 step 3: an idempotent repeat
-    // must not lose it, even though the store has since reported a new one).
+    // Each call returns that attempt's latest outcome.
     QCOMPARE(first.message, QString("first failure message"));
-    QCOMPARE(second.message, QString("first failure message"));
-
-    // Cleanup so destruction does not find an unresolved commit.
-    fakeDb.commitSessionResult = SessionStoreResult::success();
-    QVERIFY(tracker.drainForShutdown().clean());
-}
-
-// N3 counterpart: an explicit user-driven Retry is a genuinely NEW attempt,
-// not an idempotent repeat, so it reports its own fresh diagnosis rather than
-// the message latched by the drain that prompted it.
-void TimerTest::test_A3_user_retry_reports_fresh_failure_message()
-{
-    // Arrange: a failed drain latches "first failure message".
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    clock.advance(60ll * 1000ll);
-    fakeDb.commitSessionResult = SessionStoreResult::transient("first failure message");
-    const DrainResult first = tracker.drainForShutdown();
-    QCOMPARE(first.message, QString("first failure message"));
-
-    // Act: the user clicks Retry; the store now fails differently.
-    fakeDb.commitSessionResult = SessionStoreResult::transient("second failure message");
-    const DrainResult userRetry =
-        tracker.drainForShutdown(TimeTracker::DrainAttempt::UserRetry);
-
-    // Assert: the fresh diagnosis is surfaced, and a subsequent idempotent
-    // repeat now latches onto THAT one.
-    QVERIFY(!userRetry.clean());
-    QCOMPARE(userRetry.message, QString("second failure message"));
-    const DrainResult repeat = tracker.drainForShutdown();
-    QCOMPARE(repeat.message, QString("second failure message"));
+    QCOMPARE(second.message, QString("second failure message"));
 
     // Cleanup so destruction does not find an unresolved commit.
     fakeDb.commitSessionResult = SessionStoreResult::success();

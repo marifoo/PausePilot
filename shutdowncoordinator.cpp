@@ -88,8 +88,6 @@ DrainResult ShutdownCoordinator::run()
 DrainResult ShutdownCoordinator::retryDrain()
 {
     Logger::Log("[TIMER] Shutdown retry requested");
-    // A user-driven Retry is a genuinely new attempt, so it reports its own
-    // fresh outcome rather than the first failure latched by run()'s drain.
-    last_result_ = finishDrain(timetracker_.drainForShutdown(TimeTracker::DrainAttempt::UserRetry));
+    last_result_ = finishDrain(timetracker_.drainForShutdown());
     return last_result_;
 }

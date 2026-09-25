@@ -1241,14 +1241,9 @@ TimeTracker::ShutdownResult TimeTracker::shutdown()
     return {mode_ == Mode::None};
 }
 
-DrainResult TimeTracker::drainForShutdown(DrainAttempt attempt)
+DrainResult TimeTracker::drainForShutdown()
 {
     QMutexLocker locker(&mutex_);
-    if (attempt == DrainAttempt::UserRetry) {
-        // A genuinely new attempt: report this attempt's own outcome rather
-        // than the diagnosis latched by the drain that prompted the retry.
-        pending_commit_.forgetDrainFailure();
-    }
     // Close any live segment first, using the one "now" captured inside
     // shutdown(). No-op if already None -- this is what makes a repeated
     // call idempotent on the close-segment half. D6: the clean-shutdown
@@ -1261,15 +1256,10 @@ DrainResult TimeTracker::drainForShutdown(DrainAttempt attempt)
         Logger::Log("[DB] Drain: retrying pending commit at shutdown");
         const SessionStoreResult retryResult = appendDurationsChunkToDB(pending_commit_.payload());
         const bool ok = retryResult.okOrDisabled();
-        // Latch this payload's first failure BEFORE retry() may clear it, so
-        // an idempotent repeat still reports the original diagnosis.
-        if (!ok) pending_commit_.recordDrainFailure(retryResult.category, retryResult.message);
         pending_commit_.retry(ok);
         if (!ok) {
             Logger::Log("[DB] Drain: pending commit still unresolved: " + retryResult.message);
-            // Report the first failure for this payload; on the first attempt
-            // that IS this attempt's own result.
-            return *pending_commit_.firstDrainFailure();
+            return DrainResult::incomplete(retryResult.category, retryResult.message);
         }
         Logger::Log("[DB] Drain: pending commit saved successfully");
     }
