@@ -86,17 +86,32 @@ A session must never contain a segment that spans two dates: the persistence
 layer stores `start_utc`/`end_utc` timestamps (see `persistence.md`), and
 downstream UI groups rows by the local date those timestamps convert to, not
 by a stored date column. `TimeTracker` enforces this with a single dedicated
-subsystem:
-`DayBoundaryWatcher`. It uses two mechanisms together:
+subsystem: `DayBoundaryWatcher`. Both checks below run purely from the
+100 ms heartbeat (`DayBoundaryWatcher::tick`, called from
+`TimeTracker::onTick`) — there is no dedicated timer.
 
-1. **Scheduled stop** — a single-shot `QTimer` armed for **23:59:59.500**
-   today (`armScheduledStop`). When it fires, the engine stops with
-   `StopReason::MidnightScheduled`.
-2. **Watchdog** — `DayBoundaryWatcher::tick` runs on every 100 ms heartbeat
+1. **Scheduled stop** — on each heartbeat, if a segment is running and its
+   start time falls on the same local calendar date as `now`
+   (`now.toLocalTime().date() == segmentStart.toLocalTime().date()`), the
+   watcher builds that date's **23:59:59.500** cutoff (derived from `now`'s
+   own instant, preserving its offset/timezone semantics — never
+   reconstructed from date+time with a default `timeSpec()`). Once
+   `now >= cutoff`: if the segment started before the cutoff, the engine
+   stops at exactly the cutoff, never at whatever later heartbeat instant
+   observed it; if the segment started at or after the cutoff (e.g. Start
+   pressed at 23:59:59.600), the engine stops at the first later heartbeat's
+   `now` instead, never before the segment's own start. Either way the stop
+   is `StopReason::MidnightScheduled`. A segment from a prior local date
+   never takes this path — it falls through to the watchdog below.
+2. **Watchdog** — runs after the scheduled-stop check, on every heartbeat,
    and checks whether the ongoing segment has crossed midnight (which can
-   happen if the machine slept past the scheduled time). If so, it forces
-   the engine into `None` and discards the in-flight segment, emitting
+   happen if the machine slept past the scheduled time, or the segment
+   started on an earlier local date). If so, it forces the engine into
+   `None` and discards the in-flight segment, emitting
    `StopReason::MidnightWatchdog`.
+
+The forward-date History revoke (see below) runs first on every heartbeat,
+before either check, and applies even when the engine is stopped.
 
 A last-line defence in `TimeTracker::addDuration` silently discards any segment
 whose `startTime.date() != endTime.date()`. In normal operation the two

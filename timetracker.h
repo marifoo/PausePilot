@@ -80,7 +80,7 @@ public:
     /// observers (e.g. MainWin) can distinguish user-driven from engine-driven stops.
     enum class StopReason {
         ButtonStop,         ///< User pressed the Stop button.
-        MidnightScheduled,  ///< DayBoundaryWatcher scheduled timer fired at 23:59:59.500.
+        MidnightScheduled,  ///< DayBoundaryWatcher's heartbeat check reached the 23:59:59.500 cutoff.
         MidnightWatchdog,   ///< Watchdog detected a cross-midnight ongoing segment.
         Shutdown,           ///< Application shutdown (destructor or ShutdownCoordinator).
         EditApplied,        ///< History edit committed with no ongoing segment: tracking stopped.
@@ -119,46 +119,24 @@ public:
 private:
 
     /**
-     * DayBoundaryWatcher — owns the 23:59:59.500 single-shot QTimer and the
-     * cross-midnight watchdog logic.
-     *
-     * tick() arms/cancels the internal timer, calls the engine's stop path
-     * when it fires, and contains the watchdog poll (moved from
-     * MainWin::update()).
+     * DayBoundaryWatcher — owns the scheduled 23:59:59.500 stop and the
+     * cross-midnight watchdog logic, both driven purely from the 100 ms
+     * heartbeat (tick()). There is no independent QTimer: a single owner
+     * (the heartbeat) is sufficient because the old dedicated timer shared
+     * the same Qt event loop and offered no independent wakeup when that
+     * thread was blocked.
      */
     class DayBoundaryWatcher {
     public:
         explicit DayBoundaryWatcher(TimeTracker& owner);
 
-        /// Called on every 100 ms heartbeat. Runs the cross-midnight watchdog.
+        /// Called on every 100 ms heartbeat. Runs the forward-date History
+        /// revoke check, the scheduled 23:59:59.500 stop, and the
+        /// cross-midnight watchdog, in that order.
         void tick(const QDateTime& now);
-
-        /// Arms the single-shot timer to fire at 23:59:59.500 today.
-        void armScheduledStop(const QDateTime& now);
-
-        /// Cancels the single-shot timer (call on any stop).
-        void cancel();
-
-#ifndef QT_NO_DEBUG
-        /// Remaining ms until the scheduled stop fires (-1 if not armed). Test probe.
-        qint64 remainingMs_dbg() const { return midnight_timer_.remainingTime(); }
-
-        /// Directly invokes the private timer-fired handler without waiting
-        /// for the real QTimer, so tests can drive scheduled-stop boundary
-        /// revalidation deterministically via FakeClock (D2/R11-004).
-        void fireMidnightTimer_dbg() { onMidnightTimerFired(); }
-#endif // QT_NO_DEBUG
 
     private:
         TimeTracker& owner_;
-        QTimer midnight_timer_;
-        /// The intended civil-time boundary (23:59:59.500 on the arm day),
-        /// captured once by armScheduledStop(). onMidnightTimerFired()
-        /// revalidates wall time against this rather than trusting the
-        /// QTimer's real-elapsed duration alone (D2/R11-004).
-        QDateTime intended_boundary_;
-
-        void onMidnightTimerFired();
     };
 
     /**
@@ -735,9 +713,6 @@ public:
     bool discardCrossMidnightOngoingAndStop_dbg(const QDateTime& now) {
         return discardCrossMidnightOngoingAndStop(now);
     }
-
-    /// Exposes the DayBoundaryWatcher for test control of the scheduled-stop timer.
-    DayBoundaryWatcher& dayBoundaryWatcher_dbg() { return day_boundary_watcher_; }
 
     /// Exposes the internal DB-write helpers for the regression surface test.
     bool appendDurationsToDB_dbg() { return appendDurationsToDB(); }

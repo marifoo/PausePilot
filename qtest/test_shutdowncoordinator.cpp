@@ -9,22 +9,18 @@ using TestCommon::createSettingsFile;
 using TestCommon::fixedNow;
 
 // ============================================================================
-// D15/F1 (part 3 + part 4, B2): Start() arms a real QTimer for the scheduled
-// midnight stop at 23:59:59.500 relative to "now" (timetracker.cpp:654). On
-// the real clock, this test binary takes ~32s to run, and this suite occupies
-// roughly its last three seconds (t+29.0s..t+31.8s) -- so a run started in
-// the last ~35s of the day puts real local midnight inside that band, the
-// real QTimer fires, and whichever test happens to be live loses its ongoing
-// segment or its clean() state out from under assumptions made a few
-// statements earlier. Which test goes red varies with sub-second scheduling
-// drift -- a class defect, not a defect in any one named test (part 3 pinned
-// only the two instances a reviewer had measured red; that was insufficient).
+// D15/F1 (part 3 + part 4, B2): this suite's tests call Start() and never
+// call onTick() themselves, so the scheduled midnight stop -- now driven
+// purely from the heartbeat (C5), with no dedicated QTimer of its own --
+// cannot fire on its own during any test's run regardless of the real wall
+// clock. Historically (before C5) Start() armed a real QTimer for
+// 23:59:59.500 that could fire mid-suite near real local midnight; that
+// class of flake is gone.
 //
-// Fix: every test that calls Start() gets clock_, a fixture-owned FakeClock
-// pinned to fixedNow() (local noon), via init()/cleanup() below -- so a test
-// added later is pinned by default instead of needing to remember to opt in.
-// Pinning moves the real armScheduledStop() QTimer to ~12 real hours out,
-// where it cannot fire during any test's run. The one deliberate exception,
+// Every test that calls Start() still gets clock_, a fixture-owned FakeClock
+// pinned to fixedNow() (local noon), via init()/cleanup() below, so
+// segment_start_time and any assertions about elapsed time stay independent
+// of the real wall clock. The one deliberate exception,
 // test_A4_forced_shutdown_with_unresolved_discard_writes_no_marker(), pins
 // its own pre-midnight anchor on purpose (it tests the cross-midnight
 // watchdog itself) and does not use clock_.

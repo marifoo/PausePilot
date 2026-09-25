@@ -2738,8 +2738,8 @@ void HistoryDialogTest::test_D1_scheduled_midnight_closes_dialog_and_keeps_cutof
         // Arrange: create the finished spy before Act (no done() in the Arrange).
         QSignalSpy dialogFinished(&dialog, &QDialog::finished);
 
-        // Act: the real scheduled-stop callback fires at the boundary.
-        tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+        // Act: the real heartbeat tick fires at the boundary.
+        tracker.onTick(cutoff);
 
         // Assert: closed (fails on HEAD, which defers instead of revoking).
         QTRY_COMPARE(dialogFinished.count(), 1);

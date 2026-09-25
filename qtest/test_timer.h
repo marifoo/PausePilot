@@ -227,7 +227,7 @@ private slots:
     void test_N5b_scheduled_stop_while_still_locked_revokes_and_stops_paused();
     void test_N6_watchdog_tick_before_unlock_revokes_and_discards_whole_segment();
     void test_N7_shutdown_after_revoked_scheduled_stop_leaves_segment_unchanged();
-    void test_N8_early_midnight_fire_does_not_revoke();
+    void test_N8_before_cutoff_tick_does_not_revoke_or_stop();
     void test_N9_repeated_endExclusiveEdit_after_revoke_changes_nothing();
 
     // ========================================================================
@@ -391,27 +391,42 @@ private slots:
     // D2/MEDIUM-8: a DST spring-forward is a forward step and must not be
     // mistaken for a reversal.
     void test_D2_pause_proceeds_normally_through_dst_springforward();
-    // D2 (R11-004): a scheduled-stop callback that fires before wall time
-    // actually reaches the captured boundary (backward clock/DST fall-back
-    // after arming) must re-arm for the remaining time instead of stopping
-    // early.
-    void test_D2_scheduled_stop_fires_early_after_backward_step_rearms();
-    // D2 (R11-004): continuing from a re-arm, once wall time reaches the
-    // boundary the callback stops at exactly that boundary.
-    void test_D2_scheduled_stop_reaches_boundary_after_rearm_then_stops();
-    // D2 (R11-004): a same-civil-date late fire still applies the captured
-    // boundary as the cutoff, not the later `now`.
+    // D2 (R11-004): a backward wall-clock step before the cutoff must not
+    // stop early; a later heartbeat that reaches the cutoff stops once,
+    // exactly at the cutoff.
+    void test_D2_scheduled_stop_backward_wall_step_before_cutoff_then_stops_once_at_cutoff();
+    // D2 (R11-004): a same-civil-date late tick still stops exactly at the
+    // cutoff, not the later `now`.
     void test_D2_scheduled_stop_late_same_day_applies_captured_boundary();
-    // D2/MEDIUM-5 (R11-004): a late fire that has rolled onto a FURTHER
-    // civil date must defer to the watchdog's conservative discard, not
-    // credit [segment_start, boundary] -- that would invent unattended work
-    // time and race the watchdog tick.
+    // D2/MEDIUM-5 (R11-004): a tick that has rolled onto a FURTHER civil
+    // date must defer to the watchdog's conservative discard, not credit
+    // [segment_start, cutoff] -- that would invent unattended work time.
     void test_D2_scheduled_stop_late_across_date_defers_to_watchdog_discard();
 
-    // M6: DST spring-forward can cause an offset-blind QTime delay to
-    // over-estimate the real duration to the midnight boundary, arming the
-    // timer one real hour late. Mirror the offset-aware re-arm path to fix it.
-    void test_M6_scheduled_stop_arm_is_offset_aware_across_spring_dst();
+    // M6: the cutoff is built from `now`'s own instant (toLocalTime()), so
+    // it must stop at the correct 23:59:59.500 CEST wall-clock instant on a
+    // DST spring-forward day, not an offset-blind miscalculation.
+    void test_M6_scheduled_stop_offset_aware_across_spring_dst();
+
+    // C5: Start/Pause/unpause at 23:59:59.600 (already past the nominal
+    // cutoff) must stop at the first later heartbeat instant, never before
+    // the new segment's own start; a same-instant tick does nothing.
+    void test_C5_start_after_cutoff_stops_at_first_later_tick_not_before_own_start();
+    void test_C5_pause_after_cutoff_stops_at_first_later_tick_not_before_own_start();
+    void test_C5_unpause_after_cutoff_stops_at_first_later_tick_not_before_own_start();
+
+    // C5: a Qt::OffsetFromUTC now-provider must compute the cutoff from the
+    // instant's true local date, not the offset now-provider's own reading.
+    void test_C5_offset_from_utc_now_provider_computes_cutoff_by_local_date();
+
+    // C5: the half-open isCrossMidnight rule -- a tick at exactly 00:00:00
+    // may revoke an open History edit but does not yet discard a segment
+    // ending at that valid boundary; the first tick beyond midnight does.
+    void test_C5_tick_at_exact_midnight_does_not_discard_next_tick_does();
+
+    // C5: repeated ticks after the cutoff must yield exactly one stopped()
+    // emission -- no duplicate stop.
+    void test_C5_repeated_ticks_after_cutoff_yield_exactly_one_stop();
 
     // ========================================================================
     // D5 (R15-002): cancelShutdown() is the one lifecycle operation that

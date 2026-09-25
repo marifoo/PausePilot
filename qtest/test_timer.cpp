@@ -2920,7 +2920,7 @@ void TimerTest::test_N1_scheduled_stop_revokes_edit_and_credits_activity_through
     fakeDb.callLog.clear();
 
     // Act
-    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+    tracker.onTick(clock.now());
 
     // Assert
     QCOMPARE(revokedSpy.count(), 1);
@@ -2965,7 +2965,7 @@ void TimerTest::test_N2_scheduled_stop_revokes_edit_and_credits_pause_through_cu
     fakeDb.callLog.clear();
 
     // Act
-    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+    tracker.onTick(clock.now());
 
     // Assert
     QVERIFY(!tracker.isDialogOpen_dbg());
@@ -3092,7 +3092,7 @@ void TimerTest::test_N5_scheduled_stop_after_autopause_revokes_and_credits_all_s
     // Act: WP5 means the Lock above already revoked History and ran the
     // lock/autopause bookkeeping as ordinary no-dialog code, so this fire is
     // just the scheduled stop -- no deferred correction is involved any more.
-    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+    tracker.onTick(clock.now());
 
     // Assert: rows
     QVERIFY(tracker.isStopped());
@@ -3154,7 +3154,7 @@ void TimerTest::test_N5b_scheduled_stop_while_still_locked_revokes_and_stops_pau
     clock.setNow(cutoff);
 
     // Act
-    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+    tracker.onTick(clock.now());
 
     // Assert
     QVERIFY(tracker.isStopped());
@@ -3256,7 +3256,7 @@ void TimerTest::test_N7_shutdown_after_revoked_scheduled_stop_leaves_segment_unc
 
     const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
     clock.setNow(cutoff);
-    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+    tracker.onTick(clock.now());
     QVERIFY(tracker.isStopped());
 
     // Act
@@ -3271,8 +3271,8 @@ void TimerTest::test_N7_shutdown_after_revoked_scheduled_stop_leaves_segment_unc
     QCOMPARE(seg.endTime, cutoff);
 }
 
-// N8: a spurious early fire (before the intended boundary) must not revoke.
-void TimerTest::test_N8_early_midnight_fire_does_not_revoke()
+// N8: a heartbeat tick before the 23:59:59.500 cutoff must not revoke or stop.
+void TimerTest::test_N8_before_cutoff_tick_does_not_revoke_or_stop()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -3293,13 +3293,12 @@ void TimerTest::test_N8_early_midnight_fire_does_not_revoke()
     QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
 
     // Act
-    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+    tracker.onTick(clock.now());
 
     // Assert
     QCOMPARE(revokedSpy.count(), 0);
     QVERIFY(tracker.isDialogOpen_dbg());
     QVERIFY(tracker.isActive());
-    QVERIFY(tracker.dayBoundaryWatcher_dbg().remainingMs_dbg() > 0);
 }
 
 // N9: after N1, a second endExclusiveEdit() (the guard's own harmless
@@ -3324,7 +3323,7 @@ void TimerTest::test_N9_repeated_endExclusiveEdit_after_revoke_changes_nothing()
     QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
     QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
 
-    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+    tracker.onTick(clock.now());
     QVERIFY(tracker.isStopped());
     QCOMPARE(revokedSpy.count(), 1);
     QCOMPARE(warnSpy.count(), 1);
@@ -5186,12 +5185,10 @@ void TimerTest::test_D2_pause_proceeds_normally_through_dst_springforward()
     QCOMPARE(ongoingAfterPause->startTime, afterJump);
 }
 
-// D2 (R11-004): a scheduled-stop callback firing before wall time actually
-// reaches the captured boundary (e.g. a backward NTP/manual step, or a DST
-// fall-back, after arming) must re-arm for the remaining real time instead
-// of stopping the engine early. Driven entirely via FakeClock and the debug
-// timer-fired hook -- no real wait.
-void TimerTest::test_D2_scheduled_stop_fires_early_after_backward_step_rearms()
+// D2 (R11-004): a backward wall-clock step before the 23:59:59.500 cutoff
+// must not stop the engine early; a later heartbeat that actually reaches
+// the cutoff then stops exactly once, at the cutoff.
+void TimerTest::test_D2_scheduled_stop_backward_wall_step_before_cutoff_then_stops_once_at_cutoff()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -5205,66 +5202,34 @@ void TimerTest::test_D2_scheduled_stop_fires_early_after_backward_step_rearms()
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
 
-    // Arm at t0 -- the intended boundary becomes 2025-06-01 23:59:59.500.
-    tracker.dayBoundaryWatcher_dbg().armScheduledStop(t0);
-
     QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
     QVERIFY(stoppedSpy.isValid());
 
-    // Act: the clock steps backward before the callback fires.
+    // Act: the clock steps backward, still well before the cutoff.
     const QDateTime early(QDate(2025, 6, 1), QTime(8, 0, 0), Qt::LocalTime);
     clock.setNow(early);
-    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+    tracker.onTick(clock.now());
 
-    // Assert: not stopped -- re-armed instead.
+    // Assert: no stop.
     QCOMPARE(stoppedSpy.count(), 0);
     QVERIFY(tracker.isActive());
-    QVERIFY(tracker.dayBoundaryWatcher_dbg().remainingMs_dbg() > 0);
-}
 
-// D2 (R11-004): continuing from a re-arm, once wall time actually reaches
-// the captured boundary the callback stops the engine at exactly that
-// boundary.
-void TimerTest::test_D2_scheduled_stop_reaches_boundary_after_rearm_then_stops()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
+    // Act: a later tick reaches the cutoff.
+    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
+    clock.setNow(cutoff);
+    tracker.onTick(clock.now());
 
-    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-    tracker.useTimerViaButton(Button::Start);
-    QVERIFY(tracker.isActive());
-    tracker.dayBoundaryWatcher_dbg().armScheduledStop(t0);
-
-    const QDateTime early(QDate(2025, 6, 1), QTime(8, 0, 0), Qt::LocalTime);
-    clock.setNow(early);
-    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
-    QVERIFY(tracker.isActive()); // precondition: re-armed, not stopped
-
-    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
-    QVERIFY(stoppedSpy.isValid());
-
-    // Act: wall time reaches the boundary.
-    const QDateTime boundary(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
-    clock.setNow(boundary);
-    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
-
-    // Assert: stops now, at exactly the captured boundary.
+    // Assert: stops now, exactly once, at the cutoff.
     QCOMPARE(stoppedSpy.count(), 1);
     QCOMPARE(stoppedSpy.at(0).at(0).value<TimeTracker::StopReason>(),
              TimeTracker::StopReason::MidnightScheduled);
     QVERIFY(tracker.isStopped());
 }
 
-// D2 (R11-004): a scheduled-stop callback firing after wall time has passed
-// the captured boundary, but still on the SAME civil date (e.g. a small
-// forward jump), must still apply the captured boundary as the cutoff --
-// not the later `now` -- so the committed endpoint is always exactly the
-// intended boundary.
+// D2 (R11-004): a heartbeat tick landing after the 23:59:59.500 cutoff, but
+// still on the SAME civil date (e.g. a small forward jump/late tick), must
+// still stop exactly at the cutoff -- not the later `now` -- so the
+// committed endpoint is always exactly the cutoff.
 void TimerTest::test_D2_scheduled_stop_late_same_day_applies_captured_boundary()
 {
     QTemporaryDir tempDir;
@@ -5279,19 +5244,16 @@ void TimerTest::test_D2_scheduled_stop_late_same_day_applies_captured_boundary()
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
 
-    // Arm at t0 -- the intended boundary is 2025-06-01 23:59:59.500.
-    tracker.dayBoundaryWatcher_dbg().armScheduledStop(t0);
-
     QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
     QVERIFY(stoppedSpy.isValid());
 
-    // Act: a small forward slip, still the same civil date.
+    // Act: a heartbeat tick lands slightly after the cutoff, same civil date.
     const QDateTime late(QDate(2025, 6, 1), QTime(23, 59, 59, 900), Qt::LocalTime);
     clock.setNow(late);
-    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+    tracker.onTick(clock.now());
 
-    // Assert: stopped, and the committed endpoint is exactly the captured
-    // boundary -- not the late `now`.
+    // Assert: stopped, and the committed endpoint is exactly the cutoff --
+    // not the late `now`.
     QCOMPARE(stoppedSpy.count(), 1);
     QCOMPARE(stoppedSpy.at(0).at(0).value<TimeTracker::StopReason>(),
              TimeTracker::StopReason::MidnightScheduled);
@@ -5301,13 +5263,14 @@ void TimerTest::test_D2_scheduled_stop_late_same_day_applies_captured_boundary()
     QCOMPARE(fakeDb.storedDurations.back().endTime, boundary);
 }
 
-// D2/MEDIUM-5 (R11-004): a scheduled-stop callback firing so late it has
-// rolled onto a FURTHER civil date (the canonical cause is suspend across
-// midnight, where the QTimer's real-elapsed budget only expires on resume)
-// must NOT credit [segment_start, boundary] -- that would "invent"
-// unattended work time, contradicting plan §2's conservative watchdog
-// policy, and would race the ~1 s watchdog tick that discards the very same
-// segment. It must defer entirely to the watchdog's conservative discard.
+// D2/MEDIUM-5 (R11-004): a heartbeat tick landing on a FURTHER civil date
+// (the canonical cause is suspend across midnight) must NOT credit
+// [segment_start, cutoff] -- that would "invent" unattended work time,
+// contradicting plan §2's conservative watchdog policy. The scheduled-stop
+// check only applies while `now` is still on the segment's own start date,
+// so a tick that has already rolled onto a later date takes only the
+// watchdog's whole-segment discard, never credit through the prior day's
+// cutoff.
 void TimerTest::test_D2_scheduled_stop_late_across_date_defers_to_watchdog_discard()
 {
     QTemporaryDir tempDir;
@@ -5321,22 +5284,15 @@ void TimerTest::test_D2_scheduled_stop_late_across_date_defers_to_watchdog_disca
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
-    tracker.dayBoundaryWatcher_dbg().armScheduledStop(t0);
 
     QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
     QVERIFY(stoppedSpy.isValid());
 
     // Act: a forward jump (e.g. resume from suspend) lands on the next date.
+    // A single tick there both skips the scheduled-stop check (different
+    // local date) and runs the watchdog, which discards the whole segment.
     const QDateTime late(QDate(2025, 6, 2), QTime(1, 30, 0), Qt::LocalTime);
     clock.setNow(late);
-    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
-
-    // Assert: the scheduled callback did nothing -- no invented credit.
-    QCOMPARE(stoppedSpy.count(), 0);
-    QVERIFY(tracker.isActive());
-
-    // Act: the watchdog's own tick (already deterministic and tested by A1/
-    // Z) is what actually resolves it.
     tracker.onTick(late);
 
     // Assert: discarded via the watchdog, not credited through the boundary.
@@ -5347,12 +5303,13 @@ void TimerTest::test_D2_scheduled_stop_late_across_date_defers_to_watchdog_disca
 }
 
 // ============================================================================
-// M6: DST spring-forward can cause an offset-blind QTime delay to
-// over-estimate the real duration to the midnight boundary, arming the
-// timer one real hour late. Mirror the offset-aware re-arm path.
+// M6: offset-aware cutoff construction across a DST spring-forward day: the
+// cutoff is built from `now`'s own instant (toLocalTime()), so it must stop
+// at the correct 23:59:59.500 CEST wall-clock instant, not an offset-blind
+// miscalculation.
 // ============================================================================
 
-void TimerTest::test_M6_scheduled_stop_arm_is_offset_aware_across_spring_dst()
+void TimerTest::test_M6_scheduled_stop_offset_aware_across_spring_dst()
 {
     // Arrange: Set TZ to Europe/Berlin and construct all QDateTimes after.
     struct TzGuard {
@@ -5368,27 +5325,292 @@ void TimerTest::test_M6_scheduled_stop_arm_is_offset_aware_across_spring_dst()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
 
-    // Arm at 2025-03-30 01:00 CET (= 00:00 UTC) for boundary 23:59:59.500 CEST.
-    const QDateTime armAt(QDate(2025, 3, 30), QTime(1, 0, 0), Qt::LocalTime);
-    FakeClock clock(armAt);
+    // Start at 2025-03-30 01:00 CET (before the spring-forward jump to CEST).
+    const QDateTime t0(QDate(2025, 3, 30), QTime(1, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
     TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
 
-    // Pin the fixture: boundary is 21 h 59 m 59.5 s real time away
-    // (23:59:59.500 civil minus the spring-forward hour).
-    const QDateTime boundary(QDate(2025, 3, 30), QTime(23, 59, 59, 500), Qt::LocalTime);
-    QCOMPARE(armAt.msecsTo(boundary), 79199500LL);
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+    QVERIFY(stoppedSpy.isValid());
 
-    // Assert: the scheduled timer is armed for the correct offset-aware
-    // duration, not the offset-blind civil duration (82799500 ms).
-    // Allow ±5 s to absorb QTimer::remainingTime() decay and real clock jitter.
-    const qint64 actualMs = tracker.dayBoundaryWatcher_dbg().remainingMs_dbg();
-    QVERIFY2(qAbs(actualMs - 79199500LL) < 5000,
-             qPrintable(QString("armed %1 ms, expected ~%2").arg(actualMs).arg(79199500LL)));
+    // Act: a heartbeat tick at 23:59:59.500 CEST, the same local date.
+    const QDateTime cutoff(QDate(2025, 3, 30), QTime(23, 59, 59, 500), Qt::LocalTime);
+    clock.setNow(cutoff);
+    tracker.onTick(clock.now());
 
-    // Teardown: stop the timer so it does not fire during cleanup.
-    tracker.useTimerViaButton(Button::Stop);
+    // Assert: stops exactly at that cutoff.
+    QCOMPARE(stoppedSpy.count(), 1);
+    QCOMPARE(stoppedSpy.at(0).at(0).value<TimeTracker::StopReason>(),
+             TimeTracker::StopReason::MidnightScheduled);
+    QVERIFY(tracker.isStopped());
+    QVERIFY(!fakeDb.storedDurations.empty());
+    QCOMPARE(fakeDb.storedDurations.back().endTime, cutoff);
+}
+
+// ============================================================================
+// C5: Start/Pause/unpause pressed AT OR AFTER the nominal 23:59:59.500
+// cutoff. The segment's own start is at/after the cutoff, so the stop must
+// happen at the first later heartbeat's `now`, never at a cutoff earlier
+// than the segment's own start, and a same-instant tick must do nothing.
+// ============================================================================
+
+void TimerTest::test_C5_start_after_cutoff_stops_at_first_later_tick_not_before_own_start()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 59, 59, 600), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+
+    // Act: a same-instant tick does nothing.
+    tracker.onTick(clock.now());
+    QCOMPARE(stoppedSpy.count(), 0);
+    QVERIFY(tracker.isActive());
+
+    // Act: a later tick, still the same civil date, stops.
+    const QDateTime later(QDate(2025, 6, 1), QTime(23, 59, 59, 700), Qt::LocalTime);
+    clock.setNow(later);
+    tracker.onTick(clock.now());
+
+    // Assert: stopped at `later`, never at a cutoff before the segment's
+    // own start (23:59:59.600).
+    QCOMPARE(stoppedSpy.count(), 1);
+    QCOMPARE(stoppedSpy.at(0).at(0).value<TimeTracker::StopReason>(),
+             TimeTracker::StopReason::MidnightScheduled);
+    QVERIFY(tracker.isStopped());
+    QVERIFY(!fakeDb.storedDurations.empty());
+    QCOMPARE(fakeDb.storedDurations.back().startTime, t0);
+    QCOMPARE(fakeDb.storedDurations.back().endTime, later);
+}
+
+void TimerTest::test_C5_pause_after_cutoff_stops_at_first_later_tick_not_before_own_start()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    const QDateTime pauseStart(QDate(2025, 6, 1), QTime(23, 59, 59, 600), Qt::LocalTime);
+    clock.setNow(pauseStart);
+    tracker.useTimerViaButton(Button::Pause);
+    QVERIFY(tracker.isPaused());
+
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+
+    // Act: a same-instant tick does nothing.
+    tracker.onTick(clock.now());
+    QCOMPARE(stoppedSpy.count(), 0);
+    QVERIFY(tracker.isPaused());
+
+    // Act: a later tick, still the same civil date, stops.
+    const QDateTime later(QDate(2025, 6, 1), QTime(23, 59, 59, 700), Qt::LocalTime);
+    clock.setNow(later);
+    tracker.onTick(clock.now());
+
+    // Assert: stopped at `later`, never at a cutoff before the Pause
+    // segment's own start.
+    QCOMPARE(stoppedSpy.count(), 1);
+    QCOMPARE(stoppedSpy.at(0).at(0).value<TimeTracker::StopReason>(),
+             TimeTracker::StopReason::MidnightScheduled);
+    QVERIFY(tracker.isStopped());
+    bool foundPause = false;
+    for (const auto& seg : fakeDb.storedDurations) {
+        if (seg.type == DurationType::Pause && seg.startTime == pauseStart && seg.endTime == later)
+            foundPause = true;
+    }
+    QVERIFY2(foundPause, "Expected the Pause segment credited through `later`, not an earlier cutoff");
+}
+
+void TimerTest::test_C5_unpause_after_cutoff_stops_at_first_later_tick_not_before_own_start()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(23, 30, 0), Qt::LocalTime));
+    tracker.useTimerViaButton(Button::Pause);
+    QVERIFY(tracker.isPaused());
+
+    const QDateTime unpauseStart(QDate(2025, 6, 1), QTime(23, 59, 59, 600), Qt::LocalTime);
+    clock.setNow(unpauseStart);
+    tracker.useTimerViaButton(Button::Start); // unpause
+    QVERIFY(tracker.isActive());
+
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+
+    // Act: a same-instant tick does nothing.
+    tracker.onTick(clock.now());
+    QCOMPARE(stoppedSpy.count(), 0);
+    QVERIFY(tracker.isActive());
+
+    // Act: a later tick, still the same civil date, stops.
+    const QDateTime later(QDate(2025, 6, 1), QTime(23, 59, 59, 700), Qt::LocalTime);
+    clock.setNow(later);
+    tracker.onTick(clock.now());
+
+    // Assert: stopped at `later`, never at a cutoff before the resumed
+    // Activity segment's own start.
+    QCOMPARE(stoppedSpy.count(), 1);
+    QCOMPARE(stoppedSpy.at(0).at(0).value<TimeTracker::StopReason>(),
+             TimeTracker::StopReason::MidnightScheduled);
+    QVERIFY(tracker.isStopped());
+    bool foundResumedActivity = false;
+    for (const auto& seg : fakeDb.storedDurations) {
+        if (seg.type == DurationType::Activity && seg.startTime == unpauseStart && seg.endTime == later)
+            foundResumedActivity = true;
+    }
+    QVERIFY2(foundResumedActivity, "Expected the resumed Activity segment credited through `later`");
+}
+
+// C5: a Qt::OffsetFromUTC now-provider must have its cutoff computed from
+// the instant's true local calendar date (via toLocalTime()), not from the
+// offset representation's own raw date/time fields.
+void TimerTest::test_C5_offset_from_utc_now_provider_computes_cutoff_by_local_date()
+{
+    struct TzGuard {
+        QByteArray orig;
+        TzGuard() : orig(qgetenv("TZ")) {}
+        ~TzGuard() { orig.isEmpty() ? qunsetenv("TZ") : qputenv("TZ", orig); tzset(); }
+    } tzGuard;
+    qputenv("TZ", "Europe/Berlin"); // CET, UTC+1 in January -- no DST ambiguity.
+    tzset();
+
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    // This instant is 2025-01-16 00:00:00 CET (system local), even though
+    // its own OffsetFromUTC(0) fields read 2025-01-15 23:00:00.
+    const QDateTime t0(QDate(2025, 1, 15), QTime(23, 0, 0), Qt::OffsetFromUTC, 0);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+
+    // This instant is 2025-01-16 23:59:59.500 CET -- the correct cutoff for
+    // the segment's true local start date (2025-01-16) -- expressed via the
+    // same OffsetFromUTC(0) representation.
+    const QDateTime cutoff(QDate(2025, 1, 16), QTime(22, 59, 59, 500), Qt::OffsetFromUTC, 0);
+    clock.setNow(cutoff);
+    tracker.onTick(clock.now());
+
+    // Assert: stops exactly at that cutoff instant.
+    QCOMPARE(stoppedSpy.count(), 1);
+    QCOMPARE(stoppedSpy.at(0).at(0).value<TimeTracker::StopReason>(),
+             TimeTracker::StopReason::MidnightScheduled);
+    QVERIFY(tracker.isStopped());
+    QVERIFY(!fakeDb.storedDurations.empty());
+    QCOMPARE(fakeDb.storedDurations.back().endTime, cutoff);
+}
+
+// C5: the half-open isCrossMidnight rule -- a tick at exactly local
+// 00:00:00 (the exclusive end of the segment's start date) may revoke an
+// open History edit (forward-date check) but must not yet discard the
+// segment; the first tick strictly beyond midnight does.
+void TimerTest::test_C5_tick_at_exact_midnight_does_not_discard_next_tick_does()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+
+    // Act: a tick at exactly the exclusive end of the start date.
+    const QDateTime exactMidnight(QDate(2025, 6, 2), QTime(0, 0, 0), Qt::LocalTime);
+    clock.setNow(exactMidnight);
+    tracker.onTick(clock.now());
+
+    // Assert: the forward-date History revoke ran, but the segment is not
+    // discarded -- exactly at the boundary is still valid, half-open.
+    QCOMPARE(revokedSpy.count(), 1);
+    QCOMPARE(stoppedSpy.count(), 0);
+    QVERIFY(tracker.isActive());
+
+    // Act: the first tick strictly beyond midnight.
+    const QDateTime pastMidnight(QDate(2025, 6, 2), QTime(0, 0, 0, 100), Qt::LocalTime);
+    clock.setNow(pastMidnight);
+    tracker.onTick(clock.now());
+
+    // Assert: now discarded via the watchdog.
+    QCOMPARE(stoppedSpy.count(), 1);
+    QCOMPARE(stoppedSpy.at(0).at(0).value<TimeTracker::StopReason>(),
+             TimeTracker::StopReason::MidnightWatchdog);
+    QVERIFY(tracker.isStopped());
+}
+
+// C5: repeated ticks after the cutoff must yield exactly one stopped()
+// emission -- no duplicate stop.
+void TimerTest::test_C5_repeated_ticks_after_cutoff_yield_exactly_one_stop()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+
+    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
+    clock.setNow(cutoff);
+    tracker.onTick(clock.now());
+    QCOMPARE(stoppedSpy.count(), 1);
+    QVERIFY(tracker.isStopped());
+
+    // Act: repeated ticks at and after the cutoff.
+    tracker.onTick(clock.now());
+    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(23, 59, 59, 600), Qt::LocalTime));
+    tracker.onTick(clock.now());
+    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime));
+    tracker.onTick(clock.now());
+
+    // Assert: still exactly one stopped() emission.
+    QCOMPARE(stoppedSpy.count(), 1);
 }
 
 // ============================================================================
@@ -5729,10 +5951,9 @@ void TimerTest::test_D10_longlock_disabled_autopause_dialog_open_is_dropped_not_
 }
 
 // Round-2 review (finding 1): a live scheduled midnight stop, driven through
-// the real onMidnightTimerFired() callback (via the documented fireMidnightTimer_dbg()
-// seam that invokes it directly instead of waiting for the real QTimer -- see
-// DayBoundaryWatcher's own doc comment), must emit transitioned(..., MidnightScheduled)
-// exactly once -- not mis-mapped to MidnightWatchdog or dropped entirely.
+// the real heartbeat tick (TimeTracker::onTick), must emit
+// transitioned(..., MidnightScheduled) exactly once -- not mis-mapped to
+// MidnightWatchdog or dropped entirely.
 void TimerTest::test_D10_midnight_scheduled_live_emits_transitioned()
 {
     // Arrange
@@ -5747,15 +5968,14 @@ void TimerTest::test_D10_midnight_scheduled_live_emits_transitioned()
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
-    tracker.dayBoundaryWatcher_dbg().armScheduledStop(t0);
 
     const QDateTime boundary(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
     clock.setNow(boundary);
     QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
     QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
 
-    // Act: the real scheduled-stop callback fires at the boundary.
-    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+    // Act: the real heartbeat tick fires at the boundary.
+    tracker.onTick(clock.now());
 
     // Assert
     QVERIFY(tracker.isStopped());

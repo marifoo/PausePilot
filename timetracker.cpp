@@ -100,125 +100,56 @@ TimeTracker::StopReason stopReasonFromCause(TimeTracker::TransitionCause cause)
 TimeTracker::DayBoundaryWatcher::DayBoundaryWatcher(TimeTracker& owner)
     : owner_(owner)
 {
-    midnight_timer_.setSingleShot(true);
 }
 
 void TimeTracker::DayBoundaryWatcher::tick(const QDateTime& now)
 {
-    // Watchdog: if the ongoing segment has crossed midnight (e.g. due to sleep
-    // bypassing the scheduled stop), force the engine to stopped state.
     // The mutex is already held by the caller (TimeTracker::onTick).
-    // WP2: an open History edit no longer suspends this -- it is revoked
-    // inside discardCrossMidnightOngoingAndStop() itself, which then runs
-    // exactly as it would with no dialog.
-    // WP4: if the date moves forward (>) while editing, revoke the edit first.
-    if (owner_.dialog_open_ && now.date() > owner_.exclusive_edit_date_) {
+    //
+    // 1. Forward-date History revoke: runs even when stopped. WP4: if the
+    // local date moves forward (>) while editing, revoke the edit first.
+    const QDate nowLocalDate = now.toLocalTime().date();
+    if (owner_.dialog_open_ && nowLocalDate > owner_.exclusive_edit_date_) {
         owner_.revokeExclusiveEdit();
     }
+
+    // 2. Scheduled stop: only while a segment is running that started on
+    // this same local date (persistence's civil-day rule, matching
+    // isCrossMidnight/DayValidity). A segment from a prior local date never
+    // takes this path -- it falls through to the watchdog below.
+    if (owner_.mode_ != Mode::None && owner_.session_.segment_start_time.isValid()) {
+        const QDateTime& segmentStart = owner_.session_.segment_start_time;
+        if (nowLocalDate == segmentStart.toLocalTime().date()) {
+            // Construct the cutoff from `now`'s own instant (via
+            // toLocalTime()) rather than from date()+time()+a default
+            // timeSpec() -- the latter would silently default the UTC
+            // offset to 0 for a Qt::OffsetFromUTC/Qt::TimeZone now-provider
+            // (D2/LOW-4).
+            QDateTime cutoff = now.toLocalTime();
+            cutoff.setTime(QTime(23, 59, 59, 500));
+            if (now >= cutoff) {
+                if (owner_.dialog_open_) {
+                    owner_.revokeExclusiveEdit();
+                }
+                if (segmentStart < cutoff) {
+                    // Segment began before the cutoff: stop exactly at the
+                    // cutoff, never at a later heartbeat instant.
+                    owner_.stopTimer(cutoff, StopReason::MidnightScheduled);
+                } else if (now > segmentStart) {
+                    // Segment began at/after the cutoff (e.g. Start pressed
+                    // at 23:59:59.600): stop at the first valid same-day
+                    // observed heartbeat instant, never before its own start.
+                    owner_.stopTimer(now, StopReason::MidnightScheduled);
+                }
+                // else now <= segmentStart (same tick or a backward step):
+                // do nothing until a later tick.
+                return;
+            }
+        }
+    }
+
+    // 3. Watchdog: unchanged. A prior-date segment only reaches this path.
     owner_.discardCrossMidnightOngoingAndStop(now);
-}
-
-void TimeTracker::DayBoundaryWatcher::armScheduledStop(const QDateTime& now)
-{
-    QTime current_time = now.time();
-    QTime midnight_stop_time(23, 59, 59, 500);
-
-    qint64 msecs_until_stop;
-    if (current_time < midnight_stop_time) {
-        // R11-004: remember the intended civil-time boundary so the callback
-        // can revalidate wall time against it when it actually fires,
-        // instead of trusting the QTimer's real-elapsed duration alone.
-        // D2/LOW-4 (round-3 review): copy `now` and only replace its time-
-        // of-day, rather than reconstructing a QDateTime from date+time+
-        // timeSpec() -- the 3-arg constructor defaults the UTC offset to 0,
-        // silently dropping it for a Qt::OffsetFromUTC/Qt::TimeZone
-        // now-provider (unreachable today, but now-providers are
-        // injectable in more places after this packet).
-        intended_boundary_ = now;
-        intended_boundary_.setTime(midnight_stop_time);
-        // M6: offset-aware across DST, same clamp as onMidnightTimerFired() (:184).
-        msecs_until_stop = qBound<qint64>(1, now.msecsTo(intended_boundary_), 24LL * 3600LL * 1000LL);
-    } else {
-        // Already past 23:59:59.500 — fire in 1 ms to trigger the watchdog
-        // path. The intended boundary for revalidation is `now` itself, not
-        // a past 23:59:59.500: this arm already starts past the nominal
-        // boundary (e.g. Start pressed at 23:59:59.6), and treating `now` as
-        // "before the boundary" would make onMidnightTimerFired() misclassify this
-        // entirely ordinary end-of-day stop as a clock reversal.
-        msecs_until_stop = 1;
-        intended_boundary_ = now;
-    }
-
-    Logger::Log(QString("[MIDNIGHT] Scheduled engine auto-stop in %1 seconds")
-        .arg(msecs_until_stop / 1000.0, 0, 'f', 1));
-
-    midnight_timer_.disconnect();
-    QObject::connect(&midnight_timer_, &QTimer::timeout,
-                     [this]() { onMidnightTimerFired(); });
-    midnight_timer_.start(static_cast<int>(msecs_until_stop));
-}
-
-void TimeTracker::DayBoundaryWatcher::cancel()
-{
-    midnight_timer_.stop();
-    intended_boundary_ = QDateTime();
-    Logger::Log("[MIDNIGHT] Scheduled stop timer cancelled");
-}
-
-void TimeTracker::DayBoundaryWatcher::onMidnightTimerFired()
-{
-    Logger::Log("[MIDNIGHT] Scheduled stop: engine forcing timer off at end of day");
-    QMutexLocker locker(&owner_.mutex_);
-    if (owner_.mode_ == Mode::None) {
-        Logger::Log("[MIDNIGHT] Scheduled stop fired but engine already stopped - ignoring");
-        return;
-    }
-    // R11-004: revalidate wall time against the intended boundary captured
-    // by armScheduledStop() rather than trusting the QTimer's real-elapsed
-    // duration alone. A backward clock/DST step after arming can let the
-    // timer's real duration expire before civil time actually reaches the
-    // boundary -- re-arm for the remaining real time instead of stopping
-    // early.
-    const QDateTime now = owner_.now_provider_();
-    if (intended_boundary_.isValid() && now < intended_boundary_) {
-        // Clamp to one day: an extreme backward step must not overflow (or
-        // go negative on) the int QTimer::start() takes, which would emit a
-        // QWARN and silently drop the scheduled stop (LOW-9).
-        const qint64 remaining = qBound<qint64>(1, now.msecsTo(intended_boundary_), 24LL * 3600LL * 1000LL);
-        Logger::Log(QString("[MIDNIGHT] Scheduled stop fired early (now=%1 < boundary=%2) — re-arming for %3 ms")
-            .arg(now.toString(Qt::ISODateWithMs), intended_boundary_.toString(Qt::ISODateWithMs))
-            .arg(remaining));
-        midnight_timer_.start(static_cast<int>(remaining));
-        return;
-    }
-    // Plan §2's watchdog policy is conservative: a segment left running
-    // across a missed midnight (typically suspend, where the QTimer's
-    // real-elapsed budget only expires on resume) is discarded whole, never
-    // credited. Crediting [segment_start, boundary] here on a late fire that
-    // has already rolled into a further date would "invent" that unattended
-    // interval and race the ~1 s watchdog tick, which discards the very
-    // same segment -- the outcome would depend on which owner wins. Defer
-    // entirely to the watchdog once the fire has crossed into a later date
-    // than the boundary itself (R11-004/MEDIUM-5): do nothing here: the
-    // next tick() discards the segment -- revoking any open History edit
-    // first -- exactly as an un-deferred late fire already would.
-    if (intended_boundary_.isValid() && now.date() > intended_boundary_.date()) {
-        Logger::Log(QString("[MIDNIGHT] Scheduled stop fired very late (now=%1, boundary=%2) — "
-                             "deferring to the watchdog's conservative discard")
-            .arg(now.toString(Qt::ISODateWithMs), intended_boundary_.toString(Qt::ISODateWithMs)));
-        return;
-    }
-    // Capture the cutoff once, at the intended boundary (nominally
-    // 23:59:59.500), before revoking any open History edit below. WP2:
-    // revokeExclusiveEdit() discards the edit synchronously, so this exact
-    // instant is still what stopTimer() credits through, not whatever wall
-    // time happens to be current once the dialog's queued close eventually
-    // runs.
-    const QDateTime cutoff = intended_boundary_.isValid() ? intended_boundary_ : now;
-    if (owner_.dialog_open_) {
-        owner_.revokeExclusiveEdit();
-    }
-    owner_.stopTimer(cutoff, StopReason::MidnightScheduled);
 }
 
 // ============================================================================
@@ -597,7 +528,6 @@ void TimeTracker::startTimer(const QDateTime& now, TransitionCause cause)
         if (checkpoint_interval_msec_ > 0) {
             checkpointTimer_.start(); // Resume periodic checkpoint saving
         }
-        day_boundary_watcher_.armScheduledStop(now);
         Logger::Log("[TIMER] > TimeTracker unpaused");
         emitTransition(Mode::Pause, Mode::Activity, cause);
         return;
@@ -659,7 +589,6 @@ void TimeTracker::startTimer(const QDateTime& now, TransitionCause cause)
         if (checkpoint_interval_msec_ > 0) {
             checkpointTimer_.start(); // Start periodic checkpoint saving
         }
-        day_boundary_watcher_.armScheduledStop(now);
         Logger::Log("[TIMER] >> TimeTracker started");
         emitTransition(Mode::None, Mode::Activity, cause);
         return;
@@ -873,7 +802,6 @@ void TimeTracker::stopTimer(const QDateTime& now, StopReason reason, std::option
     mode_ = Mode::None;
     session_.clearSegment();
     checkpointTimer_.stop();
-    day_boundary_watcher_.cancel();
     autopause_pending_resume_ = false;
     Logger::Log("[TIMER] TimeTracker stopped <<");
 
@@ -1689,7 +1617,7 @@ void TimeTracker::beginExclusiveEdit()
 {
     QMutexLocker locker(&mutex_);
     dialog_open_ = true;
-    exclusive_edit_date_ = now_provider_().date();
+    exclusive_edit_date_ = now_provider_().toLocalTime().date();
     checkpointTimer_.stop();
     Logger::Log("[CHECKPOINT] Checkpoints paused (dialog open)");
 }

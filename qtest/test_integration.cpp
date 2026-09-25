@@ -470,10 +470,9 @@ void IntegrationTest::test_F_shutdown_sequence_stop_flush_marker()
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
-    // D15/F1 (part 4, B2 class): Start() arms a real armScheduledStop()
-    // QTimer (timetracker.cpp:654) that must not fire during this test's
-    // run -- pinned via FakeClock for the same reason as
-    // ShutdownCoordinatorTest's suite (see that file's header comment).
+    // D15/F1 (part 4, B2 class): the scheduled midnight stop is driven
+    // purely from the heartbeat (TimeTracker::onTick), which this test
+    // never calls, so it cannot fire during this test's run.
     // FakeClock declared before TimeTracker so it outlives it (see the
     // outlives-tracker note at test_integration.cpp:614).
     FakeClock clock(fixedNow());
@@ -743,9 +742,8 @@ void IntegrationTest::test_Y_engine_scheduled_stop_emits_MidnightScheduled()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
 
-    // Pin the engine clock to mid-day so Start's auto-armed 23:59:59.500
-    // timer is hours away and does not interfere before we explicitly
-    // re-arm and fire below.
+    // Pin the engine clock to mid-day so the scheduled stop (purely
+    // heartbeat-driven now) does not interfere before we tick below.
     // FakeClock declared before TimeTracker: see outlives-tracker note above
     FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
     TimeTracker tracker(settings, fakeDb);
@@ -766,15 +764,11 @@ void IntegrationTest::test_Y_engine_scheduled_stop_emits_MidnightScheduled()
     QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
     QVERIFY(stoppedSpy.isValid());
 
-    // Advance the fake clock to the intended boundary, arm at that same
-    // instant, and drive the timer-fired callback directly (D2/R11-004):
-    // no real wait, and the engine's own clock agrees with the armed
-    // boundary so onMidnightTimerFired()'s wall-time revalidation sees an
-    // on-time fire rather than treating it as early.
+    // Advance the fake clock to the boundary and drive the real heartbeat
+    // tick directly (C5): no real wait.
     const QDateTime boundary(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
     clock.setNow(boundary);
-    tracker.dayBoundaryWatcher_dbg().armScheduledStop(boundary);
-    tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+    tracker.onTick(boundary);
 
     // Assert: exactly one stopped signal, with MidnightScheduled reason.
     QCOMPARE(stoppedSpy.count(), 1);
@@ -831,10 +825,10 @@ void IntegrationTest::test_Z_engine_watchdog_emits_MidnightWatchdog()
 /**
  * Test AA — No duplicate stop.
  *
- * If both the scheduled stop timer and the watchdog would fire (race), only
- * one stopped() signal is emitted.  Simulate by: arming the timer (1 ms fire),
- * then calling onTick() to let the watchdog win — the timer fires afterward
- * but the engine is already stopped so it no-ops.
+ * With the scheduled stop and the watchdog both driven purely from the same
+ * heartbeat (C5), repeated onTick() calls at the cutoff, later same-day
+ * instants, and into the next date must still yield exactly one stopped()
+ * signal.
  */
 void IntegrationTest::test_AA_no_duplicate_stop_signal()
 {
@@ -843,8 +837,7 @@ void IntegrationTest::test_AA_no_duplicate_stop_signal()
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
 
-    // Pin the engine clock to mid-day so Start's auto-armed 23:59:59.500 timer is
-    // hours away and cannot fire during the qWait() below.
+    // Pin the engine clock to mid-day.
     // FakeClock declared before TimeTracker: see outlives-tracker note above
     FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
     TimeTracker tracker(settings, fakeDb);
@@ -853,28 +846,24 @@ void IntegrationTest::test_AA_no_duplicate_stop_signal()
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
 
-    // Arm the scheduled stop (fires in 1 ms).
-    const QDateTime pastStop(QDate::currentDate(), QTime(23, 59, 59, 600));
-    tracker.dayBoundaryWatcher_dbg().armScheduledStop(pastStop);
-
-    // No forced backdate needed: Start already anchored segment_start_time to
-    // the pinned FakeClock instant (2025-06-01), which onTick()'s real
-    // QDateTime::currentDateTime() argument below is trivially "cross
-    // midnight" from -- armScheduledStop() and onTick() both take `now` as an
-    // explicit argument and never consult now_provider_(), so the pinned
-    // clock and the real-wall-clock arm/qWait race stay independent without
-    // any direct write to session state.
     QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
     QVERIFY(stoppedSpy.isValid());
 
-    // Watchdog fires first (synchronous call).
-    tracker.onTick(QDateTime::currentDateTime());
-    QCOMPARE(stoppedSpy.count(), 1); // watchdog stopped it
+    // Act: a tick at the cutoff stops the engine.
+    const QDateTime cutoff(QDate(2025, 6, 1), QTime(23, 59, 59, 500), Qt::LocalTime);
+    clock.setNow(cutoff);
+    tracker.onTick(clock.now());
+    QCOMPARE(stoppedSpy.count(), 1);
+    QVERIFY(tracker.isStopped());
 
-    // Now let the scheduled-stop timer fire.
-    QTest::qWait(100);
+    // Act: further ticks -- a later same-day instant, and into the next
+    // date -- must not produce a second stop.
+    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(23, 59, 59, 900), Qt::LocalTime));
+    tracker.onTick(clock.now());
+    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime));
+    tracker.onTick(clock.now());
 
-    // Must still be exactly one emission.
+    // Assert: still exactly one emission.
     QCOMPARE(stoppedSpy.count(), 1);
     QVERIFY(tracker.isStopped());
 }

@@ -11,11 +11,15 @@ class ShutdownCoordinatorTest : public QObject
 
 private:
     // D15 part 4: fixture-owned clock, pinned to TestCommon::fixedNow()
-    // (local noon) so Start()'s real armScheduledStop() QTimer
-    // (timetracker.cpp:654) is armed ~12 real hours out and cannot fire
-    // during any test's run, regardless of when the real wall clock crosses
-    // local midnight -- see test_shutdowncoordinator.cpp's file-header
-    // comment for the class-wide mechanism this closes. Allocated in init()
+    // (local noon) so every test's segment_start_time and any onTick() call
+    // it makes explicitly stay hours away from the 23:59:59.500 cutoff by
+    // default -- see test_shutdowncoordinator.cpp's file-header comment.
+    // (C5: the scheduled stop is heartbeat-driven now, with no dedicated
+    // QTimer of its own, so this pinning is no longer defending against a
+    // real QTimer firing mid-test -- this binary never calls onTick() on
+    // its own -- but keeping tests pinned to a fixed noon anchor by default
+    // is still the simplest way to keep them independent of wall-clock
+    // time.) Allocated in init()
     // and destroyed in cleanup(), which QtTest runs immediately before/after
     // every test function -- so clock_ always outlives every TimeTracker a
     // test constructs as a local (stack) variable within its own body,

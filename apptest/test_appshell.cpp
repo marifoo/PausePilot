@@ -1559,7 +1559,7 @@ void AppShellTest::test_history_closes_at_midnight_under_nested_prompt()
             fired = true;
             const QDateTime cutoff(today, QTime(23, 59, 59, 500), Qt::LocalTime);
             clock.setNow(cutoff);
-            tracker.dayBoundaryWatcher_dbg().fireMidnightTimer_dbg();
+            tracker.onTick(cutoff);
         }
     });
     poll.start();
