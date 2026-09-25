@@ -33,6 +33,10 @@ private slots:
     void test_integration_duplicate_prevention();
     void test_integration_empty_database_operations();
     void test_integration_backpause_db_update();
+    // C12b: LockStateWatcher's captured lock instant, wired through its real
+    // signal into TimeTracker::useTimerViaLockEvent, is the timestamp that
+    // ends the Activity segment -- not a now-relative fallback.
+    void test_C12b_watcher_propagates_lockTime_to_backpause_anchor();
 
     // Shutdown sequence end-to-end: stop → flush → clean-shutdown marker.
     void test_F_shutdown_sequence_stop_flush_marker();

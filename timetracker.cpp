@@ -664,6 +664,14 @@ void TimeTracker::finalizePauseTransition(const QDateTime& now)
  */
 void TimeTracker::backpauseTimer(const QDateTime& now, const QDateTime& lockTime)
 {
+    // C12b: production's caller (useTimerViaLockEvent) already rejects a
+    // LongOngoingLock without a captured instant before this is reached;
+    // this guard is for the direct debug entry point (backpauseTimer_dbg),
+    // which can still be called with an invalid lockTime.
+    if (!lockTime.isValid()) {
+        Logger::Log("[WARNING] Backpause ignored; no lock timestamp");
+        return;
+    }
     if (mode_ != Mode::Activity) {
         Logger::Log("[DEBUG] Backpause ignored; not in Activity");
         return;
@@ -673,27 +681,12 @@ void TimeTracker::backpauseTimer(const QDateTime& now, const QDateTime& lockTime
         return;
     }
     Logger::Log("[DEBUG] Backpausing TimeTracker from Activity - D=" + QString::number(session_.durations.size()));
-    qint64 backpause_msec = settings_.getBackpauseMsec();
 
-    // Bounds check: backpause should be between 1 second and 1 hour
-    constexpr qint64 MIN_BACKPAUSE_MS = 1000;      // 1 second minimum
-    constexpr qint64 MAX_BACKPAUSE_MS = 3600000;   // 1 hour maximum
-    if (backpause_msec < MIN_BACKPAUSE_MS) {
-        Logger::Log(QString("[WARNING] Backpause value %1ms below minimum, using %2ms")
-            .arg(backpause_msec).arg(MIN_BACKPAUSE_MS));
-        backpause_msec = MIN_BACKPAUSE_MS;
-    } else if (backpause_msec > MAX_BACKPAUSE_MS) {
-        Logger::Log(QString("[WARNING] Backpause value %1ms exceeds maximum, using %2ms")
-            .arg(backpause_msec).arg(MAX_BACKPAUSE_MS));
-        backpause_msec = MAX_BACKPAUSE_MS;
-    }
-
-    // Calculate Activity end time (backpause boundary). Anchor the pause at the
-    // real wall-clock lock instant when it is known: the LongOngoingLock event
-    // may arrive long after the lock (e.g. after a suspend), so now−backpause
-    // would credit the suspended interval as Activity. Fall back to now−backpause
-    // only when no lock time was plumbed through by the caller.
-    QDateTime activity_end = lockTime.isValid() ? lockTime : now.addMSecs(-backpause_msec);
+    // Anchor the pause at the real wall-clock lock instant: the
+    // LongOngoingLock event may arrive long after the lock (e.g. after a
+    // suspend), so a now-relative calculation would credit the suspended
+    // interval as Activity.
+    QDateTime activity_end = lockTime;
 
     // Ensure activity_end is not before segment_start_time
     if (activity_end < session_.segment_start_time) {
@@ -907,10 +900,20 @@ void TimeTracker::onStopPressed()
  *
  * Note: Lock/Unlock events for checkpoint control are always processed.
  * Autopause behavior (LongOngoingLock handling) respects isAutopauseEnabled().
+ *
+ * C12b: production's LockStateWatcher always stamps a real captured instant
+ * on LongOngoingLock (see lockstatewatcher.cpp), so a LongOngoingLock
+ * without a valid lockTime can only be a malformed external/test call. It
+ * is rejected up front -- before the History revoke, the midnight discard,
+ * or any autopause mutation -- so it has no effect at all.
  */
 void TimeTracker::useTimerViaLockEvent(LockEvent event, const QDateTime& lockTime)
 {
     QMutexLocker locker(&mutex_);
+    if (event == LockEvent::LongOngoingLock && !lockTime.isValid()) {
+        Logger::Log("[WARNING] Malformed LongOngoingLock event (no timestamp) ignored");
+        return;
+    }
     const QDateTime now = now_provider_();
     if (dialog_open_ && event != LockEvent::None) revokeExclusiveEdit();
     if (discardCrossMidnightOngoingAndStop(now)) {

@@ -383,6 +383,14 @@ private slots:
     // D2/MEDIUM-6: backpauseTimer (the automatic lock-driven pause path) is
     // exposed to the same anchor-regression risk and must refuse the same way.
     void test_D2_backpause_refuses_backward_clock_step_no_state_mutated();
+    // C12b: backpauseTimer_dbg (the direct debug entry point) with a null
+    // lockTime must be a no-op -- no mode/state mutation -- since production
+    // callers always supply a captured instant.
+    void test_C12b_backpauseTimer_dbg_invalid_lockTime_is_noop();
+    // C12b: Settings autopause-threshold boundary values (0 and 99 minutes)
+    // must not perturb the backpause anchor -- the Activity segment always
+    // ends exactly at the captured lockTime, regardless of the threshold.
+    void test_C12b_backpause_anchors_at_lockTime_for_threshold_boundaries();
     // D2/MEDIUM-8: a DST fall-back is just another backward step.
     void test_D2_pause_refuses_dst_fallback_backward_step();
     // D2/MEDIUM-8: a DST spring-forward is a forward step and must not be
@@ -477,6 +485,13 @@ private slots:
     // also already revoked by then, since any real lock-watcher event closes
     // it before this handler runs.
     void test_D10_longlock_disabled_autopause_dialog_open_is_dropped_not_deferred();
+
+    // C12b: a LongOngoingLock with no captured timestamp (a malformed
+    // external/test event -- production's watcher always stamps a real
+    // instant) must be entirely ignored: no History revoke, still Active,
+    // no rows stored, and a later Unlock must not restart (pending-resume
+    // was never set).
+    void test_C12b_invalid_longlock_no_timestamp_is_ignored_no_revoke();
 
     // Round-2 review (finding 1): every source of a transitioned() event
     // driven through its REAL live path (not dbg-injected).

@@ -304,7 +304,7 @@ private:
     /// set) so callers that need to short-circuit (e.g. return early) can.
     bool stopIfLatched(const QDateTime& now, std::optional<Mode> observedFromOverride = std::nullopt);
     void pauseTimer(const QDateTime& now);
-    void backpauseTimer(const QDateTime& now, const QDateTime& lockTime = QDateTime());
+    void backpauseTimer(const QDateTime& now, const QDateTime& lockTime);
     void finalizePauseTransition(const QDateTime& now);
     // Appends a single same-day segment to session_.durations.
     // Silently discards segments that cross local midnight (D1: half-open
@@ -656,7 +656,7 @@ public:
     void saveCheckpoint_locked_dbg(const QDateTime& now) { saveCheckpoint_locked(now); }
 
     /// Exposes the backpause path for direct testing.
-    void backpauseTimer_dbg(const QDateTime& now, const QDateTime& lockTime = QDateTime()) { backpauseTimer(now, lockTime); }
+    void backpauseTimer_dbg(const QDateTime& now, const QDateTime& lockTime) { backpauseTimer(now, lockTime); }
 
     /// Exposes the addDuration path for direct testing.
     void addDuration_dbg(DurationType type, const QDateTime& start, const QDateTime& end) {

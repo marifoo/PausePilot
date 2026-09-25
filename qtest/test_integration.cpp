@@ -705,8 +705,9 @@ void IntegrationTest::test_integration_backpause_db_update()
     QVERIFY(!lockOrphans[0].segment_id.isEmpty());
     QCOMPARE(lockOrphans[0].segment_id.toString(), checkpointSegmentId.toString());
 
-    // Simulate long ongoing lock (triggers backpause)
-    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock);
+    // Simulate long ongoing lock (triggers backpause). C12b: LongOngoingLock
+    // requires a captured lock instant.
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, clock.now());
 
     // Backpause transitions to Pause and starts a fresh segment identity.
     // The Pause segment isn't checkpointed (saveCheckpoint_locked only
@@ -719,6 +720,74 @@ void IntegrationTest::test_integration_backpause_db_update()
     SqliteSessionStore db2(settings);
     auto loaded = db2.loadDurations();
     QVERIFY(loaded.size() >= 1);
+}
+
+// C12b: production wiring end-to-end -- LockStateWatcher's real
+// desktopLockEvent signal (which always carries a captured wall-clock lock
+// instant; see test_lockstatewatcher.cpp's coverage of that timestamp)
+// connected into TimeTracker::useTimerViaLockEvent. The Activity segment
+// must end exactly at the watcher's captured instant, not at some
+// now-relative fallback.
+void IntegrationTest::test_C12b_watcher_propagates_lockTime_to_backpause_anchor()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/autopause_enabled", true);
+    writer.setValue("uTimer/autopause_threshold_minutes", 1); // 60s
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    LockStateWatcher watcher(settings);
+    watcher.setNowProvider_dbg([&clock]() { return clock.now(); });
+    QObject::connect(&watcher, &LockStateWatcher::desktopLockEvent,
+                      &tracker, &TimeTracker::useTimerViaLockEvent);
+
+    std::deque<LockQueryResult> script = {
+        LockQueryResult::Unlocked, LockQueryResult::Unlocked,
+        LockQueryResult::Locked,   LockQueryResult::Locked, LockQueryResult::Locked };
+    watcher.setQueryProvider_dbg([&script](const QDateTime &) {
+        LockQueryResult r = script.front();
+        script.pop_front();
+        return r;
+    });
+
+    tracker.useTimerViaButton(Button::Start);
+
+    // Debounce Lock (3rd Locked sample), then mature LongOngoingLock via a
+    // suspend-sized jump, exactly as test_lockstatewatcher.cpp's own H3/A2
+    // coverage does.
+    watcher.update();
+    clock.advance(100);
+    watcher.update();
+    clock.advance(100);
+    watcher.update(); // Lock, stamped at the first Locked sample: t0+200
+
+    const QDateTime expectedLockTime = t0.addMSecs(200);
+
+    clock.advance(settings.getBackpauseMsec() + 60000);
+    watcher.update();
+    clock.advance(100);
+    watcher.update(); // LongOngoingLock, stamped at the same first Locked sample
+
+    // Assert: the Activity segment ends exactly at the watcher's captured
+    // lock instant.
+    QVERIFY(tracker.isPaused());
+    const Timeline timeline = tracker.completedTimeline();
+    bool foundActivityEndingAtLockTime = false;
+    for (const auto& d : timeline.completed()) {
+        if (d.type == DurationType::Activity && d.endTime == expectedLockTime) {
+            foundActivityEndingAtLockTime = true;
+        }
+    }
+    QVERIFY(foundActivityEndingAtLockTime);
 }
 
 // ============================================================================

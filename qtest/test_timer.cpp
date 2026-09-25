@@ -157,7 +157,10 @@ void TimerTest::test_timer_backpause_resets_checkpoint_and_splits()
     // segment the removed sessionState_dbg() write forced directly.
     clock.advance(120ll * 1000ll);
 
-    tracker.backpauseTimer_dbg(clock.now());
+    // C12b: backpauseTimer requires a captured lock instant; anchor it
+    // 60s before now so the expected ~120s Activity+Pause total still holds
+    // (equivalent to the old now-minus-threshold fallback this test relied on).
+    tracker.backpauseTimer_dbg(clock.now(), clock.now().addSecs(-60));
     QVERIFY(tracker.isPaused());
     QVERIFY(tracker.getOngoingDuration().has_value());
     QVERIFY(tracker.completedTimeline().completed().size() >= 2);
@@ -2074,7 +2077,8 @@ void TimerTest::test_QF1_lock_autopause_is_LockAutopause_cause()
 
     QSignalSpy spy(&tracker, &TimeTracker::transitioned);
 
-    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock);
+    // C12b: LongOngoingLock requires a captured lock instant.
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, QDateTime::currentDateTime());
 
     QCOMPARE(spy.count(), 1);
     const auto t = spy.first().first().value<TimeTracker::Transition>();
@@ -2091,7 +2095,8 @@ void TimerTest::test_QF1_lock_resume_is_LockResume_cause_emitted_once()
     TimeTracker tracker(settings, db);
 
     tracker.useTimerViaButton(Button::Start);
-    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock);
+    // C12b: LongOngoingLock requires a captured lock instant.
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, QDateTime::currentDateTime());
     QVERIFY(tracker.isPaused());
 
     QSignalSpy spy(&tracker, &TimeTracker::transitioned);
@@ -5081,6 +5086,84 @@ void TimerTest::test_D2_backpause_refuses_backward_clock_step_no_state_mutated()
     QVERIFY(fakeDb.storedDurations.empty());
 }
 
+// C12b: backpauseTimer_dbg (the direct debug entry point) with a null
+// lockTime -- production callers never do this; useTimerViaLockEvent
+// already rejects a timestamp-less LongOngoingLock before it can reach
+// backpauseTimer -- must be a pure no-op.
+void TimerTest::test_C12b_backpauseTimer_dbg_invalid_lockTime_is_noop()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    const SegmentId segId = tracker.getOngoingDuration()->segment_id;
+
+    clock.advance(60000);
+
+    // Act: direct debug call with an invalid (default) lockTime.
+    tracker.backpauseTimer_dbg(clock.now(), QDateTime());
+
+    // Assert: no mutation at all -- still Activity, same segment, nothing
+    // stored.
+    QVERIFY(tracker.isActive());
+    const auto ongoing = tracker.getOngoingDuration();
+    QVERIFY(ongoing.has_value());
+    QCOMPARE(ongoing->startTime, t0);
+    QCOMPARE(ongoing->segment_id, segId);
+    QVERIFY(fakeDb.storedDurations.empty());
+}
+
+// C12b: Settings allows the autopause threshold anywhere from 0 to 99
+// minutes, but that threshold no longer participates in backpauseTimer at
+// all -- the Activity segment always ends exactly at the captured lockTime.
+// Cover both boundary values to show the (now-removed) 1s-1h clamp cannot
+// resurface.
+void TimerTest::test_C12b_backpause_anchors_at_lockTime_for_threshold_boundaries()
+{
+    for (int thresholdMinutes : {0, 99}) {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QString settingsPath = createSettingsFile(tempDir.path(), 7);
+        QSettings writer(settingsPath, QSettings::IniFormat);
+        writer.setValue("uTimer/autopause_enabled", true);
+        writer.setValue("uTimer/autopause_threshold_minutes", thresholdMinutes);
+        writer.sync();
+        Settings settings(settingsPath);
+        FakeSessionStore fakeDb;
+
+        const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
+        FakeClock clock(t0);
+        TimeTracker tracker(settings, fakeDb);
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+        tracker.useTimerViaButton(Button::Start);
+
+        clock.advance(120000); // now = t0 + 120s
+        const QDateTime lockTime = t0.addSecs(90); // an arbitrary captured instant
+
+        // Act
+        tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime);
+
+        // Assert: the Activity segment ends exactly at lockTime, regardless
+        // of the threshold setting.
+        QVERIFY(tracker.isPaused());
+        const Timeline timeline = tracker.completedTimeline();
+        bool foundActivityEndingAtLockTime = false;
+        for (const auto& d : timeline.completed()) {
+            if (d.type == DurationType::Activity && d.endTime == lockTime) {
+                foundActivityEndingAtLockTime = true;
+            }
+        }
+        QVERIFY(foundActivityEndingAtLockTime);
+    }
+}
+
 // D2 (R11-003): a DST fall-back is, from the engine's point of view, just
 // another backward wall-clock step -- Pause must refuse it the same way.
 void TimerTest::test_D2_pause_refuses_dst_fallback_backward_step()
@@ -5908,6 +5991,53 @@ void TimerTest::test_D10_longlock_disabled_autopause_dialog_open_is_dropped_not_
     QVERIFY(!tracker.isDialogOpen_dbg());
 
     tracker.endExclusiveEdit();
+    QVERIFY(tracker.isActive());
+}
+
+// C12b: a LongOngoingLock with no captured timestamp is a malformed
+// external/test event -- production's LockStateWatcher always stamps a real
+// instant -- and must be rejected before ANY of useTimerViaLockEvent's other
+// effects: no History revoke, no autopause mutation, no midnight discard.
+void TimerTest::test_C12b_invalid_longlock_no_timestamp_is_ignored_no_revoke()
+{
+    // Arrange: Active, autopause enabled, History dialog open.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/autopause_enabled", true);
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    QSignalSpy revokeSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
+
+    // Act: a malformed LongOngoingLock -- default-constructed lockTime.
+    tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock);
+
+    // Assert: entirely ignored -- no revoke, no warning, dialog still open,
+    // still Active, nothing stored.
+    QCOMPARE(revokeSpy.count(), 0);
+    QCOMPARE(warnSpy.count(), 0);
+    QVERIFY(tracker.isDialogOpen_dbg());
+    QVERIFY(tracker.isActive());
+    QVERIFY(fakeDb.storedDurations.empty());
+
+    tracker.endExclusiveEdit();
+
+    // A later real Unlock must not restart -- pending-resume was never set
+    // by the ignored malformed event.
+    QSignalSpy spy(&tracker, &TimeTracker::transitioned);
+    tracker.useTimerViaLockEvent(LockEvent::Unlock);
+    QCOMPARE(spy.count(), 0);
     QVERIFY(tracker.isActive());
 }
 
