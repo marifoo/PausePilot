@@ -529,7 +529,7 @@ void HistoryEditSessionTest::test_refresh_ongoing_clears_when_engine_has_no_ongo
 
     QVERIFY(session.pendingTimelines()[0].ongoing().has_value());
 
-    // Stop the engine (simulates a deferred midnight stop or similar).
+    // Stop the engine (simulates the engine stopping).
     tracker.useTimerViaButton(Button::Stop);
 
     // refreshOngoing() must clear the ongoing in the session.

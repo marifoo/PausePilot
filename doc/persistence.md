@@ -236,6 +236,17 @@ and one-time transaction to decide whether orphans are finalized or
 removed. History saves replace the table unconditionally after
 confirmation.
 
+### Revoked edits
+
+When the engine revokes History's edit (at lock, sleep, midnight or shutdown),
+the dialog is flagged immediately. A revoke is never followed by a new save.
+If a save is in-flight when the revoke lands, the outcome depends on timing:
+if the revoke interrupts Steps 1–3 (model construction, conflict checking, user
+prompts), the save writes nothing and the table remains untouched. If the save
+already committed before the revoke (e.g. the revoke lands during the M2 warning
+shown after Step 4), the committed changes stay. Steps 4 and 5 run without an
+event loop, so a save lands whole or not at all.
+
 ## What is inside the `SessionStore` seam — and what is not
 
 Everything in this document — the SQL, the transactions, the

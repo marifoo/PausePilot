@@ -58,7 +58,10 @@ the current day, plus the time you started.
 - **History** — opens a dialog where you can browse past days and edit
   entries (split a segment, change Activity↔Pause, etc.). Saving may remove
   older entries that span one local midnight or conflict with other saved
-  entries; the dialog asks for confirmation before doing so.
+  entries; the dialog asks for confirmation before doing so. History closes
+  on its own at screen lock, sleep, midnight and shutdown, discarding any
+  unsaved edits; a brief tray notice mentions this and may go unseen if you
+  are away.
 - **Auto-Pause** — toggles whether long locks count as pauses.
 - **Pin / Tray** — keeps the window on top, or hides it to the system tray.
 

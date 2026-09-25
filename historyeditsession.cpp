@@ -246,9 +246,10 @@ void HistoryEditSession::refreshOngoing(TimeTracker& timer)
         updated.type = cur->type;
         pendingTimelines_[0] = Timeline(pendingTimelines_[0].completed(), updated);
     } else if (!fresh.has_value() && cur.has_value()) {
-        // Engine has no valid ongoing (e.g. cross-midnight after a deferred
-        // midnight stop). Clear it so commit() does not anchor a stale
-        // start time in session_, which would orphan a checkpoint row.
+        // Engine has no valid ongoing (e.g. the engine stopped while History was
+        // open: midnight, shutdown, or a fatal store error during History's own save).
+        // Clear it so commit() does not anchor a stale start time in session_,
+        // which would orphan a checkpoint row.
         pendingTimelines_[0] = Timeline(pendingTimelines_[0].completed(), std::nullopt);
     }
 }

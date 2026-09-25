@@ -81,7 +81,9 @@ Each box in one or two lines:
 - **`HealthMonitor`** — watches accumulated active / pause time per session
   and emits `warningTriggered` if a configurable threshold is exceeded.
 - **`HistoryDialog`** — modal editor for the persisted timeline; opens
-  lazily from `ContentWidget`.
+  lazily from `ContentWidget`. Listens for `TimeTracker::exclusiveEditRevoked()`
+  and closes, discarding unsaved edits, when the engine closes History due to
+  lock, sleep, midnight, or shutdown.
 
 ## The `SessionStore` abstraction
 
@@ -169,6 +171,7 @@ sequenceDiagram
     participant MW as MainWin
     participant TT as TimeTracker
     participant CW as ContentWidget
+    participant HD as HistoryDialog
 
     QT->>MW: timeout → onTick()
     QT->>TT: timeout → onTick(now)
@@ -180,6 +183,7 @@ sequenceDiagram
     TT-->>MW: fatalError(QString)<br/>→ showFatalError (queued)
     TT-->>MW: stopped(StopReason)<br/>→ health_monitor_.reset
     TT-->>CW: transitioned(Transition)<br/>→ onTransitioned
+    TT-->>HD: exclusiveEditRevoked()<br/>→ onExclusiveEditRevoked
 ```
 
 `MainWin::onAboutToQuit` is wired separately to

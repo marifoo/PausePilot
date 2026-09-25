@@ -106,6 +106,52 @@ bug elsewhere cannot poison the in-memory session or the database.
 `MainWin` has **no** midnight logic. It reacts to `stopped(StopReason)` like
 any other stop.
 
+### History force-close at midnight, lock, sleep, and shutdown
+
+When `HistoryDialog` is open and any of the following events occurs, the engine
+revokes History's edit, closes the dialog, and discards any unsaved changes:
+
+- **Midnight boundary:** scheduled stop (23:59:59.500), watchdog tick detecting
+  a crossed midnight boundary, or the date moving forward (`now.date() > date_
+  when_edit_began`).
+- **Lock events:** any lock-watcher event (Lock, LongOngoingLock, or Unlock).
+- **Sleep:** a lock event is usually what closes History during sleep; if the
+  machine sleeps across midnight without a lock, the midnight watchdog closes
+  it.
+- **Shutdown/logout/SIGTERM/end-session:** the shutdown sequence revokes
+  History before stopping the live segment.
+
+The revoke mechanism runs **before** the engine makes any state change for the
+event. `TimeTracker::revokeExclusiveEdit()` emits `exclusiveEditRevoked()`,
+which synchronously sets a flag on `HistoryDialog`, then queues `closeRevoked()`
+to close any open child dialogs and menus, then closes History itself with
+`reject()`. `HistoryDialog::saveChanges()` checks the flag and refuses all
+database writes, so no partial save or retry can succeed.
+
+A tray notification (`userWarning` signal) is sent whenever History closes:
+`"History was closed (screen lock, sleep, midnight, shutdown or a database error); any unsaved
+changes were discarded."` This notification appears in the tray balloon and
+status bar for ~10 seconds and may go unseen if the user is away (e.g. at
+lock time or overnight).
+
+### Sleep outcomes
+
+Without History open (or after History closes), the night-time behaviour is:
+
+- **Lock before sleep, with auto-pause matured:** Activity up to the lock and
+  Pause up to the auto-pause threshold are committed. After an overnight resume,
+  the watchdog discards only the ongoing Pause. The evening's Activity is kept.
+- **Lock before sleep, without auto-pause matured:** the segment is still
+  Activity. The overnight tick discards the **whole segment**, including the
+  evening's Activity. This matches the watchdog policy and is not a History
+  effect.
+- **Sleep across midnight without a lock:** the tick revokes any open History
+  and discards the segment, same as without a dialog.
+- **Same-day resume:** the Lock and LongOngoingLock are handled normally.
+- **Sleep same day without a lock:** History stays open, nothing is deferred
+  and the DB is untouched. Slept time counts as Activity with or without
+  History; this is a known suspend finding and out of scope.
+
 ## Shutdown flow
 
 The shutdown sequence is owned by `ShutdownCoordinator`. `MainWin::shutdown(ShutdownMode)`
@@ -126,6 +172,12 @@ is the single entry point into it, reached from three places:
   the next real shutdown (or History save) runs the full path again.
 - Linux signal (`SIGTERM` / `SIGINT` / `SIGHUP`) → `MainWin::onAboutToQuit`
   via the signal-handling pattern described below.
+
+**History during shutdown:** If `HistoryDialog` is open, `TimeTracker::shutdown()`
+revokes the edit immediately after acquiring the engine lock and before the
+terminal flag or stop. The dialog is flagged to close, its edits are discarded,
+and the engine then proceeds with the normal shutdown sequence (commit the live
+segment, drain pending work, etc.) as if History were not open.
 
 ```mermaid
 sequenceDiagram
