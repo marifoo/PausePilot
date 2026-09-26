@@ -260,6 +260,9 @@ it crosses the interface defined in `sessionstore.h`. `TimeTracker` calls
 `checkSchemaOnStartup`; `flushToDisc` and `markCleanShutdown` (the sole
 owner of writing the clean-shutdown marker) are called only by
 `ShutdownCoordinator` as part of the shutdown sequence, not by `TimeTracker`
-itself. That is what makes `FakeSessionStore` in `qtest/` viable: it can
+itself. `loadHistoryRows` is a separate read-only seam: it returns every row
+exactly as stored (finalized, unfinalized, multi-boundary, and malformed
+alike), never deletes or repairs anything, and is used by History's
+date-scoped editor rather than by `TimeTracker`. That is what makes `FakeSessionStore` in `qtest/` viable: it can
 re-implement the interface in pure C++ data structures and the engine code
 is none the wiser.

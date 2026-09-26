@@ -160,6 +160,54 @@ LoadResult FakeSessionStore::loadDurations()
     return result;
 }
 
+namespace {
+// H5 (WP1): formats a TimeDuration exactly as SqliteSessionStore's raw
+// columns would read back (see toUtcIso()/insertRows() in
+// sqlitesessionstore.cpp), so loadHistoryRows() is a truthful fake of the
+// real store's raw-text contract.
+StoredHistoryRow toStoredHistoryRow(const TimeDuration& d, bool finalized)
+{
+    StoredHistoryRow row;
+    row.segmentId = d.segment_id.toString();
+    row.type = QString::number(static_cast<int>(d.type));
+    row.startUtc = d.startTime.toUTC().toString(Qt::ISODateWithMs);
+    row.endUtc = d.endTime.toUTC().toString(Qt::ISODateWithMs);
+    row.isFinalized = finalized ? "1" : "0";
+    row.parsed = d;
+    return row;
+}
+}
+
+HistoryRowsResult FakeSessionStore::loadHistoryRows()
+{
+    callLog.append("loadHistoryRows");
+    HistoryRowsResult result;
+    result.status = loadDurationsResult.status;
+    if (result.status != SessionStoreResult::Success) {
+        return result;
+    }
+    // Same finalized projection as loadDurations() (preset rows deduped
+    // against storedDurations, storedDurations winning), all marked
+    // finalized, plus historyUnfinalizedRows appended as unfinalized.
+    for (const auto& d : loadDurationsResult.durations) {
+        const bool supersededByStored =
+            std::any_of(storedDurations.begin(), storedDurations.end(),
+                        [&](const TimeDuration& row) {
+                            return row.segment_id.toString() == d.segment_id.toString();
+                        });
+        if (!supersededByStored) {
+            result.rows.push_back(toStoredHistoryRow(d, true));
+        }
+    }
+    for (const auto& d : storedDurations) {
+        result.rows.push_back(toStoredHistoryRow(d, true));
+    }
+    for (const auto& d : historyUnfinalizedRows) {
+        result.rows.push_back(toStoredHistoryRow(d, false));
+    }
+    return result;
+}
+
 EntriesForDateResult FakeSessionStore::hasEntriesForDate(const QDate& /*date*/)
 {
     callLog.append("hasEntriesForDate");

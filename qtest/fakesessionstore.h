@@ -39,6 +39,7 @@ public:
     SessionStoreResult commitSession(const Timeline& session) override;
     SessionStoreResult replaceAll(const Timeline& history, const Timeline& session) override;
     LoadResult loadDurations() override;
+    HistoryRowsResult loadHistoryRows() override;
     EntriesForDateResult hasEntriesForDate(const QDate& date) override;
     SessionStoreResult saveCheckpoint(DurationType type, const QDateTime& startTime,
                                       const QDateTime& endTime, const SegmentId& segmentId) override;
@@ -93,6 +94,13 @@ public:
     /// category to simulate a failed/disabled load instead (durations is
     /// then ignored and the result is always empty).
     LoadResult loadDurationsResult;
+
+    /// H5 (WP1): additional unfinalized rows loadHistoryRows() appends on top
+    /// of the same finalized projection loadDurations() uses (storedDurations
+    /// plus loadDurationsResult.durations). Models unfinalized/in-flight
+    /// checkpoint rows a real DB might hold; not visible to loadDurations()
+    /// or merged into storedDurations.
+    std::deque<TimeDuration> historyUnfinalizedRows;
 
     /// Result returned by hasEntriesForDate(). Default: No entries.
     EntriesForDateResult entriesForDateResult = EntriesForDateResult::No;

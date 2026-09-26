@@ -1086,6 +1086,45 @@ SessionStoreResult SqliteSessionStore::replaceAll(const Timeline& history, const
 }
 
 /**
+ * Shared row-validity parse (H5): applies the same rules loadDurations() has
+ * always used to a row's raw text columns. Returns the parsed TimeDuration
+ * (local time) iff the row is well-formed; nullopt for any of: empty
+ * segment_id, out-of-range type, unparseable timestamp, start > end, or a
+ * non-positive computed interval. Does not log or delete -- that remains
+ * each caller's own policy.
+ */
+std::optional<TimeDuration> SqliteSessionStore::parseHistoryRow(const QString& segmentIdStr, const QString& typeStr,
+                                                                 const QString& startUtcStr, const QString& endUtcStr)
+{
+    if (segmentIdStr.isEmpty()) {
+        return std::nullopt;
+    }
+
+    const int typeInt = typeStr.toInt();
+    if (typeInt != static_cast<int>(DurationType::Activity) &&
+        typeInt != static_cast<int>(DurationType::Pause)) {
+        return std::nullopt;
+    }
+    const DurationType type = static_cast<DurationType>(typeInt);
+
+    const QDateTime startDateTime = QDateTime::fromString(startUtcStr, Qt::ISODateWithMs).toLocalTime();
+    const QDateTime endDateTime   = QDateTime::fromString(endUtcStr, Qt::ISODateWithMs).toLocalTime();
+    if (!startDateTime.isValid() || !endDateTime.isValid()) {
+        return std::nullopt;
+    }
+
+    if (startDateTime > endDateTime) {
+        return std::nullopt;
+    }
+    if (startDateTime.msecsTo(endDateTime) <= 0) {
+        return std::nullopt;
+    }
+
+    const SegmentId segmentId = SegmentId::fromString(segmentIdStr);
+    return TimeDuration::fromPersistedRow(type, startDateTime, endDateTime, segmentId);
+}
+
+/**
  * Retrieves the entire history of durations from the database.
  *
  * - Returns entries sorted by Start Date/Time (chronological).
@@ -1142,65 +1181,33 @@ LoadResult SqliteSessionStore::loadDurations()
     std::vector<long long> malformedIds;
     int skippedCount = 0;
 
-    // Parse each row and reconstruct TimeDuration objects
+    // Parse each row and reconstruct TimeDuration objects. Validity rules are
+    // shared with loadHistoryRows() via parseHistoryRow() (H5); this method
+    // additionally logs the malformed row's raw values below and queues it
+    // for deletion -- loadHistoryRows() does neither.
     while (query.next()) {
         const long long rowId = query.value(0).toLongLong();
-
-        // An empty segment_id is a corrupt row (SegmentId::fromString asserts
-        // non-empty in debug; the empty id would match every empty-id row on
-        // upsert in release). Treat it as a skipped corrupt row.
         const QString segmentIdStr = query.value(1).toString();
-        if (segmentIdStr.isEmpty()) {
-            Logger::Log("[DB] Warning: Skipped row with empty segment_id");
-            skippedCount++;
-            malformedIds.push_back(rowId);
-            continue;
-        }
-        const SegmentId segmentId = SegmentId::fromString(segmentIdStr);
-        const int typeInt = query.value(2).toInt();
-        const QDateTime startDateTime = QDateTime::fromString(query.value(3).toString(), Qt::ISODateWithMs).toLocalTime();
-        const QDateTime endDateTime   = QDateTime::fromString(query.value(4).toString(), Qt::ISODateWithMs).toLocalTime();
+        const QString typeStr = query.value(2).toString();
+        const QString startUtcStr = query.value(3).toString();
+        const QString endUtcStr = query.value(4).toString();
 
-        // Validate type enum range
-        if (typeInt != static_cast<int>(DurationType::Activity) &&
-            typeInt != static_cast<int>(DurationType::Pause)) {
-            Logger::Log(QString("[DB] Warning: Invalid type value %1, skipping entry").arg(typeInt));
-            skippedCount++;
-            malformedIds.push_back(rowId);
-            continue;
-        }
-
-        DurationType type = static_cast<DurationType>(typeInt);
-
-        // Validate timestamps
-        if (!startDateTime.isValid() || !endDateTime.isValid()) {
-            Logger::Log(QString("[DB] Warning: Skipped entry with invalid UTC timestamp(s) - start: %1, end: %2")
-                .arg(query.value(3).toString()).arg(query.value(4).toString()));
+        const std::optional<TimeDuration> parsed = parseHistoryRow(segmentIdStr, typeStr, startUtcStr, endUtcStr);
+        if (!parsed) {
+            // An empty segment_id, an out-of-range type, an unparseable
+            // timestamp, start > end, or a non-positive interval are all
+            // corrupt-row conditions (C3) -- logged together here since
+            // parseHistoryRow() no longer distinguishes which one fired.
+            Logger::Log(QString("[DB] Warning: Skipped malformed row (id=%1, segment_id='%2', type='%3', start='%4', end='%5')")
+                .arg(rowId).arg(segmentIdStr, typeStr, startUtcStr, endUtcStr));
             skippedCount++;
             malformedIds.push_back(rowId);
             continue;
         }
 
-        // Validate start <= end
-        if (startDateTime > endDateTime) {
-            Logger::Log(QString("[DB] Warning: Skipped entry with start > end - Start: %1, End: %2")
-                .arg(startDateTime.toString(Qt::ISODate)).arg(endDateTime.toString(Qt::ISODate)));
-            skippedCount++;
-            malformedIds.push_back(rowId);
-            continue;
-        }
-
-        // Create TimeDuration — cross-midnight rows are accepted via fromPersistedRow() so
-        // that createPages() can bucket them onto both the start-date and end-date pages.
-        if (startDateTime.msecsTo(endDateTime) <= 0) {
-            Logger::Log(QString("[DB] Dropped zero/negative-duration row at load: %1 → %2")
-                .arg(startDateTime.toString(Qt::ISODateWithMs))
-                .arg(endDateTime.toString(Qt::ISODateWithMs)));
-            skippedCount++;
-            malformedIds.push_back(rowId);
-            continue;
-        }
-        result.durations.emplace_back(TimeDuration::fromPersistedRow(type, startDateTime, endDateTime, segmentId));
+        // Cross-midnight rows are accepted via fromPersistedRow() so that
+        // createPages() can bucket them onto both the start-date and end-date pages.
+        result.durations.push_back(*parsed);
     }
 
     // Rollback is idiomatic for read-only transactions: no writes were made,
@@ -1249,6 +1256,63 @@ LoadResult SqliteSessionStore::loadDurations()
     if (skippedCount > 0) {
         Logger::Log(QString("[DB] loadDurations reconciliation summary: skipped=%1").arg(skippedCount));
     }
+
+    return result;
+}
+
+/**
+ * Read-only raw query (H5): returns every row in the durations table exactly
+ * as stored, sorted chronologically. Unlike loadDurations(), never filters by
+ * is_finalized and never deletes or repairs a malformed row -- this exists so
+ * a caller (History's date-scoped editor) can see the true persisted state,
+ * including rows loadDurations() would otherwise silently skip or purge.
+ */
+HistoryRowsResult SqliteSessionStore::loadHistoryRows()
+{
+    QMutexLocker locker(&db_mutex_);
+
+    HistoryRowsResult result;
+
+    if (history_days_to_keep_ == 0) {
+        result.status = SessionStoreResult::Disabled;
+        return result;
+    }
+
+    if (!ensureOpen()) {
+        Logger::Log("[DB] Could not open DB to load history rows");
+        result.status = SessionStoreResult::TransientError;
+        return result;
+    }
+
+    // Read transaction for a consistent snapshot, matching loadDurations().
+    if (!db.transaction()) {
+        Logger::Log("[DB] Error starting read transaction: " + db.lastError().text());
+        result.status = SessionStoreResult::TransientError;
+        return result;
+    }
+
+    QSqlQuery query(db);
+    query.prepare("SELECT segment_id, type, start_utc, end_utc, is_finalized FROM durations ORDER BY start_utc, id");
+    if (!query.exec()) {
+        db.rollback();
+        Logger::Log("[DB] Error executing loadHistoryRows query: " + query.lastError().text());
+        result.status = SessionStoreResult::TransientError;
+        return result;
+    }
+
+    while (query.next()) {
+        StoredHistoryRow row;
+        row.segmentId = query.value(0).toString();
+        row.type = query.value(1).toString();
+        row.startUtc = query.value(2).toString();
+        row.endUtc = query.value(3).toString();
+        row.isFinalized = query.value(4).toString();
+        row.parsed = parseHistoryRow(row.segmentId, row.type, row.startUtc, row.endUtc);
+        result.rows.push_back(std::move(row));
+    }
+
+    // Rollback is idiomatic for a read-only transaction: nothing was written.
+    db.rollback();
 
     return result;
 }

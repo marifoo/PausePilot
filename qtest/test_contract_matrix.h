@@ -71,6 +71,13 @@ private slots:
     // fatal: not distinctly returned; see C4/R07-003
     // CallerBug: N/A — loadDurations takes no caller-supplied parameters
 
+    // ── loadHistoryRows (H5/WP1) ─────────────────────────────────────
+    void test_loadHistoryRows_success_returns_all_rows_raw();
+    void test_loadHistoryRows_disabled_returns_Disabled_and_empty();
+    void test_loadHistoryRows_transient_on_closed_connection();
+    // CallerBug/fatal: N/A -- no caller-supplied parameters, no write
+    void test_C4_fake_loadHistoryRows_projects_storedDurations_and_unfinalized();
+
     // ── hasEntriesForDate ────────────────────────────────────────────
     void test_hasEntriesForDate_returns_Yes_when_entry_exists();
     void test_hasEntriesForDate_returns_No_when_no_entry();

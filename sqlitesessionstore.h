@@ -46,6 +46,7 @@ public:
     SessionStoreResult commitSession(const Timeline& session) override;
     SessionStoreResult replaceAll(const Timeline& history, const Timeline& session) override;
     LoadResult loadDurations() override;
+    HistoryRowsResult loadHistoryRows() override;
     EntriesForDateResult hasEntriesForDate(const QDate& date) override;
     SessionStoreResult saveCheckpoint(DurationType type, const QDateTime& startTime, const QDateTime& endTime, const SegmentId& segmentId) override;
     SessionStoreResult discardCheckpoint(const SegmentId& segmentId) override;
@@ -231,6 +232,13 @@ private:
     void performRetentionCleanup();
     void pruneOldBackups(int keepCount = 5);
     bool insertRows(QSqlQuery& query, const std::deque<TimeDuration>& rows);
+    // H5: shared row-validity parse used by both loadDurations() and
+    // loadHistoryRows(). Applies the same rules loadDurations() has always
+    // used (non-empty id, valid type, valid timestamps, positive interval);
+    // returns nullopt for a malformed row instead of throwing or logging --
+    // callers own logging/deletion policy for their own use case.
+    static std::optional<TimeDuration> parseHistoryRow(const QString& segmentIdStr, const QString& typeStr,
+                                                        const QString& startUtcStr, const QString& endUtcStr);
     // D11 (R07-005/R09-002): no longer part of the public surface -- its only
     // caller is commitSession(). Kept private; every test call site now goes
     // through commitSession()/replaceAll() or a scoped raw-SQL fixture.

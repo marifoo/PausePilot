@@ -86,6 +86,8 @@
 #include <QDateTime>
 #include <QString>
 #include <deque>
+#include <optional>
+#include <vector>
 #include "types.h"
 #include "timeline.h"
 
@@ -211,6 +213,42 @@ struct LoadResult {
 };
 
 /**
+ * One `durations` row exactly as stored, for loadHistoryRows() (H5).
+ *
+ * Every column is carried as raw text (query.value(i).toString()), never
+ * type-converted or validated -- this struct exists precisely so a caller
+ * can see a row that loadDurations() would silently skip or delete.
+ * `parsed` is set iff the row is well-formed by the same rules
+ * loadDurations() applies (non-empty id, valid type, valid timestamps,
+ * positive interval); its times are converted to local time. A row with
+ * `parsed == std::nullopt` is malformed and must be treated read-only by the
+ * caller -- loadHistoryRows() never deletes or repairs anything.
+ */
+struct StoredHistoryRow {
+    QString segmentId, type, startUtc, endUtc, isFinalized;
+    bool finalized() const { return isFinalized == "1"; }
+    std::optional<TimeDuration> parsed;
+};
+
+/**
+ * Result of loadHistoryRows() (H5).
+ *
+ * status carries the same SessionStoreResult::Category vocabulary:
+ *   Success        — query ran; rows holds every row in the table (finalized,
+ *                    unfinalized, multi-boundary, and malformed alike).
+ *   Disabled       — history storage is disabled; rows is always empty.
+ *   TransientError — DB could not be opened or the query failed; rows is empty.
+ *
+ * Unlike loadDurations(), this is a pure read: it never deletes malformed
+ * rows and never filters by is_finalized. CallerBug and FatalError are not
+ * applicable (no parameters, no write).
+ */
+struct HistoryRowsResult {
+    SessionStoreResult::Category status = SessionStoreResult::Success;
+    std::vector<StoredHistoryRow> rows;
+};
+
+/**
  * Result returned by recoverStartupCheckpoints() (B2/R08-001..003,005,
  * R05-004).
  *
@@ -299,7 +337,7 @@ enum class SchemaStatus { Ready, Created, Outdated, Inaccessible };
 enum class Operation {
     CommitSession, ReplaceAll, LoadDurations, HasEntriesForDate, SaveCheckpoint,
     DiscardCheckpoint, CheckSchemaOnStartup, FlushToDisc,
-    RecoverStartupCheckpoints, MarkCleanShutdown, Count
+    RecoverStartupCheckpoints, MarkCleanShutdown, LoadHistoryRows, Count
 };
 
 class SessionStore
@@ -343,6 +381,16 @@ public:
     /// failure (FatalError is not applicable post-C4). On any non-Success
     /// status, result.durations is empty.
     virtual LoadResult loadDurations() = 0;
+
+    /// Read-only raw query (H5): returns EVERY row in the durations table --
+    /// finalized, unfinalized, multi-boundary, and malformed alike -- exactly
+    /// as stored, sorted chronologically. Never deletes or repairs a row
+    /// (unlike loadDurations(), which deletes malformed rows as a side
+    /// effect); callers must never infer a row's absence from this result
+    /// meaning it was never persisted -- loadHistoryRows itself never removes
+    /// rows. Returns Disabled when history storage is off (rows
+    /// empty) or TransientError on DB open/query failure (rows empty).
+    virtual HistoryRowsResult loadHistoryRows() = 0;
 
     /// Returns Yes iff at least one finalised row's start falls on `localDate`
     /// interpreted in the system local time zone.

@@ -19,6 +19,7 @@
 #include <QtTest>
 #include <QSqlDatabase>
 #include <QSqlQuery>
+#include <QSqlError>
 
 using TestCommon::createSettingsFile;
 using TestCommon::fixedNowUtc;
@@ -28,7 +29,7 @@ using TestCommon::fixedNowUtc;
 // Operation enumerator AND a matching section here, then update this count --
 // otherwise this fails to compile as a reminder instead of silently shipping
 // an unverified operation.
-static_assert(static_cast<int>(Operation::Count) == 10,
+static_assert(static_cast<int>(Operation::Count) == 11,
     "SessionStore::Operation changed size -- add a matrix section to "
     "test_contract_matrix.cpp for the new/removed operation, then update "
     "this static_assert's count.");
@@ -255,6 +256,215 @@ void ContractMatrixTest::test_loadDurations_disabled_returns_Disabled_and_empty(
     const LoadResult r = db.loadDurations();
     QCOMPARE(r.status, SessionStoreResult::Disabled);
     QVERIFY(r.empty());
+}
+
+// ── loadHistoryRows (H5/WP1) ───────────────────────────────────────────────
+
+// Success: every row (finalized, unfinalized, multi-boundary, malformed) is
+// returned raw; `parsed` is set only for well-formed rows; nothing is deleted.
+void ContractMatrixTest::test_loadHistoryRows_success_returns_all_rows_raw()
+{
+    resetDatabaseFile();
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    SqliteSessionStore db(Settings(enabledSettings(dir)));
+    db.checkSchemaOnStartup();
+    QVERIFY(db.commitSession(Timeline(oneRow(), std::nullopt)).ok());
+
+    // Seed an unfinalized (checkpoint) row and a malformed row (empty id)
+    // directly via raw SQL -- loadHistoryRows() must surface both untouched.
+    QVERIFY(db.ensureOpen_dbg());
+    {
+        QSqlQuery insert(db.rawDb_dbg());
+        insert.prepare(
+            "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+            "VALUES (:segment_id, :type, :start_utc, :end_utc, 0)");
+        insert.bindValue(":segment_id", SegmentId::mint().toString());
+        insert.bindValue(":type", static_cast<int>(DurationType::Activity));
+        insert.bindValue(":start_utc", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+        insert.bindValue(":end_utc", QDateTime::currentDateTimeUtc().addSecs(60).toString(Qt::ISODateWithMs));
+        QVERIFY(insert.exec());
+    }
+    // Malformed rows, one of each kind the contract requires (reusing
+    // DatabaseTest::test_C3_loadDurations_deletes_all_malformed_row_shapes'
+    // four shapes): empty id, bad type, bad timestamp, zero interval.
+    // CHECK(length(segment_id) > 0) models a healthy DB; bypass it here (as
+    // an old/hand-edited DB would) to exercise the malformed-row path.
+    QSqlQuery pragmaOn(db.rawDb_dbg());
+    QVERIFY(pragmaOn.exec("PRAGMA ignore_check_constraints = ON"));
+    {
+        QSqlQuery insert(db.rawDb_dbg());
+        insert.prepare(
+            "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+            "VALUES ('', :type, :start_utc, :end_utc, 1)");
+        insert.bindValue(":type", static_cast<int>(DurationType::Activity));
+        insert.bindValue(":start_utc", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+        insert.bindValue(":end_utc", QDateTime::currentDateTimeUtc().addSecs(60).toString(Qt::ISODateWithMs));
+        QVERIFY2(insert.exec(), qPrintable(insert.lastError().text()));
+    }
+    {
+        QSqlQuery insert(db.rawDb_dbg());
+        insert.prepare(
+            "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+            "VALUES (:segment_id, 99, :start_utc, :end_utc, 1)");
+        insert.bindValue(":segment_id", SegmentId::mint().toString());
+        insert.bindValue(":start_utc", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+        insert.bindValue(":end_utc", QDateTime::currentDateTimeUtc().addSecs(60).toString(Qt::ISODateWithMs));
+        QVERIFY2(insert.exec(), qPrintable(insert.lastError().text()));
+    }
+    {
+        QSqlQuery insert(db.rawDb_dbg());
+        insert.prepare(
+            "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+            "VALUES (:segment_id, :type, 'not-a-date', 'also-not-a-date', 1)");
+        insert.bindValue(":segment_id", SegmentId::mint().toString());
+        insert.bindValue(":type", static_cast<int>(DurationType::Activity));
+        QVERIFY2(insert.exec(), qPrintable(insert.lastError().text()));
+    }
+    const QString zeroIntervalTs = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+    {
+        QSqlQuery insert(db.rawDb_dbg());
+        insert.prepare(
+            "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+            "VALUES (:segment_id, :type, :ts, :ts, 1)");
+        insert.bindValue(":segment_id", SegmentId::mint().toString());
+        insert.bindValue(":type", static_cast<int>(DurationType::Activity));
+        insert.bindValue(":ts", zeroIntervalTs);
+        QVERIFY2(insert.exec(), qPrintable(insert.lastError().text()));
+    }
+    // Multi-boundary row: a legacy row spanning more than one local date
+    // (out of contract for a WRITE, but loadable -- see C3). loadHistoryRows()
+    // must return it (and parse it) exactly like any other well-formed row.
+    {
+        QSqlQuery insert(db.rawDb_dbg());
+        insert.prepare(
+            "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+            "VALUES (:segment_id, :type, :start_utc, :end_utc, 1)");
+        insert.bindValue(":segment_id", SegmentId::mint().toString());
+        insert.bindValue(":type", static_cast<int>(DurationType::Activity));
+        const QDateTime multiStart = QDateTime::currentDateTimeUtc().addDays(-2);
+        insert.bindValue(":start_utc", multiStart.toString(Qt::ISODateWithMs));
+        insert.bindValue(":end_utc", multiStart.addDays(2).toString(Qt::ISODateWithMs));
+        QVERIFY(insert.exec());
+    }
+    db.closeConnection_dbg();
+
+    QSqlQuery countBefore(db.rawDb_dbg());
+    QVERIFY(db.ensureOpen_dbg());
+    QVERIFY(countBefore.exec("SELECT COUNT(*) FROM durations"));
+    QVERIFY(countBefore.next());
+    const int rowCountBefore = countBefore.value(0).toInt();
+    db.closeConnection_dbg();
+
+    const HistoryRowsResult r = db.loadHistoryRows();
+    QCOMPARE(r.status, SessionStoreResult::Success);
+    QCOMPARE(static_cast<int>(r.rows.size()), rowCountBefore);
+
+    // Each of the four malformed kinds must come back raw (untouched text)
+    // with `parsed` unset; well-formed rows (committed + unfinalized
+    // checkpoint + multi-boundary) must come back parsed.
+    int parsedCount = 0, malformedCount = 0, unfinalizedCount = 0;
+    bool sawEmptyId = false, sawBadType = false, sawBadTimestamp = false, sawZeroInterval = false;
+    for (const auto& row : r.rows) {
+        if (row.parsed.has_value()) parsedCount++; else malformedCount++;
+        if (!row.finalized()) unfinalizedCount++;
+
+        if (row.segmentId.isEmpty()) {
+            QVERIFY(!row.parsed.has_value());
+            sawEmptyId = true;
+        } else if (row.type == "99") {
+            QVERIFY(!row.parsed.has_value());
+            sawBadType = true;
+        } else if (row.startUtc == "not-a-date") {
+            QVERIFY(!row.parsed.has_value());
+            QCOMPARE(row.endUtc, QString("also-not-a-date"));
+            sawBadTimestamp = true;
+        } else if (row.startUtc == zeroIntervalTs && row.endUtc == zeroIntervalTs) {
+            QVERIFY(!row.parsed.has_value());
+            sawZeroInterval = true;
+        }
+    }
+    QVERIFY(sawEmptyId);
+    QVERIFY(sawBadType);
+    QVERIFY(sawBadTimestamp);
+    QVERIFY(sawZeroInterval);
+    QCOMPARE(malformedCount, 4);
+    QCOMPARE(unfinalizedCount, 1);
+    QCOMPARE(parsedCount, 3); // committed row + unfinalized checkpoint row + multi-boundary row
+
+    // Nothing was deleted or repaired.
+    QVERIFY(db.ensureOpen_dbg());
+    QSqlQuery countAfter(db.rawDb_dbg());
+    QVERIFY(countAfter.exec("SELECT COUNT(*) FROM durations"));
+    QVERIFY(countAfter.next());
+    QCOMPARE(countAfter.value(0).toInt(), rowCountBefore);
+    db.closeConnection_dbg();
+}
+
+// Disabled: status == Disabled, rows is empty.
+void ContractMatrixTest::test_loadHistoryRows_disabled_returns_Disabled_and_empty()
+{
+    resetDatabaseFile();
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    SqliteSessionStore db(Settings(disabledSettings(dir)));
+
+    const HistoryRowsResult r = db.loadHistoryRows();
+    QCOMPARE(r.status, SessionStoreResult::Disabled);
+    QVERIFY(r.rows.empty());
+}
+
+// Transient: an unopenable (read-only, pre-closed) connection reports
+// TransientError, matching loadDurations()'s ensureOpen() classification
+// (C4/R07-003).
+void ContractMatrixTest::test_loadHistoryRows_transient_on_closed_connection()
+{
+    resetDatabaseFile();
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    const QString settingsPath = enabledSettings(dir);
+    {
+        SqliteSessionStore seed{Settings(settingsPath)};
+        QVERIFY(seed.checkSchemaOnStartup() == SchemaStatus::Created);
+    }
+
+    QFile dbFile(db_path_);
+    QVERIFY(dbFile.setPermissions(QFile::ReadOwner | QFile::ReadUser));
+
+    SqliteSessionStore db{Settings(settingsPath)};
+    QVERIFY(!db.rawDb_dbg().isOpen());
+
+    const HistoryRowsResult r = db.loadHistoryRows();
+
+    QVERIFY(dbFile.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ReadUser));
+    QCOMPARE(r.status, SessionStoreResult::TransientError);
+    QVERIFY(r.rows.empty());
+}
+
+// Fake parity: loadHistoryRows() logs the call, mirrors the same
+// storedDurations/loadDurationsResult projection as loadDurations() (all
+// marked finalized), then appends historyUnfinalizedRows as unfinalized.
+void ContractMatrixTest::test_C4_fake_loadHistoryRows_projects_storedDurations_and_unfinalized()
+{
+    FakeSessionStore fakeDb;
+    const QDate today = QDate::currentDate();
+    TimeDuration committed = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(today, QTime(8, 0, 0), Qt::UTC), QDateTime(today, QTime(8, 30, 0), Qt::UTC));
+    fakeDb.storedDurations.push_back(committed);
+    TimeDuration unfinalized = TimeDuration::fromPersistedRow(DurationType::Pause,
+        QDateTime(today, QTime(9, 0, 0), Qt::UTC), QDateTime(today, QTime(9, 30, 0), Qt::UTC));
+    fakeDb.historyUnfinalizedRows.push_back(unfinalized);
+
+    const HistoryRowsResult r = fakeDb.loadHistoryRows();
+
+    QVERIFY(fakeDb.callLog.contains("loadHistoryRows"));
+    QCOMPARE(r.status, SessionStoreResult::Success);
+    QCOMPARE(static_cast<int>(r.rows.size()), 2);
+
+    int finalizedCount = 0, unfinalizedCount = 0;
+    for (const auto& row : r.rows) {
+        QVERIFY(row.parsed.has_value());
+        if (row.finalized()) finalizedCount++; else unfinalizedCount++;
+    }
+    QCOMPARE(finalizedCount, 1);
+    QCOMPARE(unfinalizedCount, 1);
 }
 
 // ── hasEntriesForDate ────────────────────────────────────────────────────────
