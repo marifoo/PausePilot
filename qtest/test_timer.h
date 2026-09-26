@@ -39,7 +39,6 @@ private slots:
     void test_C12c_lock_writes_immediate_checkpoint();
 
     void test_timer_ongoing_duration();
-    void test_timer_set_duration_type();
     void test_timer_checkpoints_paused();
     void test_timer_retry_append_failure_then_success_preserves_segments();
     void test_timer_retry_failure_keeps_unsaved_state_and_durations();
@@ -96,10 +95,6 @@ private slots:
     // 9.1: all three DurationCreateError causes discard the segment
     void test_addduration_discards_invalid_timestamp();
 
-    void test_isOngoingSegmentCrossMidnight_returns_false_when_stopped();
-    void test_isOngoingSegmentCrossMidnight_returns_false_for_same_day();
-    void test_isOngoingSegmentCrossMidnight_returns_true_when_segment_started_yesterday();
-
     void test_useTimerViaButton_force_stops_on_cross_midnight_ongoing();
     void test_useTimerViaButton_pause_event_is_dropped_when_cross_midnight();
 
@@ -149,8 +144,8 @@ private slots:
     void test_T8_destructor_does_not_crash_while_active();
 
     // beginExclusiveEdit/endExclusiveEdit checkpoint guard
-    void test_T2_replaceCurrentDurations_skips_checkpoint_while_dialog_open();
-    void test_C6_replaceCurrentDurations_writes_checkpoint_after_endExclusiveEdit();
+    void test_T2_commitEditedTimeline_skips_checkpoint_while_dialog_open();
+    void test_C6_commitEditedTimeline_writes_checkpoint_after_endExclusiveEdit();
 
     // MarkerResult::Error skips orphan reconciliation
     void test_S12_marker_error_skips_reconciliation();

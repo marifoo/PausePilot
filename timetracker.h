@@ -356,8 +356,6 @@ private:
     bool maybeReanchorCheckpoint(const TimeDuration& seg);
     /// Locked variant of getOngoingDuration() for callers that already hold mutex_.
     std::optional<TimeDuration> getOngoingDuration_locked() const;
-    /// Appends session_.durations to the DB. Returns true on success.
-    bool appendDurationsToDB();
     /// Rewrites all completed segments to the DB. Returns the store's result
     /// (needed by persistDurationsOrRetainForRetry() to apply the standard
     /// okOrDisabled() success/retain policy).
@@ -375,11 +373,6 @@ private:
      * Returns true unless the payload is retained for retry.
      */
     bool persistDurationsOrRetainForRetry();
-    void replaceCurrentDurations(const std::deque<TimeDuration>& newDurations,
-                                 const std::optional<TimeDuration>& ongoing = std::nullopt);
-    // Atomically replaces the live session with `edited`. Delegates to
-    // commitEditedTimeline; use commitEditedTimeline directly from outside TimeTracker.
-    void commit(const Timeline& edited);
 
     // D10: the one place that emits a real mode transition. Emits the
     // transitioned(Transition) event, then derives the one remaining legacy
@@ -507,14 +500,9 @@ public:
     EditCommitResult commitEditedTimeline(const Timeline& edited);
     LoadResult loadHistoryFromStore();
     std::optional<TimeDuration> getOngoingDuration() const;
-    // Cheap thread-safe predicate: true iff there is an ongoing segment that
-    // has crossed local midnight as of now (isCrossMidnight(start, now)).
-    // No production caller currently; exercised by tests only.
-    bool isOngoingSegmentCrossMidnight() const;
     qint64 getStartupRecoveredMsec() const;
     bool shouldShowStartupRecoveryNotification() const;
     int getStartupPolicyDroppedCount() const;
-    void setDurationType(size_t idx, DurationType type);
     SessionStoreResult replaceAll(const Timeline& history, const Timeline& session);
     /// Freezes checkpoints. Call before opening HistoryDialog.
     void beginExclusiveEdit();
@@ -691,12 +679,7 @@ public:
     }
 
     /// Exposes the internal DB-write helpers for the regression surface test.
-    bool appendDurationsToDB_dbg() { return appendDurationsToDB(); }
     bool updateDurationsInDB_dbg() { return updateDurationsInDB().okOrDisabled(); }
-    void replaceCurrentDurations_dbg(const std::deque<TimeDuration>& d,
-                                     const std::optional<TimeDuration>& o = std::nullopt) {
-        replaceCurrentDurations(d, o);
-    }
 #endif // QT_NO_DEBUG
 };
 

@@ -511,8 +511,7 @@ void IntegrationTest::test_F_shutdown_sequence_stop_flush_marker()
 // ============================================================================
 
 /**
- * Normal same-day session: isOngoingSegmentCrossMidnight() returns false and
- * discardCrossMidnightOngoingAndStop() does not fire.
+ * Normal same-day session: discardCrossMidnightOngoingAndStop() does not fire.
  */
 void IntegrationTest::test_5_0a_normal_same_day_no_discard()
 {
@@ -525,9 +524,6 @@ void IntegrationTest::test_5_0a_normal_same_day_no_discard()
     // Start with a same-day segment_start_time (current real time is fine).
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
-
-    // Watchdog predicate must be false for a fresh same-day session.
-    QVERIFY(!tracker.isOngoingSegmentCrossMidnight());
 
     // Directly call the internal helper with a same-day "now".
     const QDateTime sameDay = QDateTime::currentDateTime();
@@ -554,8 +550,10 @@ void IntegrationTest::test_5_0a_cross_midnight_ongoing_discarded_completed_prese
     // local midnight -- the real transition path a sleep-through-midnight
     // takes, instead of writing segment_start_time directly.
     const QDateTime yesterdayStart(QDate::currentDate().addDays(-1), QTime(20, 0, 0), Qt::LocalTime);
-    // FakeClock declared before TimeTracker: see outlives-tracker note above
-    // (test_5_0a_watchdog_helper_returns_false_when_not_crossed, ~line 588).
+    // FakeClock declared before TimeTracker so it outlives it: the tracker
+    // is left in Activity at scope exit, and ~TimeTracker()'s
+    // drainForShutdown() calls back into the now-provider, which captures
+    // &clock by reference.
     FakeClock clock(yesterdayStart);
     TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
@@ -573,9 +571,6 @@ void IntegrationTest::test_5_0a_cross_midnight_ongoing_discarded_completed_prese
 
     // Simulate sleep through midnight: advance the clock into today.
     clock.setNow(QDateTime(QDate::currentDate(), QTime(9, 0, 0), Qt::LocalTime));
-
-    // Pre-condition: watchdog predicate should now be true.
-    QVERIFY(tracker.isOngoingSegmentCrossMidnight());
 
     // Act: call the internal helper with "now" (today).
     const QDateTime today = clock.now();
@@ -605,7 +600,7 @@ void IntegrationTest::test_5_0a_discard_is_idempotent()
 
     const QDateTime yesterdayStart(QDate::currentDate().addDays(-1), QTime(20, 0, 0), Qt::LocalTime);
     // FakeClock declared before TimeTracker: see outlives-tracker note above
-    // (test_5_0a_watchdog_helper_returns_false_when_not_crossed, ~line 588).
+    // (test_5_0a_cross_midnight_ongoing_discarded_completed_preserved, ~line 558).
     FakeClock clock(yesterdayStart);
     TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
@@ -624,45 +619,6 @@ void IntegrationTest::test_5_0a_discard_is_idempotent()
     fakeDb.callLog.clear();
     QVERIFY(!tracker.discardCrossMidnightOngoingAndStop_dbg(today));
     QVERIFY(!fakeDb.callLog.contains("commitSession"));
-}
-
-/**
- * Watchdog predicate: isOngoingSegmentCrossMidnight() returns false when the
- * engine is stopped (Mode::None), and true only when the segment_start_time
- * is on a previous date.
- */
-void IntegrationTest::test_5_0a_watchdog_helper_returns_false_when_not_crossed()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    // FakeClock is declared before TimeTracker so it outlives it: the
-    // tracker is left in Activity at scope exit, and ~TimeTracker()'s
-    // drainForShutdown() calls back into the now-provider, which captures
-    // &clock by reference.
-    const QDateTime dayStart(QDate::currentDate(), QTime(20, 0, 0), Qt::LocalTime);
-    FakeClock clock(dayStart);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    // Stopped: must be false.
-    QVERIFY(tracker.isStopped());
-    QVERIFY(!tracker.isOngoingSegmentCrossMidnight());
-
-    // Running with same-day start: must be false.
-    tracker.useTimerViaButton(Button::Start);
-    QVERIFY(!tracker.isOngoingSegmentCrossMidnight());
-
-    // Advance the clock into the next day: must be true.
-    clock.setNow(QDateTime(QDate::currentDate().addDays(1), QTime(9, 0, 0), Qt::LocalTime));
-    QVERIFY(tracker.isOngoingSegmentCrossMidnight());
-
-    // Restore the clock to the segment's own day so the destructor's
-    // drainForShutdown() stops the engine cleanly instead of hitting the
-    // cross-midnight watchdog path.
-    clock.setNow(dayStart.addSecs(60));
 }
 
 void IntegrationTest::test_integration_backpause_db_update()
@@ -868,7 +824,7 @@ void IntegrationTest::test_Z_engine_watchdog_emits_MidnightWatchdog()
     // then advance the clock into today before ticking.
     const QDateTime yesterdayStart(QDate::currentDate().addDays(-1), QTime(20, 0, 0), Qt::LocalTime);
     // FakeClock declared before TimeTracker: see outlives-tracker note above
-    // (test_5_0a_watchdog_helper_returns_false_when_not_crossed, ~line 588).
+    // (test_5_0a_cross_midnight_ongoing_discarded_completed_preserved, ~line 558).
     FakeClock clock(yesterdayStart);
     TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });

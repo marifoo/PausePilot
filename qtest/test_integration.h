@@ -45,7 +45,6 @@ private slots:
     void test_5_0a_normal_same_day_no_discard();
     void test_5_0a_cross_midnight_ongoing_discarded_completed_preserved();
     void test_5_0a_discard_is_idempotent();
-    void test_5_0a_watchdog_helper_returns_false_when_not_crossed();
 
     // DayBoundaryWatcher: scheduled vs watchdog stop signals
     void test_Y_engine_scheduled_stop_emits_MidnightScheduled();

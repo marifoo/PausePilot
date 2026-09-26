@@ -213,8 +213,8 @@ void SessionState::adoptOngoingSegment(const TimeDuration& ongoing)
  * Checks structural invariants on the in-memory duration segments.
  *
  * Called in debug builds after every mutator that can reorder or add
- * duration segments (button/lock transitions, setDurationType,
- * commitEditedTimeline). Catches data-structure corruption early — before
+ * duration segments (button/lock transitions, commitEditedTimeline).
+ * Catches data-structure corruption early — before
  * it propagates to the DB or produces confusing UI behavior. Violations are
  * logged as warnings (not fatal) so tests surface them as QWARN output.
  *
@@ -997,20 +997,6 @@ Timeline TimeTracker::completedTimeline() const
     return Timeline(session_.durations, std::nullopt);
 }
 
-void TimeTracker::setDurationType(size_t idx, DurationType type)
-{
-    QMutexLocker locker(&mutex_);
-    if (idx < session_.durations.size()) {
-        session_.durations[idx].type = type;
-        Logger::Log(QString("[TIMER] Duration type changed at index %1 to %2").arg(idx).arg(type == DurationType::Activity ? "Activity" : "Pause"));
-    } else {
-        Logger::Log(QString("[TIMER] Invalid index %1 for setDurationType (size %2)").arg(idx).arg(session_.durations.size()));
-    }
-#ifndef QT_NO_DEBUG
-    checkDurationInvariants();
-#endif
-}
-
 /**
  * Attempts to write a fresh checkpoint re-anchored to the given ongoing segment.
  *
@@ -1139,17 +1125,6 @@ TimeTracker::EditCommitResult TimeTracker::commitEditedTimeline(const Timeline& 
                         : EditCommitResult::failure("checkpoint write failed after edit commit");
 }
 
-void TimeTracker::replaceCurrentDurations(const std::deque<TimeDuration>& newDurations,
-                                    const std::optional<TimeDuration>& ongoing)
-{
-    commitEditedTimeline(Timeline(newDurations, ongoing));
-}
-
-void TimeTracker::commit(const Timeline& edited)
-{
-    commitEditedTimeline(edited);
-}
-
 LoadResult TimeTracker::loadHistoryFromStore()
 {
     QMutexLocker locker(&mutex_);
@@ -1266,12 +1241,6 @@ DrainResult TimeTracker::drainForShutdown()
     }
 
     return DrainResult::complete();
-}
-
-bool TimeTracker::appendDurationsToDB()
-{
-    // Disabled history is a no-op, not a failure.
-    return appendDurationsChunkToDB(session_.durations).okOrDisabled();
 }
 
 void TimeTracker::logDbResultOrWarn(const SessionStoreResult& result, const QString& context)
@@ -1474,14 +1443,6 @@ void TimeTracker::addDuration(DurationType type,
     Logger::Log(QString("[DEBUG] Added duration (%1, %2 ms)")
         .arg(type == DurationType::Activity ? "Activity" : "Pause")
         .arg(dur));
-}
-
-bool TimeTracker::isOngoingSegmentCrossMidnight() const
-{
-    QMutexLocker locker(&mutex_);
-    if (mode_ == Mode::None) return false;
-    if (!session_.segment_start_time.isValid()) return false;
-    return isCrossMidnight(session_.segment_start_time, now_provider_());
 }
 
 /**

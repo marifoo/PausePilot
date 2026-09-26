@@ -91,7 +91,7 @@ void TimerTest::test_timer_manual_checkpoint_preserves_ongoing_duration()
     FakeSessionStore fakeDb;
     // D15/F1: deterministic clock so Start's segment_start_time and the
     // checkpoint end below are guaranteed same-day -- see the house
-    // convention at test_timer_set_duration_type() above.
+    // convention at test_timer.cpp:78.
     FakeClock clock(fixedNow());
     TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
@@ -340,40 +340,6 @@ void TimerTest::test_timer_ongoing_duration()
     // Stop -> None
     tracker.useTimerViaButton(Button::Stop);
     QCOMPARE(tracker.getOngoingDuration(), std::nullopt);
-}
-
-void TimerTest::test_timer_set_duration_type()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    SqliteSessionStore db(settings);
-
-    // Seed one completed Activity row through a real Start -> Pause
-    // transition (pauseTimer's addDuration(), timetracker.cpp:673) rather
-    // than sessionState_dbg(). Anchored to a fixed same-day time (not
-    // QDateTime::currentDateTime()) so the seeded row can never straddle
-    // midnight and trip the Timeline same-day assertion in completedTimeline().
-    QDateTime now = QDateTime(QDate::currentDate(), QTime(12, 0, 0));
-    // FakeClock declared before TimeTracker so it outlives it (see the
-    // ~TimeTracker() drain note elsewhere in this file).
-    FakeClock clock(now);
-    TimeTracker tracker(settings, db);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-    tracker.useTimerViaButton(Button::Start);
-    clock.advance(10ll * 1000ll);
-    tracker.useTimerViaButton(Button::Pause);
-
-    QCOMPARE(tracker.completedTimeline().completed().size(), (size_t)1);
-    QCOMPARE(tracker.completedTimeline().completed()[0].type, DurationType::Activity);
-
-    // Change to Pause
-    tracker.setDurationType(0, DurationType::Pause);
-    QCOMPARE(tracker.completedTimeline().completed()[0].type, DurationType::Pause);
-
-    // Invalid index
-    tracker.setDurationType(99, DurationType::Activity);
-    QCOMPARE(tracker.completedTimeline().completed()[0].type, DurationType::Pause); // Unchanged
 }
 
 void TimerTest::test_timer_checkpoints_paused()
@@ -1015,66 +981,6 @@ void TimerTest::test_addduration_discards_invalid_timestamp()
     QVERIFY(tracker.completedTimeline().completed().empty());
 }
 
-void TimerTest::test_isOngoingSegmentCrossMidnight_returns_false_when_stopped()
-{
-    // Arrange
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-
-    // mode_ == None by default
-    QVERIFY(!tracker.isOngoingSegmentCrossMidnight());
-}
-
-void TimerTest::test_isOngoingSegmentCrossMidnight_returns_false_for_same_day()
-{
-    // Arrange: start the segment 60s ago via the clock seam, then observe
-    // at "now" -- a real Start rather than writing segment_start_time
-    // directly. Anchored to a fixed local civil time (not real now), so
-    // the 60s-earlier start can never land on the previous day -- see the
-    // house convention at test_timer.cpp:78 and git show 5e63eae.
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    // FakeClock declared before TimeTracker so it outlives it (see the
-    // outlives-tracker note at test_integration.cpp:614).
-    const QDateTime now(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
-    FakeClock clock(now.addSecs(-60));
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    clock.setNow(now);
-
-    // Assert
-    QVERIFY(!tracker.isOngoingSegmentCrossMidnight());
-}
-
-void TimerTest::test_isOngoingSegmentCrossMidnight_returns_true_when_segment_started_yesterday()
-{
-    // Arrange: start yesterday just before midnight via the clock seam,
-    // then advance the clock into today -- the real sleep-through-midnight
-    // transition, instead of writing segment_start_time directly.
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    // FakeClock declared before TimeTracker so it outlives it (see the
-    // outlives-tracker note at test_integration.cpp:614).
-    FakeClock clock(QDateTime(QDate::currentDate().addDays(-1), QTime(23, 59, 58, 0), Qt::LocalTime));
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    clock.setNow(QDateTime::currentDateTime());
-
-    // Assert
-    QVERIFY(tracker.isOngoingSegmentCrossMidnight());
-}
-
 void TimerTest::test_useTimerViaButton_force_stops_on_cross_midnight_ongoing()
 {
     // Arrange: start yesterday just before midnight via the clock seam,
@@ -1342,9 +1248,6 @@ void TimerTest::test_D_timetracker_public_surface_regression()
     auto ongoing = tracker.getOngoingDuration();
     QVERIFY(ongoing.has_value()); // timer is running
 
-    bool crossMidnight = tracker.isOngoingSegmentCrossMidnight();
-    QVERIFY(!crossMidnight); // started now, so not cross-midnight
-
     qint64 recovered = tracker.getStartupRecoveredMsec();
     QCOMPARE(recovered, static_cast<qint64>(0)); // fresh db, nothing to recover
 
@@ -1360,22 +1263,12 @@ void TimerTest::test_D_timetracker_public_surface_regression()
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
 
-    // setDurationType: index 0 should exist after Activity+Pause cycle
-    if (!tracker.completedTimeline().completed().empty()) {
-        tracker.setDurationType(0, DurationType::Pause);
-        tracker.setDurationType(0, DurationType::Activity);
-    }
-
     tracker.useTimerViaButton(Button::Stop);
 
     // DB write helpers
     fakeDb.callLog.clear();
-    tracker.appendDurationsToDB_dbg();
     tracker.updateDurationsInDB_dbg();
     tracker.replaceAll(Timeline({}, std::nullopt), Timeline({}, std::nullopt));
-
-    // replaceCurrentDurations
-    tracker.replaceCurrentDurations_dbg({}, std::nullopt);
 
     // loadHistoryFromStore
     auto history = tracker.loadHistoryFromStore();
@@ -2036,11 +1929,11 @@ void TimerTest::test_T8_destructor_does_not_crash_while_active()
 }
 
 // ============================================================================
-// beginExclusiveEdit / endExclusiveEdit + replaceCurrentDurations checkpoint guard
+// beginExclusiveEdit / endExclusiveEdit + commitEditedTimeline checkpoint guard
 // ============================================================================
 
-// T2: replaceCurrentDurations must NOT call saveCheckpoint while dialog_open_ is true.
-void TimerTest::test_T2_replaceCurrentDurations_skips_checkpoint_while_dialog_open()
+// T2: commitEditedTimeline must NOT call saveCheckpoint while dialog_open_ is true.
+void TimerTest::test_T2_commitEditedTimeline_skips_checkpoint_while_dialog_open()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -2052,7 +1945,7 @@ void TimerTest::test_T2_replaceCurrentDurations_skips_checkpoint_while_dialog_op
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(10);
 
-    // Build a plausible ongoing segment for replaceCurrentDurations to adopt.
+    // Build a plausible ongoing segment for commitEditedTimeline to adopt.
     const QDateTime start = fixedNow().addSecs(-60);
     const QDateTime end   = fixedNow();
     TimeDuration ongoing = TimeDuration::fromLiveSession(DurationType::Activity, start, end, SegmentId::fromString("seg-001"));
@@ -2062,16 +1955,16 @@ void TimerTest::test_T2_replaceCurrentDurations_skips_checkpoint_while_dialog_op
 
     fakeDb.callLog.clear();
 
-    // replaceCurrentDurations with a valid ongoing segment — checkpoint must be suppressed.
-    tracker.replaceCurrentDurations_dbg({}, ongoing);
+    // commitEditedTimeline with a valid ongoing segment — checkpoint must be suppressed.
+    tracker.commitEditedTimeline(Timeline({}, ongoing));
 
     QCOMPARE(fakeDb.callLog.count("saveCheckpoint"), 0);
 
     tracker.endExclusiveEdit();
 }
 
-// C6: after endExclusiveEdit(), a subsequent replaceCurrentDurations resumes normal writes.
-void TimerTest::test_C6_replaceCurrentDurations_writes_checkpoint_after_endExclusiveEdit()
+// C6: after endExclusiveEdit(), a subsequent commitEditedTimeline resumes normal writes.
+void TimerTest::test_C6_commitEditedTimeline_writes_checkpoint_after_endExclusiveEdit()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -2094,7 +1987,7 @@ void TimerTest::test_C6_replaceCurrentDurations_writes_checkpoint_after_endExclu
     fakeDb.callLog.clear();
 
     // After endExclusiveEdit, dialog_open_ is false — checkpoint write must proceed.
-    tracker.replaceCurrentDurations_dbg({}, ongoing);
+    tracker.commitEditedTimeline(Timeline({}, ongoing));
 
     QCOMPARE(fakeDb.callLog.count("saveCheckpoint"), 1);
 }
