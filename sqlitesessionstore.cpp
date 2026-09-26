@@ -111,6 +111,101 @@ static QString toUtcIso(const QDateTime& dt)
     return dt.toUTC().toString(Qt::ISODateWithMs);
 }
 
+// H5/WP2 helpers for saveHistoryDays(). Pure -- none of these touch `db`.
+
+const StoredHistoryRow* findSnapshotRow(const std::vector<StoredHistoryRow>& snapshot, const QString& id)
+{
+    auto it = std::find_if(snapshot.begin(), snapshot.end(),
+                            [&](const StoredHistoryRow& r) { return r.segmentId == id; });
+    return it == snapshot.end() ? nullptr : &(*it);
+}
+
+// A row is editable for `day` iff it is finalized, well-formed, and its
+// parsed interval lies fully inside the day's UTC span -- the same
+// definition saveHistoryDays()'s CallerBug checks and its stale check share.
+bool rowEditableInSpan(const StoredHistoryRow& row, const QDateTime& dayStartUtc, const QDateTime& dayEndUtc)
+{
+    if (!row.finalized() || !row.parsed)
+        return false;
+    return row.parsed->startTime >= dayStartUtc && row.parsed->endTime <= dayEndUtc;
+}
+
+// Every CallerBug fact saveHistoryDays() must reject before any mutation and
+// before the Disabled guard (see sessionstore.h's CallerBug/Disabled
+// precedence rule, shared with commitSession/replaceAll/saveCheckpoint/
+// discardCheckpoint). Returns nullopt when the payload is acceptable.
+std::optional<QString> validateHistoryDaysCallerFacts(const std::vector<StoredHistoryRow>& openSnapshot,
+                                                       const std::vector<HistoryDayChange>& days)
+{
+    if (days.empty())
+        return QString("saveHistoryDays: days must not be empty");
+
+    QSet<QDate> seenDates;
+    QSet<QString> seenIds;
+
+    for (const auto& day : days) {
+        if (seenDates.contains(day.date))
+            return QString("saveHistoryDays: duplicate date %1").arg(day.date.toString(Qt::ISODate));
+        seenDates.insert(day.date);
+
+        if (!day.dayStartUtc.isValid() || !day.dayEndUtc.isValid() ||
+            day.dayStartUtc.msecsTo(day.dayEndUtc) <= 0)
+            return QString("saveHistoryDays: invalid or non-positive span for %1").arg(day.date.toString(Qt::ISODate));
+
+        for (const auto& id : day.deletedIds) {
+            const QString idStr = id.toString();
+            if (seenIds.contains(idStr))
+                return QString("saveHistoryDays: id %1 used more than once").arg(idStr);
+            seenIds.insert(idStr);
+
+            const StoredHistoryRow* row = findSnapshotRow(openSnapshot, idStr);
+            if (!row || !rowEditableInSpan(*row, day.dayStartUtc, day.dayEndUtc))
+                return QString("saveHistoryDays: deleted id %1 is not editable for its day").arg(idStr);
+        }
+
+        for (const auto& upsert : day.upserts) {
+            const QString idStr = upsert.segment_id.toString();
+            if (seenIds.contains(idStr))
+                return QString("saveHistoryDays: id %1 used more than once").arg(idStr);
+            seenIds.insert(idStr);
+
+            if (upsert.startTime < day.dayStartUtc || upsert.endTime > day.dayEndUtc)
+                return QString("saveHistoryDays: upsert %1 lies outside its day's span").arg(idStr);
+
+            const StoredHistoryRow* row = findSnapshotRow(openSnapshot, idStr);
+            if (row && !rowEditableInSpan(*row, day.dayStartUtc, day.dayEndUtc))
+                return QString("saveHistoryDays: upsert id %1 is not editable for its day").arg(idStr);
+        }
+
+        const DayValidity::Violation violation = DayValidity::validatePayload(day.upserts);
+        if (violation != DayValidity::Violation::None)
+            return QString("saveHistoryDays: invalid upsert payload (%1)").arg(DayValidity::describe(violation));
+    }
+
+    return std::nullopt;
+}
+
+// Raw-column fingerprint of one row, for the stale-check multiset compare
+// below. \x1f (unit separator) cannot appear in any of these columns (ids,
+// integer type text, or ISO-8601 timestamps), so concatenation cannot
+// collide two distinct row tuples into one fingerprint.
+QString rowFingerprint(const StoredHistoryRow& r)
+{
+    return r.segmentId + '\x1f' + r.type + '\x1f' + r.startUtc + '\x1f' + r.endUtc + '\x1f' + r.isFinalized;
+}
+
+// True iff `a` and `b` hold the same rows as a MULTISET of raw columns,
+// order-independent (the stale check in saveHistoryDays()).
+bool sameRawRows(const std::vector<StoredHistoryRow>& a, const std::vector<StoredHistoryRow>& b)
+{
+    QStringList fpA, fpB;
+    for (const auto& r : a) fpA << rowFingerprint(r);
+    for (const auto& r : b) fpB << rowFingerprint(r);
+    fpA.sort();
+    fpB.sort();
+    return fpA == fpB;
+}
+
 // Monotonically increasing counter used to mint unique SQLite connection names.
 // Using a counter instead of the object address (reinterpret_cast<quintptr>(this))
 // avoids name collisions when a SqliteSessionStore is destroyed and a new one is
@@ -1315,6 +1410,218 @@ HistoryRowsResult SqliteSessionStore::loadHistoryRows()
     db.rollback();
 
     return result;
+}
+
+/**
+ * H5/WP2: re-reads every row whose [start_utc, end_utc) overlaps
+ * [dayStartUtc, dayEndUtc), using the same text predicate hasEntriesForDate()
+ * uses. Assumes the caller already holds an open transaction (does not begin
+ * or end one); returns nullopt on a SQL failure, leaving rollback and the
+ * TransientError mapping to the caller.
+ */
+std::optional<std::vector<StoredHistoryRow>> SqliteSessionStore::selectRowsForSpan(const QDateTime& dayStartUtc, const QDateTime& dayEndUtc)
+{
+    QSqlQuery query(db);
+    query.prepare("SELECT segment_id, type, start_utc, end_utc, is_finalized FROM durations "
+                  "WHERE start_utc < :dayEnd AND end_utc > :dayStart ORDER BY start_utc, segment_id");
+    query.bindValue(":dayStart", toUtcIso(dayStartUtc));
+    query.bindValue(":dayEnd", toUtcIso(dayEndUtc));
+    if (!query.exec()) {
+        Logger::Log("[DB] saveHistoryDays: error re-reading day span: " + query.lastError().text());
+        return std::nullopt;
+    }
+
+    std::vector<StoredHistoryRow> rows;
+    while (query.next()) {
+        StoredHistoryRow row;
+        row.segmentId = query.value(0).toString();
+        row.type = query.value(1).toString();
+        row.startUtc = query.value(2).toString();
+        row.endUtc = query.value(3).toString();
+        row.isFinalized = query.value(4).toString();
+        row.parsed = parseHistoryRow(row.segmentId, row.type, row.startUtc, row.endUtc);
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
+/**
+ * H5/WP2: scoped, date-limited History save. See sessionstore.h for the full
+ * contract; summary of the flow, all inside one transaction covering every
+ * day in `days`:
+ *
+ *   1. CallerBug input-shape checks (validateHistoryDaysCallerFacts) --
+ *      before any mutation, before the Disabled guard.
+ *   2. Disabled / ensureOpen() / BEGIN early exits.
+ *   3. Per day: re-read the day, compare against the matching openSnapshot
+ *      rows as a multiset of raw columns -- any difference is Conflict.
+ *   4. Per day: any new/changed row overlapping a retained row of the other
+ *      type is CallerBug (U3, dayvalidity.h's hasNewCrossTypeOverlap()).
+ *   5. Apply every day's deletes and upserts.
+ *   6. Commit via commitOrRollback(); checkSegmentIdUniqueness() in debug.
+ *
+ * Steps 3-4 run for every day before step 5 touches anything, so a Conflict
+ * or CallerBug found on a later day still leaves every earlier day's data
+ * unmutated.
+ */
+SessionStoreResult SqliteSessionStore::saveHistoryDays(const std::vector<StoredHistoryRow>& openSnapshot,
+                                                        const std::vector<HistoryDayChange>& days)
+{
+    QMutexLocker locker(&db_mutex_);
+
+    const std::optional<QString> callerBug = validateHistoryDaysCallerFacts(openSnapshot, days);
+    if (callerBug) {
+        Logger::Log("[DB] saveHistoryDays: rejecting invalid payload (" + *callerBug + ")");
+        return SessionStoreResult::callerBug(*callerBug);
+    }
+
+    if (history_days_to_keep_ == 0) {
+        return SessionStoreResult::disabled();
+    }
+
+    if (!ensureOpen()) {
+        Logger::Log("[DB] Could not open DB to save history days");
+        return SessionStoreResult::transient("DB connection could not be opened");
+    }
+
+    if (!db.transaction()) {
+        Logger::Log("[DB] Error starting transaction for saveHistoryDays: " + db.lastError().text());
+        return SessionStoreResult::transient("Failed to start transaction: " + db.lastError().text());
+    }
+
+    // M1: every early-exit rollback below must also close the connection if
+    // the rollback itself fails -- otherwise the connection is left inside an
+    // open transaction (holding any earlier day's already-applied UPDATE/
+    // DELETE/INSERT) and every subsequent db.transaction() on it fails until
+    // restart. Mirrors commitOrRollback()'s own close-on-failed-rollback
+    // policy; also honours force_rollback_failure_dbg_ so a bare rollback
+    // here can be fault-injected the same way commitOrRollback()'s can.
+    auto rollbackOrClose = [this]() {
+#ifndef QT_NO_DEBUG
+        if (force_rollback_failure_dbg_) {
+            force_rollback_failure_dbg_ = false;
+            closeConnection();
+            return;
+        }
+#endif
+        if (!db.rollback()) {
+            closeConnection();
+        }
+    };
+
+    // ---- Stale check + new-conflict check, per day, before any mutation ----
+    for (const auto& day : days) {
+        const QString dayStartText = toUtcIso(day.dayStartUtc);
+        const QString dayEndText = toUtcIso(day.dayEndUtc);
+
+        const std::optional<std::vector<StoredHistoryRow>> reread = selectRowsForSpan(day.dayStartUtc, day.dayEndUtc);
+        if (!reread) {
+            rollbackOrClose();
+            return SessionStoreResult::transient("Failed to re-read day for staleness check");
+        }
+
+        // The same text predicate applied to the snapshot in C++ (the
+        // canonical-text assumption documented in sessionstore.h).
+        std::vector<StoredHistoryRow> snapshotSubset;
+        for (const auto& row : openSnapshot) {
+            if (row.startUtc < dayEndText && row.endUtc > dayStartText)
+                snapshotSubset.push_back(row);
+        }
+
+        if (!sameRawRows(*reread, snapshotSubset)) {
+            rollbackOrClose();
+            Logger::Log("[DB] saveHistoryDays: stale data detected for " + day.date.toString(Qt::ISODate));
+            return SessionStoreResult::conflict("History changed since it was opened");
+        }
+
+        QSet<QString> touchedIds;
+        for (const auto& id : day.deletedIds)
+            touchedIds.insert(id.toString());
+        for (const auto& upsert : day.upserts)
+            touchedIds.insert(upsert.segment_id.toString());
+
+        std::deque<TimeDuration> retained;
+        for (const auto& row : *reread) {
+            if (row.parsed && !touchedIds.contains(row.segmentId))
+                retained.push_back(*row.parsed);
+        }
+
+        if (DayValidity::hasNewCrossTypeOverlap(day.upserts, retained)) {
+            rollbackOrClose();
+            return SessionStoreResult::callerBug("saveHistoryDays: new row overlaps a retained row of the other type");
+        }
+    }
+
+    // ---- Apply: deletes, then updates/inserts, for every day ----
+    QSqlQuery deleteQuery(db);
+    deleteQuery.prepare("DELETE FROM durations WHERE segment_id = :id AND is_finalized = 1");
+    QSqlQuery updateQuery(db);
+    updateQuery.prepare("UPDATE durations SET type = :type, start_utc = :start_utc, end_utc = :end_utc "
+                         "WHERE segment_id = :id AND is_finalized = 1");
+    QSqlQuery insertQuery(db);
+    insertQuery.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                         "VALUES (:id, :type, :start_utc, :end_utc, 1)");
+
+    for (const auto& day : days) {
+        for (const auto& id : day.deletedIds) {
+            deleteQuery.bindValue(":id", id.toString());
+            if (!deleteQuery.exec()) {
+                rollbackOrClose();
+                Logger::Log("[DB] saveHistoryDays: error deleting row: " + deleteQuery.lastError().text());
+                return SessionStoreResult::transient("Failed to delete row: " + deleteQuery.lastError().text());
+            }
+            if (deleteQuery.numRowsAffected() != 1) {
+                rollbackOrClose();
+                Logger::Log("[DB] saveHistoryDays: delete affected an unexpected row count");
+                return SessionStoreResult::conflict("History changed since it was opened");
+            }
+        }
+
+        for (const auto& upsert : day.upserts) {
+            const QString idStr = upsert.segment_id.toString();
+            const QString startUtcStr = toUtcIso(upsert.startTime);
+            const QString endUtcStr = toUtcIso(upsert.endTime);
+            const bool isUpdate = findSnapshotRow(openSnapshot, idStr) != nullptr;
+
+            if (isUpdate) {
+                updateQuery.bindValue(":id", idStr);
+                updateQuery.bindValue(":type", static_cast<int>(upsert.type));
+                updateQuery.bindValue(":start_utc", startUtcStr);
+                updateQuery.bindValue(":end_utc", endUtcStr);
+                if (!updateQuery.exec()) {
+                    rollbackOrClose();
+                    Logger::Log("[DB] saveHistoryDays: error updating row: " + updateQuery.lastError().text());
+                    return SessionStoreResult::transient("Failed to update row: " + updateQuery.lastError().text());
+                }
+                if (updateQuery.numRowsAffected() != 1) {
+                    rollbackOrClose();
+                    Logger::Log("[DB] saveHistoryDays: update affected an unexpected row count");
+                    return SessionStoreResult::conflict("History changed since it was opened");
+                }
+            } else {
+                insertQuery.bindValue(":id", idStr);
+                insertQuery.bindValue(":type", static_cast<int>(upsert.type));
+                insertQuery.bindValue(":start_utc", startUtcStr);
+                insertQuery.bindValue(":end_utc", endUtcStr);
+                if (!insertQuery.exec()) {
+                    rollbackOrClose();
+                    Logger::Log("[DB] saveHistoryDays: error inserting row: " + insertQuery.lastError().text());
+                    return SessionStoreResult::transient("Failed to insert row: " + insertQuery.lastError().text());
+                }
+            }
+        }
+    }
+
+    const CommitOutcome commitResult = commitOrRollback("Error committing saveHistoryDays transaction");
+    if (!commitResult.committed) {
+        return SessionStoreResult::transient("Failed to commit saveHistoryDays transaction: " + commitResult.errorMessage);
+    }
+
+#ifndef QT_NO_DEBUG
+    checkSegmentIdUniqueness();
+#endif
+
+    return SessionStoreResult::success();
 }
 
 /**

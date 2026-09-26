@@ -40,6 +40,8 @@ public:
     SessionStoreResult replaceAll(const Timeline& history, const Timeline& session) override;
     LoadResult loadDurations() override;
     HistoryRowsResult loadHistoryRows() override;
+    SessionStoreResult saveHistoryDays(const std::vector<StoredHistoryRow>& openSnapshot,
+                                       const std::vector<HistoryDayChange>& days) override;
     EntriesForDateResult hasEntriesForDate(const QDate& date) override;
     SessionStoreResult saveCheckpoint(DurationType type, const QDateTime& startTime,
                                       const QDateTime& endTime, const SegmentId& segmentId) override;
@@ -83,6 +85,14 @@ public:
     SchemaStatus checkSchemaResult = SchemaStatus::Ready;
     SessionStoreResult setMarkerResult = SessionStoreResult::success();
     SessionStoreResult flushToDiscResult = SessionStoreResult::success();
+    /// WP2: result returned by saveHistoryDays(). On Success, storedDurations
+    /// is mutated to reflect the deletes and upserts of every day passed in.
+    SessionStoreResult saveHistoryDaysResult = SessionStoreResult::success();
+    /// WP2: the exact arguments of the most recent saveHistoryDays() call,
+    /// for assertions (the fake is a spy, not a policy engine -- it does not
+    /// duplicate the real store's day-validity/stale/new-conflict checks).
+    std::vector<StoredHistoryRow> lastHistorySaveSnapshot;
+    std::vector<HistoryDayChange> lastHistorySaveDays;
 
     /// Set of segment_ids seen in commitSession() calls.
     /// Populated on success for cross-path uniqueness checks in saveCheckpoint.

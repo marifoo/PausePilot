@@ -261,6 +261,52 @@ private slots:
     void test_H2_loadHistoryRows_checkpoint_raw_isFinalized_is_0();
     void test_H2_loadHistoryRows_parsed_has_exact_id_type_and_local_times();
     void test_H2_loadHistoryRows_saveCheckpoint_commitSession_round_trip();
+
+    // ── saveHistoryDays (H5/WP2) acceptance suite ──
+    // Success
+    void test_H5_WP2_saveHistoryDays_success_only_selected_rows_change();
+    void test_H5_WP2_saveHistoryDays_success_split_update_plus_insert();
+    void test_H5_WP2_saveHistoryDays_success_merge_via_delete_and_update();
+    void test_H5_WP2_saveHistoryDays_success_empty_replacement_deletes_all_editable_rows();
+    void test_H5_WP2_saveHistoryDays_success_untouched_cross_type_overlap_preserved();
+    void test_H5_WP2_saveHistoryDays_success_malformed_row_on_date_untouched_by_edit();
+
+    // Conflict, nothing changed
+    void test_H5_WP2_saveHistoryDays_conflict_row_changed_after_snapshot();
+    void test_H5_WP2_saveHistoryDays_conflict_row_deleted_after_snapshot();
+    void test_H5_WP2_saveHistoryDays_conflict_row_inserted_after_snapshot();
+    void test_H5_WP2_saveHistoryDays_conflict_cross_midnight_row_changed_after_snapshot();
+    void test_H5_WP2_saveHistoryDays_conflict_unfinalized_row_appeared_after_snapshot();
+    // M2: multi-boundary Conflict tests exercising the end_utc > dayStart side
+    // of the predicate (a row starting the day BEFORE the saved day, ending
+    // inside it), not the start_utc side already covered above.
+    void test_H5_WP2_saveHistoryDays_conflict_crossMidnightIntoDay_row_inserted_after_snapshot();
+    void test_H5_WP2_saveHistoryDays_conflict_crossMidnightIntoDay_row_changed_after_snapshot();
+
+    // CallerBug, nothing changed
+    void test_H5_WP2_saveHistoryDays_callerBug_new_upsert_crosstype_overlaps_retained();
+    void test_H5_WP2_saveHistoryDays_callerBug_delete_targets_cross_midnight_row();
+    void test_H5_WP2_saveHistoryDays_callerBug_delete_targets_unfinalized_row();
+    void test_H5_WP2_saveHistoryDays_callerBug_upsert_outside_day_span();
+    void test_H5_WP2_saveHistoryDays_callerBug_duplicate_id_across_days();
+    void test_H5_WP2_saveHistoryDays_callerBug_empty_days();
+    // M3: the non-editable snapshot id rule, exercised upsert-side (not
+    // deletedIds-side, already covered above).
+    void test_H5_WP2_saveHistoryDays_callerBug_upsert_reuses_cross_midnight_snapshot_id();
+    void test_H5_WP2_saveHistoryDays_callerBug_upsert_reuses_unfinalized_snapshot_id();
+
+    // M4: retained = re-read minus deleted/updated ids.
+    void test_H5_WP2_saveHistoryDays_success_type_changed_in_place_same_interval();
+    void test_H5_WP2_saveHistoryDays_success_delete_one_type_insert_other_type_same_interval();
+
+    // Failure and recovery
+    void test_H5_WP2_saveHistoryDays_forceCommitFailure_then_retry_succeeds();
+    void test_H5_WP2_saveHistoryDays_commitFailure_and_rollbackFailure_closes_connection();
+    void test_H5_WP2_saveHistoryDays_reconnects_after_explicit_closeConnection();
+    void test_H5_WP2_saveHistoryDays_uniqueClash_on_insert_after_earlier_update_rolls_back_both();
+    // M1: a failed db.rollback() on an early-exit path (not a commit failure)
+    // must also close the connection.
+    void test_H5_WP2_saveHistoryDays_rollbackFailure_on_staleConflict_closes_connection();
 };
 
 #endif // TEST_DATABASE_H

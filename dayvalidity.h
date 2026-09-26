@@ -92,6 +92,26 @@ inline Violation validatePayload(const std::deque<TimeDuration>& rows)
     return Violation::None;
 }
 
+/// True iff any row in `changed` overlaps a row of a DIFFERENT type in
+/// `retained` (U3: a new or edited History row must not create a NEW
+/// Activity/Pause overlap with an untouched row). Shared by
+/// SqliteSessionStore::saveHistoryDays()'s new-conflict check (H5/WP2) and
+/// HistoryEditSession::buildScopedSave()'s per-page violation check, so both
+/// use one definition of "new cross-type overlap" instead of two. Overlaps
+/// between two rows already in `retained` are never examined -- only pairs
+/// involving at least one row from `changed`.
+inline bool hasNewCrossTypeOverlap(const std::deque<TimeDuration>& changed,
+                                    const std::deque<TimeDuration>& retained)
+{
+    for (const auto& c : changed) {
+        for (const auto& r : retained) {
+            if (c.type != r.type && intervalsOverlap(c.startTime, c.endTime, r.startTime, r.endTime))
+                return true;
+        }
+    }
+    return false;
+}
+
 /// True iff half-open interval [start, end) overlaps local calendar date
 /// `date` at all. An interval ending exactly at local midnight contributes
 /// nothing to the following day (half-open semantics, via intervalsOverlap).

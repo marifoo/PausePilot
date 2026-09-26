@@ -47,6 +47,8 @@ public:
     SessionStoreResult replaceAll(const Timeline& history, const Timeline& session) override;
     LoadResult loadDurations() override;
     HistoryRowsResult loadHistoryRows() override;
+    SessionStoreResult saveHistoryDays(const std::vector<StoredHistoryRow>& openSnapshot,
+                                       const std::vector<HistoryDayChange>& days) override;
     EntriesForDateResult hasEntriesForDate(const QDate& date) override;
     SessionStoreResult saveCheckpoint(DurationType type, const QDateTime& startTime, const QDateTime& endTime, const SegmentId& segmentId) override;
     SessionStoreResult discardCheckpoint(const SegmentId& segmentId) override;
@@ -143,6 +145,10 @@ private:
     // Same "only consumed if reached" caveat as above: it is checked only
     // after a commit failure, so if armed while no commit fails it stays
     // armed for the next one.
+    // M1 (saveHistoryDays): also honoured directly by that function's local
+    // rollbackOrClose() helper, so the same seam can fault-inject a failed
+    // rollback on its early-exit paths (which never go through
+    // commitOrRollback()).
     bool force_rollback_failure_dbg_ = false;
     // C2 (R07-001 round 2) test seam: closes the real connection immediately
     // before commitOrRollback() calls the real db.commit(), reproducing the
@@ -239,6 +245,11 @@ private:
     // callers own logging/deletion policy for their own use case.
     static std::optional<TimeDuration> parseHistoryRow(const QString& segmentIdStr, const QString& typeStr,
                                                         const QString& startUtcStr, const QString& endUtcStr);
+    // H5/WP2: re-reads every row overlapping [dayStartUtc, dayEndUtc) inside
+    // the caller's already-open transaction, using the same text predicate
+    // hasEntriesForDate() uses. Returns nullopt on a SQL failure -- the
+    // caller rolls back and returns TransientError.
+    std::optional<std::vector<StoredHistoryRow>> selectRowsForSpan(const QDateTime& dayStartUtc, const QDateTime& dayEndUtc);
     // D11 (R07-005/R09-002): no longer part of the public surface -- its only
     // caller is commitSession(). Kept private; every test call site now goes
     // through commitSession()/replaceAll() or a scoped raw-SQL fixture.

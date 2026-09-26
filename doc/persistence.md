@@ -238,6 +238,62 @@ and one-time transaction to decide whether orphans are finalized or
 removed. History saves replace the table unconditionally after
 confirmation.
 
+### Scoped History save (H5/WP2)
+
+`SqliteSessionStore::saveHistoryDays(openSnapshot, days)` is a second, narrower
+write path alongside `replaceAll()`. It is not yet called by `HistoryDialog`
+(that switch is WP5) -- for now it exists as a store-level contract, exercised
+directly by `test_database.cpp`/`test_contract_matrix.cpp`.
+
+`openSnapshot` is the caller's own `loadHistoryRows()` read, taken once when
+History was opened. `days` carries one `HistoryDayChange` per edited local
+date: the date's UTC span, the ids of rows deleted outright, and the changed/
+new rows to upsert. Only rows named in `days` are ever touched; every other
+row, on every date, is left byte-identical, and no unfinalized row is ever
+touched.
+
+Everything below runs inside **one transaction covering every day** in
+`days`:
+
+1. **CallerBug** input-shape checks run first, before any mutation and before
+   the Disabled check (the same precedence `commitSession`/`replaceAll`/
+   `saveCheckpoint`/`discardCheckpoint` already use): unique dates, valid
+   non-empty spans, ids unique across every day's deletes and upserts
+   combined (which also catches an id both deleted and upserted), every
+   deleted id and every upsert id present in `openSnapshot` must be editable
+   for its day (finalized, well-formed, interval fully inside the day's
+   span), and every upsert must pass `DayValidity::validatePayload()` and lie
+   inside its span.
+2. `Disabled` if history storage is off; `TransientError` if the connection
+   or the transaction cannot be opened.
+3. **Stale check, per day.** The day is re-read with the text predicate
+   `start_utc < :dayEnd AND end_utc > :dayStart` (both rendered as canonical
+   UTC-ISO text via the same `toUtcIso()` every write uses), and compared
+   against the `openSnapshot` rows matching the identical text predicate in
+   C++, as a multiset of the five raw columns. Any difference rolls back the
+   whole transaction and returns `Conflict`. This assumes every row uTimer
+   writes stores canonical UTC-ISO text, so text order equals time order; a
+   non-canonical (hand-edited) row is judged by the same predicate on both
+   sides, so a change to it is still detected -- the only accepted gap is
+   such a row whose actual time overlaps the day but whose text does not,
+   which uTimer itself never produces.
+4. **New-conflict check, per day.** Retained rows are the re-read,
+   well-formed rows minus this day's deleted/upserted ids. Any upsert
+   overlapping a retained row of the other type rolls back and returns
+   `CallerBug` (the overlap rule the History user decisions call U3), via the
+   shared `DayValidity::hasNewCrossTypeOverlap()` helper in `dayvalidity.h`.
+5. **Apply**, once every day has passed its checks: each delete and each
+   update (an upsert id already present in `openSnapshot`) is matched by
+   `segment_id AND is_finalized = 1` and must affect exactly one row --
+   otherwise rollback and `Conflict`. Every other upsert id is inserted; a
+   SQL failure there, including a UNIQUE clash, rolls back and returns
+   `TransientError`.
+6. **Commit** through the same `commitOrRollback()` every write boundary
+   uses (a failed rollback closes the connection), then, in debug builds,
+   `checkSegmentIdUniqueness()`.
+
+No backup and no `*.durations.txt` export -- this path never creates either.
+
 ### Revoked edits
 
 When the engine revokes History's edit (at lock, sleep, midnight or shutdown),
@@ -263,6 +319,9 @@ owner of writing the clean-shutdown marker) are called only by
 itself. `loadHistoryRows` is a separate read-only seam: it returns every row
 exactly as stored (finalized, unfinalized, multi-boundary, and malformed
 alike), never deletes or repairs anything, and is used by History's
-date-scoped editor rather than by `TimeTracker`. That is what makes `FakeSessionStore` in `qtest/` viable: it can
+date-scoped editor rather than by `TimeTracker`. `saveHistoryDays` (H5/WP2,
+see "Scoped History save" above) is the date-scoped write counterpart to
+`loadHistoryRows`; it is not yet called in production (WP5 wires
+`HistoryDialog` to it). That is what makes `FakeSessionStore` in `qtest/` viable: it can
 re-implement the interface in pure C++ data structures and the engine code
 is none the wiser.

@@ -40,6 +40,12 @@
  *                   finalized history).  Retrying with the same arguments
  *                   will not help.  Log as critical.
  *
+ *   Conflict      — the stored data no longer matches the caller's snapshot
+ *                   of it (a concurrent change since the snapshot was taken).
+ *                   Only saveHistoryDays() (H5/WP2) returns this category;
+ *                   the caller must re-read fresh data before retrying, not
+ *                   simply resubmit the same payload.
+ *
  * After C4, only replaceAll's post-backup reopen can still return FatalError;
  * every other write boundary's ensureOpen()/open-failure path was
  * consolidated onto TransientError (see the ensureOpen()-consistency table
@@ -97,7 +103,7 @@
  * Category semantics — see unified vocabulary in file-level comment above.
  */
 struct SessionStoreResult {
-    enum Category { Success, Disabled, TransientError, FatalError, CallerBug };
+    enum Category { Success, Disabled, TransientError, FatalError, CallerBug, Conflict };
     Category category;
     QString message;
     /// True when a successful replaceAll() ran its destructive whole-table
@@ -117,6 +123,7 @@ struct SessionStoreResult {
     static SessionStoreResult transient(QString msg) { return {TransientError, std::move(msg)}; }
     static SessionStoreResult callerBug(QString msg) { return {CallerBug, std::move(msg)}; }
     static SessionStoreResult fatal(QString msg) { return {FatalError, std::move(msg)}; }
+    static SessionStoreResult conflict(QString msg) { return {Conflict, std::move(msg)}; }
 };
 
 /**
@@ -249,6 +256,26 @@ struct HistoryRowsResult {
 };
 
 /**
+ * One local date's worth of History edits, for saveHistoryDays() (H5/WP2).
+ *
+ * dayStartUtc/dayEndUtc are the half-open UTC span of `date`
+ * (DayValidity::localDayStart/localDayEnd(date).toUTC()), captured once when
+ * History was opened.
+ *
+ * deletedIds are editable open-time rows removed outright (merge losers); an
+ * empty set is valid (H5 permits replacing every row on a date with
+ * nothing). upserts are the changed rows: an id already present in the
+ * caller's snapshot keeps its identity (UPDATE), any other id is a split
+ * half or a brand-new row (INSERT).
+ */
+struct HistoryDayChange {
+    QDate date;
+    QDateTime dayStartUtc, dayEndUtc;
+    std::vector<SegmentId> deletedIds;
+    std::deque<TimeDuration> upserts;
+};
+
+/**
  * Result returned by recoverStartupCheckpoints() (B2/R08-001..003,005,
  * R05-004).
  *
@@ -337,7 +364,7 @@ enum class SchemaStatus { Ready, Created, Outdated, Inaccessible };
 enum class Operation {
     CommitSession, ReplaceAll, LoadDurations, HasEntriesForDate, SaveCheckpoint,
     DiscardCheckpoint, CheckSchemaOnStartup, FlushToDisc,
-    RecoverStartupCheckpoints, MarkCleanShutdown, LoadHistoryRows, Count
+    RecoverStartupCheckpoints, MarkCleanShutdown, LoadHistoryRows, SaveHistoryDays, Count
 };
 
 class SessionStore
@@ -391,6 +418,62 @@ public:
     /// rows. Returns Disabled when history storage is off (rows
     /// empty) or TransientError on DB open/query failure (rows empty).
     virtual HistoryRowsResult loadHistoryRows() = 0;
+
+    /// Atomically applies a scoped, date-limited History edit (H5/WP2), one
+    /// transaction covering every day in `days`. `openSnapshot` is the
+    /// caller's own loadHistoryRows() snapshot taken when History was
+    /// opened -- callers never assemble it ad hoc; TimeTracker supplies it
+    /// from its own open-time context.
+    ///
+    /// CallerBug (checked before any mutation and before the Disabled guard
+    /// below -- same precedence as every other write boundary, see the
+    /// vocabulary comment above):
+    ///   - `days` is empty, two entries share the same date, or a day's span
+    ///     is invalid or non-positive;
+    ///   - a segment_id is used more than once across every day's deletes
+    ///     and upserts combined (this also catches an id both deleted and
+    ///     upserted);
+    ///   - a deleted id, or an upsert id that also appears in `openSnapshot`,
+    ///     is not editable for its day: not finalized, malformed, or its
+    ///     interval does not lie fully inside that day's span;
+    ///   - an upsert fails DayValidity::validatePayload() or lies outside
+    ///     its day's span.
+    /// Returns Disabled when history storage is off (no-op). Returns
+    /// TransientError if the connection or the transaction cannot be opened.
+    ///
+    /// Inside the transaction, per day:
+    ///   - the day is re-read with the same text predicate hasEntriesForDate()
+    ///     uses (`start_utc < dayEnd AND end_utc > dayStart`, both rendered
+    ///     as canonical UTC-ISO text) and compared against the matching rows
+    ///     of `openSnapshot` (selected with the same text predicate in C++)
+    ///     as a multiset of raw columns; any difference rolls back the whole
+    ///     transaction and returns Conflict;
+    ///   - a new or changed row that overlaps a retained row of the other
+    ///     type (the untouched, well-formed re-read rows minus this day's
+    ///     deleted/upserted ids) rolls back and returns CallerBug (U3), via
+    ///     the shared helper in dayvalidity.h.
+    /// Then, for every day: each delete and each update (an upsert id
+    /// already present in `openSnapshot`) is matched by
+    /// `segment_id AND is_finalized = 1` and must affect exactly one row --
+    /// otherwise rollback and Conflict. Every other upsert id is inserted; a
+    /// SQL failure there, including a UNIQUE clash, rolls back and returns
+    /// TransientError.
+    ///
+    /// Never touches a row outside the selected day spans, and never
+    /// touches an unfinalized row. No backup and no export.
+    ///
+    /// Canonical-text assumption: every row this app writes stores start_utc/
+    /// end_utc as toUtcIso() text (UTC, ISODateWithMs, trailing 'Z'), so text
+    /// order equals time order and the text predicate above is equivalent to
+    /// the timestamp comparison it stands in for. A non-canonical row (hand-
+    /// edited or otherwise malformed) is judged by the same predicate on
+    /// both the re-read and the snapshot side, so its inclusion is at least
+    /// consistent and a change to it is still detected; the only accepted
+    /// gap is such a row whose actual *time* overlaps a day but whose *text*
+    /// does not, which falls outside both the stale check and the
+    /// new-conflict check. uTimer itself never writes such a row.
+    virtual SessionStoreResult saveHistoryDays(const std::vector<StoredHistoryRow>& openSnapshot,
+                                               const std::vector<HistoryDayChange>& days) = 0;
 
     /// Returns Yes iff at least one finalised row's start falls on `localDate`
     /// interpreted in the system local time zone.

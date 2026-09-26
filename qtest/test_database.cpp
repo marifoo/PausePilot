@@ -5242,3 +5242,1126 @@ void DatabaseTest::test_H2_loadHistoryRows_saveCheckpoint_commitSession_round_tr
     QCOMPARE(result.rows.size(), static_cast<size_t>(1));
     QCOMPARE(result.rows[0].isFinalized, QString("1"));
 }
+
+// ── H5/WP2: saveHistoryDays acceptance suite ──────────────────────────────
+
+namespace {
+
+// Builds a HistoryDayChange whose dayStartUtc/dayEndUtc are the canonical
+// half-open UTC span of `date`, exactly as a real caller (TimeTracker/
+// HistoryEditSession) would compute them.
+HistoryDayChange wp2DayChange(const QDate& date, std::vector<SegmentId> deleted,
+                               std::deque<TimeDuration> upserts)
+{
+    HistoryDayChange c;
+    c.date = date;
+    c.dayStartUtc = DayValidity::localDayStart(date).toUTC();
+    c.dayEndUtc = DayValidity::localDayEnd(date).toUTC();
+    c.deletedIds = std::move(deleted);
+    c.upserts = std::move(upserts);
+    return c;
+}
+
+// Raw fingerprint of the whole durations table, order-independent, for
+// byte-identical before/after comparisons. Assumes db can be opened.
+QStringList wp2RawSnapshot(SqliteSessionStore& db)
+{
+    db.ensureOpen_dbg();
+    QSqlQuery q(db.rawDb_dbg());
+    q.exec("SELECT segment_id, type, start_utc, end_utc, is_finalized FROM durations");
+    QStringList out;
+    while (q.next()) {
+        out << q.value(0).toString() + "|" + q.value(1).toString() + "|" +
+               q.value(2).toString() + "|" + q.value(3).toString() + "|" + q.value(4).toString();
+    }
+    out.sort();
+    return out;
+}
+
+// Raw fingerprint of exactly one row (empty string if absent), for isolating
+// a single id's before/after state.
+QString wp2RowFingerprint(SqliteSessionStore& db, const QString& id)
+{
+    db.ensureOpen_dbg();
+    QSqlQuery q(db.rawDb_dbg());
+    q.prepare("SELECT segment_id, type, start_utc, end_utc, is_finalized FROM durations WHERE segment_id = :id");
+    q.bindValue(":id", id);
+    q.exec();
+    if (!q.next())
+        return QString();
+    return q.value(0).toString() + "|" + q.value(1).toString() + "|" +
+           q.value(2).toString() + "|" + q.value(3).toString() + "|" + q.value(4).toString();
+}
+
+bool wp2InsertRaw(SqliteSessionStore& db, const QString& id, DurationType type,
+                   const QDateTime& startUtc, const QDateTime& endUtc, bool finalized)
+{
+    db.ensureOpen_dbg();
+    QSqlQuery q(db.rawDb_dbg());
+    q.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+              "VALUES (:id, :type, :s, :e, :f)");
+    q.bindValue(":id", id);
+    q.bindValue(":type", static_cast<int>(type));
+    q.bindValue(":s", startUtc.toUTC().toString(Qt::ISODateWithMs));
+    q.bindValue(":e", endUtc.toUTC().toString(Qt::ISODateWithMs));
+    q.bindValue(":f", finalized ? 1 : 0);
+    return q.exec();
+}
+
+} // namespace
+
+// ---- Success cases ----
+
+// Only the selected rows change. Other dates, and an unfinalized "live" row
+// on another date, stay byte-identical.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_success_only_selected_rows_change()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const QDate dateB = dateA.addDays(-1);
+    const SegmentId idA = SegmentId::mint();
+    const SegmentId idB = SegmentId::mint();
+    const SegmentId idLive = SegmentId::mint();
+
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime), idA));
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateB, QTime(9, 0, 0), Qt::LocalTime),
+        QDateTime(dateB, QTime(9, 30, 0), Qt::LocalTime), idB));
+    QVERIFY(db.commitSession(Timeline(seed, std::nullopt)).ok());
+    QVERIFY(db.saveCheckpoint(DurationType::Pause,
+        QDateTime(dateB, QTime(11, 0, 0), Qt::LocalTime),
+        QDateTime(dateB, QTime(11, 15, 0), Qt::LocalTime), idLive).ok());
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+    QCOMPARE(snapshot.status, SessionStoreResult::Success);
+    const QString bBefore = wp2RowFingerprint(db, idB.toString());
+    const QString liveBefore = wp2RowFingerprint(db, idLive.toString());
+
+    // Delta counts, not absolute zero: data_dir_ is shared across this whole
+    // test class, so earlier tests may already have left *.backup/
+    // *.durations.txt files in it.
+    QDir testDir(data_dir_.path());
+    const int backupsBefore = testDir.entryList(QStringList() << "*.backup", QDir::Files).size();
+    const int txtBefore = testDir.entryList(QStringList() << "*.durations.txt", QDir::Files).size();
+
+    TimeDuration updatedA = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(11, 0, 0), Qt::LocalTime), idA);
+    std::deque<TimeDuration> upserts{updatedA};
+    const HistoryDayChange day = wp2DayChange(dateA, {}, upserts);
+
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::Success);
+
+    QCOMPARE(wp2RowFingerprint(db, idB.toString()), bBefore);
+    QCOMPARE(wp2RowFingerprint(db, idLive.toString()), liveBefore);
+    QCOMPARE(wp2RowFingerprint(db, idA.toString()),
+             QString("%1|%2|%3|%4|1").arg(idA.toString())
+                 .arg(static_cast<int>(DurationType::Activity))
+                 .arg(updatedA.startTime.toUTC().toString(Qt::ISODateWithMs))
+                 .arg(updatedA.endTime.toUTC().toString(Qt::ISODateWithMs)));
+
+    QCOMPARE(testDir.entryList(QStringList() << "*.backup", QDir::Files).size(), backupsBefore);
+    QCOMPARE(testDir.entryList(QStringList() << "*.durations.txt", QDir::Files).size(), txtBefore);
+}
+
+// A split does an UPDATE of the original id plus an INSERT of a new id.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_success_split_update_plus_insert()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idA = SegmentId::mint();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(11, 0, 0), Qt::LocalTime), idA));
+    QVERIFY(db.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+
+    const SegmentId idNew = SegmentId::mint();
+    TimeDuration updatedA = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime), idA);
+    TimeDuration newHalf = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(11, 0, 0), Qt::LocalTime), idNew);
+    std::deque<TimeDuration> upserts{updatedA, newHalf};
+    const HistoryDayChange day = wp2DayChange(dateA, {}, upserts);
+
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::Success);
+
+    QVERIFY(db.ensureOpen_dbg());
+    QSqlQuery countQ(db.rawDb_dbg());
+    QVERIFY(countQ.exec("SELECT COUNT(*) FROM durations"));
+    QVERIFY(countQ.next());
+    QCOMPARE(countQ.value(0).toInt(), 2);
+
+    QCOMPARE(wp2RowFingerprint(db, idA.toString()),
+             QString("%1|%2|%3|%4|1").arg(idA.toString())
+                 .arg(static_cast<int>(DurationType::Activity))
+                 .arg(updatedA.startTime.toUTC().toString(Qt::ISODateWithMs))
+                 .arg(updatedA.endTime.toUTC().toString(Qt::ISODateWithMs)));
+    QCOMPARE(wp2RowFingerprint(db, idNew.toString()),
+             QString("%1|%2|%3|%4|1").arg(idNew.toString())
+                 .arg(static_cast<int>(DurationType::Activity))
+                 .arg(newHalf.startTime.toUTC().toString(Qt::ISODateWithMs))
+                 .arg(newHalf.endTime.toUTC().toString(Qt::ISODateWithMs)));
+}
+
+// A merge deletes the loser id via deletedIds and the survivor is updated
+// via upserts.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_success_merge_via_delete_and_update()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idSurvivor = SegmentId::mint();
+    const SegmentId idLoser = SegmentId::mint();
+    // Seeded via raw SQL, not commitSession(): two adjacent same-type rows
+    // would be silently normalized (merged) by commitSession()'s own
+    // pipeline before ever reaching the database as two separate rows, which
+    // would defeat this test's premise of two independently editable rows.
+    QVERIFY(wp2InsertRaw(db, idSurvivor.toString(), DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime).toUTC(),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime).toUTC(), true));
+    QVERIFY(wp2InsertRaw(db, idLoser.toString(), DurationType::Activity,
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime).toUTC(),
+        QDateTime(dateA, QTime(11, 0, 0), Qt::LocalTime).toUTC(), true));
+    db.closeConnection_dbg();
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+
+    TimeDuration merged = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(11, 0, 0), Qt::LocalTime), idSurvivor);
+    std::deque<TimeDuration> upserts{merged};
+    const HistoryDayChange day = wp2DayChange(dateA, {idLoser}, upserts);
+
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::Success);
+
+    QCOMPARE(wp2RowFingerprint(db, idLoser.toString()), QString());
+    QCOMPARE(wp2RowFingerprint(db, idSurvivor.toString()),
+             QString("%1|%2|%3|%4|1").arg(idSurvivor.toString())
+                 .arg(static_cast<int>(DurationType::Activity))
+                 .arg(merged.startTime.toUTC().toString(Qt::ISODateWithMs))
+                 .arg(merged.endTime.toUTC().toString(Qt::ISODateWithMs)));
+
+    QVERIFY(db.ensureOpen_dbg());
+    QSqlQuery countQ(db.rawDb_dbg());
+    QVERIFY(countQ.exec("SELECT COUNT(*) FROM durations"));
+    QVERIFY(countQ.next());
+    QCOMPARE(countQ.value(0).toInt(), 1);
+}
+
+// An empty replacement succeeds: every editable row on the date is deleted,
+// upserts is empty. Rows on other dates are untouched.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_success_empty_replacement_deletes_all_editable_rows()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const QDate dateB = dateA.addDays(-1);
+    const SegmentId id1 = SegmentId::mint();
+    const SegmentId id2 = SegmentId::mint();
+    const SegmentId idOther = SegmentId::mint();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(9, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(9, 30, 0), Qt::LocalTime), id1));
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Pause,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 15, 0), Qt::LocalTime), id2));
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateB, QTime(9, 0, 0), Qt::LocalTime),
+        QDateTime(dateB, QTime(9, 30, 0), Qt::LocalTime), idOther));
+    QVERIFY(db.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+    const QString otherBefore = wp2RowFingerprint(db, idOther.toString());
+
+    const HistoryDayChange day = wp2DayChange(dateA, {id1, id2}, {});
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::Success);
+
+    QCOMPARE(wp2RowFingerprint(db, id1.toString()), QString());
+    QCOMPARE(wp2RowFingerprint(db, id2.toString()), QString());
+    QCOMPARE(wp2RowFingerprint(db, idOther.toString()), otherBefore);
+}
+
+// An untouched touching-or-overlapping pair of different types (a legitimate
+// pre-existing Activity/Pause overlap) on the same date keeps both ids and
+// every byte, while a third row on that date is edited.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_success_untouched_cross_type_overlap_preserved()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idActivity = SegmentId::mint();
+    const SegmentId idPause = SegmentId::mint();
+    const SegmentId idEdited = SegmentId::mint();
+
+    // Seeded via raw SQL: a legitimate pre-existing Activity/Pause overlap is
+    // legacy data that no ordinary write path can create today, but it can
+    // already exist on disk.
+    QVERIFY(wp2InsertRaw(db, idActivity.toString(), DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime).toUTC(),
+        QDateTime(dateA, QTime(11, 0, 0), Qt::LocalTime).toUTC(), true));
+    QVERIFY(wp2InsertRaw(db, idPause.toString(), DurationType::Pause,
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime).toUTC(),
+        QDateTime(dateA, QTime(10, 45, 0), Qt::LocalTime).toUTC(), true));
+    QVERIFY(wp2InsertRaw(db, idEdited.toString(), DurationType::Activity,
+        QDateTime(dateA, QTime(12, 0, 0), Qt::LocalTime).toUTC(),
+        QDateTime(dateA, QTime(12, 30, 0), Qt::LocalTime).toUTC(), true));
+    db.closeConnection_dbg();
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+    const QString activityBefore = wp2RowFingerprint(db, idActivity.toString());
+    const QString pauseBefore = wp2RowFingerprint(db, idPause.toString());
+
+    TimeDuration updatedEdited = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(12, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(13, 0, 0), Qt::LocalTime), idEdited);
+    std::deque<TimeDuration> upserts{updatedEdited};
+    const HistoryDayChange day = wp2DayChange(dateA, {}, upserts);
+
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::Success);
+
+    QCOMPARE(wp2RowFingerprint(db, idActivity.toString()), activityBefore);
+    QCOMPARE(wp2RowFingerprint(db, idPause.toString()), pauseBefore);
+    QCOMPARE(wp2RowFingerprint(db, idEdited.toString()),
+             QString("%1|%2|%3|%4|1").arg(idEdited.toString())
+                 .arg(static_cast<int>(DurationType::Activity))
+                 .arg(updatedEdited.startTime.toUTC().toString(Qt::ISODateWithMs))
+                 .arg(updatedEdited.endTime.toUTC().toString(Qt::ISODateWithMs)));
+}
+
+// A malformed finalized row on the date is left completely untouched by an
+// edit to a different row on the same date.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_success_malformed_row_on_date_untouched_by_edit()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idGood = SegmentId::mint();
+    const SegmentId idMalformed = SegmentId::mint();
+
+    QVERIFY(wp2InsertRaw(db, idGood.toString(), DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime).toUTC(),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime).toUTC(), true));
+
+    // Malformed: invalid type (99), otherwise a well-formed interval on dateA.
+    QVERIFY(db.ensureOpen_dbg());
+    {
+        QSqlQuery q(db.rawDb_dbg());
+        q.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                  "VALUES (:id, 99, :s, :e, 1)");
+        q.bindValue(":id", idMalformed.toString());
+        q.bindValue(":s", QDateTime(dateA, QTime(14, 0, 0), Qt::LocalTime).toUTC().toString(Qt::ISODateWithMs));
+        q.bindValue(":e", QDateTime(dateA, QTime(14, 30, 0), Qt::LocalTime).toUTC().toString(Qt::ISODateWithMs));
+        QVERIFY(q.exec());
+    }
+    db.closeConnection_dbg();
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+    const QString malformedBefore = wp2RowFingerprint(db, idMalformed.toString());
+
+    TimeDuration updatedGood = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(11, 0, 0), Qt::LocalTime), idGood);
+    std::deque<TimeDuration> upserts{updatedGood};
+    const HistoryDayChange day = wp2DayChange(dateA, {}, upserts);
+
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::Success);
+
+    QCOMPARE(wp2RowFingerprint(db, idMalformed.toString()), malformedBefore);
+}
+
+// M4: retained = re-read minus deleted/updated ids. Changing a row's type IN
+// PLACE (same id, same interval) upserts a new-type row that occupies the
+// exact same interval as its OWN pre-change row. If the touched id were not
+// excluded from "retained", this row's own prior state would be seen as an
+// untouched row of the other type at the same interval and wrongly rejected
+// as a new cross-type overlap (U3).
+void DatabaseTest::test_H5_WP2_saveHistoryDays_success_type_changed_in_place_same_interval()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idA = SegmentId::mint();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime), idA));
+    QVERIFY(db.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+
+    TimeDuration retyped = TimeDuration::fromPersistedRow(DurationType::Pause,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime), idA);
+    std::deque<TimeDuration> upserts{retyped};
+    const HistoryDayChange day = wp2DayChange(dateA, {}, upserts);
+
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::Success);
+
+    QCOMPARE(wp2RowFingerprint(db, idA.toString()),
+             QString("%1|%2|%3|%4|1").arg(idA.toString())
+                 .arg(static_cast<int>(DurationType::Pause))
+                 .arg(retyped.startTime.toUTC().toString(Qt::ISODateWithMs))
+                 .arg(retyped.endTime.toUTC().toString(Qt::ISODateWithMs)));
+}
+
+// M4: retained = re-read minus deleted/updated ids. Deleting a row of one
+// type and inserting a NEW id of the other type over the exact same interval
+// must succeed -- if the deleted id were not excluded from "retained", the
+// still-present (pre-delete) row would be seen as an untouched row of the
+// other type at the same interval and wrongly rejected as a new cross-type
+// overlap (U3).
+void DatabaseTest::test_H5_WP2_saveHistoryDays_success_delete_one_type_insert_other_type_same_interval()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idOld = SegmentId::mint();
+    const SegmentId idNew = SegmentId::mint();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime), idOld));
+    QVERIFY(db.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+
+    TimeDuration replacement = TimeDuration::fromPersistedRow(DurationType::Pause,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime), idNew);
+    std::deque<TimeDuration> upserts{replacement};
+    const HistoryDayChange day = wp2DayChange(dateA, {idOld}, upserts);
+
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::Success);
+
+    QCOMPARE(wp2RowFingerprint(db, idOld.toString()), QString());
+    QCOMPARE(wp2RowFingerprint(db, idNew.toString()),
+             QString("%1|%2|%3|%4|1").arg(idNew.toString())
+                 .arg(static_cast<int>(DurationType::Pause))
+                 .arg(replacement.startTime.toUTC().toString(Qt::ISODateWithMs))
+                 .arg(replacement.endTime.toUTC().toString(Qt::ISODateWithMs)));
+}
+
+// ---- Conflict cases: nothing changed ----
+
+// A selected-date row changed by raw SQL after the snapshot was taken.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_conflict_row_changed_after_snapshot()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idA = SegmentId::mint();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime), idA));
+    QVERIFY(db.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+
+    QVERIFY(db.ensureOpen_dbg());
+    {
+        QSqlQuery q(db.rawDb_dbg());
+        q.prepare("UPDATE durations SET end_utc = :e WHERE segment_id = :id");
+        q.bindValue(":e", QDateTime(dateA, QTime(10, 45, 0), Qt::LocalTime).toUTC().toString(Qt::ISODateWithMs));
+        q.bindValue(":id", idA.toString());
+        QVERIFY(q.exec());
+    }
+    const QStringList beforeAct = wp2RawSnapshot(db);
+
+    const HistoryDayChange day = wp2DayChange(dateA, {}, {});
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::Conflict);
+
+    QCOMPARE(wp2RawSnapshot(db), beforeAct);
+}
+
+// A selected-date row deleted (raw SQL) after the snapshot.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_conflict_row_deleted_after_snapshot()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idA = SegmentId::mint();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime), idA));
+    QVERIFY(db.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+
+    QVERIFY(db.ensureOpen_dbg());
+    {
+        QSqlQuery q(db.rawDb_dbg());
+        q.prepare("DELETE FROM durations WHERE segment_id = :id");
+        q.bindValue(":id", idA.toString());
+        QVERIFY(q.exec());
+    }
+    const QStringList beforeAct = wp2RawSnapshot(db);
+
+    const HistoryDayChange day = wp2DayChange(dateA, {}, {});
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::Conflict);
+    QCOMPARE(wp2RawSnapshot(db), beforeAct);
+}
+
+// A row inserted (raw SQL) on the date after the snapshot.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_conflict_row_inserted_after_snapshot()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idA = SegmentId::mint();
+    const SegmentId idB = SegmentId::mint();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime), idA));
+    QVERIFY(db.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+
+    QVERIFY(wp2InsertRaw(db, idB.toString(), DurationType::Pause,
+        QDateTime(dateA, QTime(11, 0, 0), Qt::LocalTime).toUTC(),
+        QDateTime(dateA, QTime(11, 30, 0), Qt::LocalTime).toUTC(), true));
+
+    const QStringList beforeAct = wp2RawSnapshot(db);
+
+    const HistoryDayChange day = wp2DayChange(dateA, {}, {});
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::Conflict);
+    QCOMPARE(wp2RawSnapshot(db), beforeAct);
+}
+
+// A multi-boundary (cross-midnight) row overlapping the date, changed (raw
+// SQL) after the snapshot.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_conflict_cross_midnight_row_changed_after_snapshot()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idX = SegmentId::mint();
+    QVERIFY(wp2InsertRaw(db, idX.toString(), DurationType::Activity,
+        QDateTime(dateA, QTime(23, 0, 0), Qt::LocalTime).toUTC(),
+        QDateTime(dateA.addDays(1), QTime(1, 0, 0), Qt::LocalTime).toUTC(), true));
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+
+    QVERIFY(db.ensureOpen_dbg());
+    {
+        QSqlQuery q(db.rawDb_dbg());
+        q.prepare("UPDATE durations SET end_utc = :e WHERE segment_id = :id");
+        q.bindValue(":e", QDateTime(dateA.addDays(1), QTime(2, 0, 0), Qt::LocalTime).toUTC().toString(Qt::ISODateWithMs));
+        q.bindValue(":id", idX.toString());
+        QVERIFY(q.exec());
+    }
+    const QStringList beforeAct = wp2RawSnapshot(db);
+
+    const HistoryDayChange day = wp2DayChange(dateA, {}, {});
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::Conflict);
+    QCOMPARE(wp2RawSnapshot(db), beforeAct);
+}
+
+// M2: a row starting on D-1 23:00 and ending on D 01:00, INSERTED (raw SQL)
+// AFTER the snapshot was taken, while saving day D. A start-date-only
+// predicate (start_utc >= dayStart AND start_utc < dayEnd) would exclude this
+// row from D's re-read entirely, since its start_utc falls on D-1 -- only the
+// real predicate's end_utc > dayStart term catches it.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_conflict_crossMidnightIntoDay_row_inserted_after_snapshot()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateD = QDate::currentDate();
+    const QDate dateDMinus1 = dateD.addDays(-1);
+    const SegmentId idA = SegmentId::mint();
+    const SegmentId idX = SegmentId::mint();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateD, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateD, QTime(10, 30, 0), Qt::LocalTime), idA));
+    QVERIFY(db.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+
+    QVERIFY(wp2InsertRaw(db, idX.toString(), DurationType::Activity,
+        QDateTime(dateDMinus1, QTime(23, 0, 0), Qt::LocalTime).toUTC(),
+        QDateTime(dateD, QTime(1, 0, 0), Qt::LocalTime).toUTC(), true));
+    const QStringList beforeAct = wp2RawSnapshot(db);
+
+    const HistoryDayChange day = wp2DayChange(dateD, {}, {});
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::Conflict);
+    QCOMPARE(wp2RawSnapshot(db), beforeAct);
+}
+
+// M2: same shape, but the D-1 23:00 -> D 01:00 row already existed at
+// snapshot time and is CHANGED (raw SQL) afterwards, while saving day D.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_conflict_crossMidnightIntoDay_row_changed_after_snapshot()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateD = QDate::currentDate();
+    const QDate dateDMinus1 = dateD.addDays(-1);
+    const SegmentId idX = SegmentId::mint();
+    QVERIFY(wp2InsertRaw(db, idX.toString(), DurationType::Activity,
+        QDateTime(dateDMinus1, QTime(23, 0, 0), Qt::LocalTime).toUTC(),
+        QDateTime(dateD, QTime(1, 0, 0), Qt::LocalTime).toUTC(), true));
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+
+    QVERIFY(db.ensureOpen_dbg());
+    {
+        QSqlQuery q(db.rawDb_dbg());
+        q.prepare("UPDATE durations SET end_utc = :e WHERE segment_id = :id");
+        q.bindValue(":e", QDateTime(dateD, QTime(2, 0, 0), Qt::LocalTime).toUTC().toString(Qt::ISODateWithMs));
+        q.bindValue(":id", idX.toString());
+        QVERIFY(q.exec());
+    }
+    const QStringList beforeAct = wp2RawSnapshot(db);
+
+    const HistoryDayChange day = wp2DayChange(dateD, {}, {});
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::Conflict);
+    QCOMPARE(wp2RawSnapshot(db), beforeAct);
+}
+
+// An unfinalized row (checkpoint) that appeared (raw SQL) on the date after
+// the snapshot.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_conflict_unfinalized_row_appeared_after_snapshot()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idA = SegmentId::mint();
+    const SegmentId idCheckpoint = SegmentId::mint();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime), idA));
+    QVERIFY(db.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+
+    QVERIFY(wp2InsertRaw(db, idCheckpoint.toString(), DurationType::Pause,
+        QDateTime(dateA, QTime(12, 0, 0), Qt::LocalTime).toUTC(),
+        QDateTime(dateA, QTime(12, 15, 0), Qt::LocalTime).toUTC(), false));
+
+    const QStringList beforeAct = wp2RawSnapshot(db);
+
+    const HistoryDayChange day = wp2DayChange(dateA, {}, {});
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::Conflict);
+    QCOMPARE(wp2RawSnapshot(db), beforeAct);
+}
+
+// ---- CallerBug cases: nothing changed ----
+
+// A new upsert row that cross-type-overlaps a retained (untouched) row on
+// the same date.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_callerBug_new_upsert_crosstype_overlaps_retained()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idRetained = SegmentId::mint();
+    const SegmentId idEdited = SegmentId::mint();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Pause,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime), idRetained));
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(12, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(12, 30, 0), Qt::LocalTime), idEdited));
+    QVERIFY(db.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+    const QStringList beforeAct = wp2RawSnapshot(db);
+
+    // Move idEdited to overlap idRetained's Pause interval: a NEW cross-type
+    // overlap with an untouched row (U3).
+    TimeDuration moved = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 15, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 45, 0), Qt::LocalTime), idEdited);
+    std::deque<TimeDuration> upserts{moved};
+    const HistoryDayChange day = wp2DayChange(dateA, {}, upserts);
+
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::CallerBug);
+    QCOMPARE(wp2RawSnapshot(db), beforeAct);
+}
+
+// A non-editable snapshot id used as a delete target: a legacy cross-midnight
+// row's id.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_callerBug_delete_targets_cross_midnight_row()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idX = SegmentId::mint();
+    QVERIFY(wp2InsertRaw(db, idX.toString(), DurationType::Activity,
+        QDateTime(dateA, QTime(23, 0, 0), Qt::LocalTime).toUTC(),
+        QDateTime(dateA.addDays(1), QTime(1, 0, 0), Qt::LocalTime).toUTC(), true));
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+    const QStringList beforeAct = wp2RawSnapshot(db);
+
+    const HistoryDayChange day = wp2DayChange(dateA, {idX}, {});
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::CallerBug);
+    QCOMPARE(wp2RawSnapshot(db), beforeAct);
+}
+
+// A non-editable snapshot id used as a delete target: an unfinalized row's id.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_callerBug_delete_targets_unfinalized_row()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idCheckpoint = SegmentId::mint();
+    QVERIFY(db.saveCheckpoint(DurationType::Activity,
+        QDateTime(dateA, QTime(9, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(9, 30, 0), Qt::LocalTime), idCheckpoint).ok());
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+    const QStringList beforeAct = wp2RawSnapshot(db);
+
+    const HistoryDayChange day = wp2DayChange(dateA, {idCheckpoint}, {});
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::CallerBug);
+    QCOMPARE(wp2RawSnapshot(db), beforeAct);
+}
+
+// M3: a non-editable snapshot id reused on the UPSERT side (not deletedIds):
+// a legacy cross-midnight row's id, upserted with a NEW interval that lies
+// entirely inside the day's span. rowEditableInSpan() rejects the OLD
+// snapshot row (its real end lies past the day's end), so this is CallerBug
+// even though the new interval itself is perfectly valid for the day.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_callerBug_upsert_reuses_cross_midnight_snapshot_id()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idX = SegmentId::mint();
+    QVERIFY(wp2InsertRaw(db, idX.toString(), DurationType::Activity,
+        QDateTime(dateA, QTime(23, 0, 0), Qt::LocalTime).toUTC(),
+        QDateTime(dateA.addDays(1), QTime(1, 0, 0), Qt::LocalTime).toUTC(), true));
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+    const QStringList beforeAct = wp2RawSnapshot(db);
+
+    TimeDuration reused = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime), idX);
+    std::deque<TimeDuration> upserts{reused};
+    const HistoryDayChange day = wp2DayChange(dateA, {}, upserts);
+
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::CallerBug);
+    QCOMPARE(wp2RawSnapshot(db), beforeAct);
+}
+
+// M3: a non-editable snapshot id reused on the UPSERT side: an unfinalized
+// (checkpoint) row's id, upserted with a new interval inside the day's span.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_callerBug_upsert_reuses_unfinalized_snapshot_id()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idCheckpoint = SegmentId::mint();
+    QVERIFY(db.saveCheckpoint(DurationType::Activity,
+        QDateTime(dateA, QTime(9, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(9, 30, 0), Qt::LocalTime), idCheckpoint).ok());
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+    const QStringList beforeAct = wp2RawSnapshot(db);
+
+    TimeDuration reused = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime), idCheckpoint);
+    std::deque<TimeDuration> upserts{reused};
+    const HistoryDayChange day = wp2DayChange(dateA, {}, upserts);
+
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::CallerBug);
+    QCOMPARE(wp2RawSnapshot(db), beforeAct);
+}
+
+// An upsert whose interval lies outside its day's span (a well-formed
+// same-day interval, but declared under a DIFFERENT day's HistoryDayChange).
+void DatabaseTest::test_H5_WP2_saveHistoryDays_callerBug_upsert_outside_day_span()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const QDate dateB = dateA.addDays(1);
+    const SegmentId idNew = SegmentId::mint();
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+    const QStringList beforeAct = wp2RawSnapshot(db);
+
+    TimeDuration outOfSpan = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateB, QTime(9, 0, 0), Qt::LocalTime),
+        QDateTime(dateB, QTime(9, 30, 0), Qt::LocalTime), idNew);
+    std::deque<TimeDuration> upserts{outOfSpan};
+    const HistoryDayChange day = wp2DayChange(dateA, {}, upserts);
+
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::CallerBug);
+    QCOMPARE(wp2RawSnapshot(db), beforeAct);
+}
+
+// Duplicate ids: the same id appears twice in upserts across two days.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_callerBug_duplicate_id_across_days()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const QDate dateB = dateA.addDays(-1);
+    const SegmentId sharedId = SegmentId::mint();
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+    const QStringList beforeAct = wp2RawSnapshot(db);
+
+    TimeDuration rowA = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(9, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(9, 30, 0), Qt::LocalTime), sharedId);
+    TimeDuration rowB = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateB, QTime(9, 0, 0), Qt::LocalTime),
+        QDateTime(dateB, QTime(9, 30, 0), Qt::LocalTime), sharedId);
+    std::deque<TimeDuration> upsertsA{rowA};
+    std::deque<TimeDuration> upsertsB{rowB};
+    const HistoryDayChange dayA = wp2DayChange(dateA, {}, upsertsA);
+    const HistoryDayChange dayB = wp2DayChange(dateB, {}, upsertsB);
+
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {dayA, dayB});
+    QCOMPARE(r.category, SessionStoreResult::CallerBug);
+    QCOMPARE(wp2RawSnapshot(db), beforeAct);
+}
+
+// Empty `days`.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_callerBug_empty_days()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const SessionStoreResult r = db.saveHistoryDays({}, {});
+    QCOMPARE(r.category, SessionStoreResult::CallerBug);
+}
+
+// ---- Failure and recovery ----
+
+// setForceCommitFailure_dbg(true): returns TransientError, nothing changed,
+// and a retry with a freshly re-read snapshot succeeds.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_forceCommitFailure_then_retry_succeeds()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idA = SegmentId::mint();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime), idA));
+    QVERIFY(db.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    HistoryRowsResult snapshot = db.loadHistoryRows();
+    const QStringList beforeAct = wp2RawSnapshot(db);
+
+    TimeDuration updated = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(11, 0, 0), Qt::LocalTime), idA);
+    std::deque<TimeDuration> upserts{updated};
+
+    // Delta counts, not absolute zero: data_dir_ is shared across this whole
+    // test class, so earlier tests may already have left *.backup/
+    // *.durations.txt files in it.
+    QDir testDir(data_dir_.path());
+    const int backupsBefore = testDir.entryList(QStringList() << "*.backup", QDir::Files).size();
+    const int txtBefore = testDir.entryList(QStringList() << "*.durations.txt", QDir::Files).size();
+
+    db.setForceCommitFailure_dbg(true);
+    SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {wp2DayChange(dateA, {}, upserts)});
+    QCOMPARE(r.category, SessionStoreResult::TransientError);
+    QCOMPARE(wp2RawSnapshot(db), beforeAct);
+
+    // No backup/export files created on failure either.
+    QCOMPARE(testDir.entryList(QStringList() << "*.backup", QDir::Files).size(), backupsBefore);
+    QCOMPARE(testDir.entryList(QStringList() << "*.durations.txt", QDir::Files).size(), txtBefore);
+
+    // Retry with a freshly re-read snapshot succeeds.
+    snapshot = db.loadHistoryRows();
+    r = db.saveHistoryDays(snapshot.rows, {wp2DayChange(dateA, {}, upserts)});
+    QCOMPARE(r.category, SessionStoreResult::Success);
+
+    QCOMPARE(wp2RowFingerprint(db, idA.toString()),
+             QString("%1|%2|%3|%4|1").arg(idA.toString())
+                 .arg(static_cast<int>(DurationType::Activity))
+                 .arg(updated.startTime.toUTC().toString(Qt::ISODateWithMs))
+                 .arg(updated.endTime.toUTC().toString(Qt::ISODateWithMs)));
+}
+
+// Commit failure plus setForceRollbackFailure_dbg(true): the connection is
+// closed, then transparently recovers for a subsequent write.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_commitFailure_and_rollbackFailure_closes_connection()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idA = SegmentId::mint();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime), idA));
+    QVERIFY(db.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+    const QStringList beforeAct = wp2RawSnapshot(db);
+
+    TimeDuration updated = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(11, 0, 0), Qt::LocalTime), idA);
+    std::deque<TimeDuration> upserts{updated};
+
+    db.setForceCommitFailure_dbg(true);
+    db.setForceRollbackFailure_dbg(true);
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {wp2DayChange(dateA, {}, upserts)});
+    QCOMPARE(r.category, SessionStoreResult::TransientError);
+
+    QCOMPARE(wp2RawSnapshot(db), beforeAct);
+
+    // The connection recovers transparently for a subsequent write.
+    const HistoryRowsResult snapshot2 = db.loadHistoryRows();
+    TimeDuration updated2 = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(11, 30, 0), Qt::LocalTime), idA);
+    std::deque<TimeDuration> upserts2{updated2};
+    QVERIFY(db.saveHistoryDays(snapshot2.rows, {wp2DayChange(dateA, {}, upserts2)}).ok());
+}
+
+// A separate closeConnection_dbg() call before invoking saveHistoryDays: the
+// store transparently reconnects and the save succeeds.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_reconnects_after_explicit_closeConnection()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idA = SegmentId::mint();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime), idA));
+    QVERIFY(db.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+
+    db.closeConnection_dbg();
+
+    TimeDuration updated = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(11, 0, 0), Qt::LocalTime), idA);
+    std::deque<TimeDuration> upserts{updated};
+
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {wp2DayChange(dateA, {}, upserts)});
+    QCOMPARE(r.category, SessionStoreResult::Success);
+}
+
+// A UNIQUE clash on INSERT that happens AFTER an UPDATE already executed in
+// the same call rolls back the whole transaction, including the earlier
+// UPDATE.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_uniqueClash_on_insert_after_earlier_update_rolls_back_both()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateD1 = QDate::currentDate();
+    const QDate dateD2 = dateD1.addDays(2);
+    const SegmentId idRA = SegmentId::mint();
+    const SegmentId idX = SegmentId::mint();
+
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateD1, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateD1, QTime(10, 30, 0), Qt::LocalTime), idRA));
+    QVERIFY(db.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    // Snapshot BEFORE idX exists anywhere in the DB.
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+    const QString raBefore = wp2RowFingerprint(db, idRA.toString());
+
+    // An unrelated row lands on D2 with segment_id idX, AFTER the snapshot.
+    QVERIFY(wp2InsertRaw(db, idX.toString(), DurationType::Activity,
+        QDateTime(dateD2, QTime(9, 0, 0), Qt::LocalTime).toUTC(),
+        QDateTime(dateD2, QTime(9, 30, 0), Qt::LocalTime).toUTC(), true));
+    const QString xBefore = wp2RowFingerprint(db, idX.toString());
+    const QStringList beforeAct = wp2RawSnapshot(db);
+
+    // D1's change: UPDATE idRA, then INSERT a "new" row using idX -- idX is
+    // not present in the OLD snapshot (so it is treated as an INSERT), but
+    // it already exists in the live DB (on D2), so the INSERT hits its
+    // UNIQUE(segment_id) constraint.
+    TimeDuration updatedRA = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateD1, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateD1, QTime(11, 0, 0), Qt::LocalTime), idRA);
+    TimeDuration clashing = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateD1, QTime(12, 0, 0), Qt::LocalTime),
+        QDateTime(dateD1, QTime(12, 30, 0), Qt::LocalTime), idX);
+    std::deque<TimeDuration> upserts{updatedRA, clashing};
+    const HistoryDayChange day = wp2DayChange(dateD1, {}, upserts);
+
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::TransientError);
+
+    // Whole transaction rolled back: RA's earlier UPDATE undone too.
+    QCOMPARE(wp2RowFingerprint(db, idRA.toString()), raBefore);
+    QCOMPARE(wp2RowFingerprint(db, idX.toString()), xBefore);
+    QCOMPARE(wp2RawSnapshot(db), beforeAct);
+}
+
+// M1: a failed db.rollback() on an EARLY-EXIT path (the stale-Conflict check,
+// which never reaches commitOrRollback()) must still close the connection --
+// otherwise the connection is left inside an open transaction forever.
+// setForceRollbackFailure_dbg(true) alone (no commit failure armed) is
+// consumed by saveHistoryDays()'s own rollbackOrClose() helper the first time
+// it rolls back, which is exactly the stale-check path here.
+void DatabaseTest::test_H5_WP2_saveHistoryDays_rollbackFailure_on_staleConflict_closes_connection()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idA = SegmentId::mint();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime), idA));
+    QVERIFY(db.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+
+    // Make the snapshot stale via a raw-SQL change after it was taken.
+    QVERIFY(db.ensureOpen_dbg());
+    {
+        QSqlQuery q(db.rawDb_dbg());
+        q.prepare("UPDATE durations SET end_utc = :e WHERE segment_id = :id");
+        q.bindValue(":e", QDateTime(dateA, QTime(10, 45, 0), Qt::LocalTime).toUTC().toString(Qt::ISODateWithMs));
+        q.bindValue(":id", idA.toString());
+        QVERIFY(q.exec());
+    }
+    const QStringList beforeAct = wp2RawSnapshot(db);
+
+    db.setForceRollbackFailure_dbg(true);
+    const HistoryDayChange day = wp2DayChange(dateA, {}, {});
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::Conflict);
+    QCOMPARE(wp2RawSnapshot(db), beforeAct);
+
+    // The connection recovers transparently for a subsequent write -- proof
+    // it was closed rather than left inside a broken open transaction.
+    const HistoryRowsResult snapshot2 = db.loadHistoryRows();
+    TimeDuration updated = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(11, 0, 0), Qt::LocalTime), idA);
+    std::deque<TimeDuration> upserts{updated};
+    QVERIFY(db.saveHistoryDays(snapshot2.rows, {wp2DayChange(dateA, {}, upserts)}).ok());
+}

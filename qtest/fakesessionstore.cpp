@@ -267,6 +267,56 @@ HistoryRowsResult FakeSessionStore::loadHistoryRows()
     return result;
 }
 
+SessionStoreResult FakeSessionStore::saveHistoryDays(const std::vector<StoredHistoryRow>& openSnapshot,
+                                                      const std::vector<HistoryDayChange>& days)
+{
+    callLog.append("saveHistoryDays");
+    lastHistorySaveSnapshot = openSnapshot;
+    lastHistorySaveDays = days;
+
+    // WP2: the fake enforces only the id-uniqueness CallerBug fact -- it is a
+    // spy, not a policy engine. The real day-validity/stale/new-conflict
+    // checks are exercised only against SqliteSessionStore.
+    QSet<QString> seenIds;
+    for (const auto& day : days) {
+        for (const auto& id : day.deletedIds) {
+            const QString idStr = id.toString();
+            if (seenIds.contains(idStr))
+                return SessionStoreResult::callerBug("saveHistoryDays: duplicate id in payload");
+            seenIds.insert(idStr);
+        }
+        for (const auto& upsert : day.upserts) {
+            const QString idStr = upsert.segment_id.toString();
+            if (seenIds.contains(idStr))
+                return SessionStoreResult::callerBug("saveHistoryDays: duplicate id in payload");
+            seenIds.insert(idStr);
+        }
+    }
+
+    if (saveHistoryDaysResult.ok()) {
+        for (const auto& day : days) {
+            for (const auto& id : day.deletedIds) {
+                storedDurations.erase(
+                    std::remove_if(storedDurations.begin(), storedDurations.end(),
+                                    [&](const TimeDuration& row) { return row.segment_id == id; }),
+                    storedDurations.end());
+            }
+            for (const auto& upsert : day.upserts) {
+                auto existing = std::find_if(storedDurations.begin(), storedDurations.end(),
+                                              [&](const TimeDuration& row) {
+                                                  return row.segment_id == upsert.segment_id;
+                                              });
+                if (existing != storedDurations.end()) {
+                    *existing = upsert;
+                } else {
+                    storedDurations.push_back(upsert);
+                }
+            }
+        }
+    }
+    return saveHistoryDaysResult;
+}
+
 EntriesForDateResult FakeSessionStore::hasEntriesForDate(const QDate& /*date*/)
 {
     callLog.append("hasEntriesForDate");

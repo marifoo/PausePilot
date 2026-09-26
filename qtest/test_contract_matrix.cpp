@@ -29,7 +29,7 @@ using TestCommon::fixedNowUtc;
 // Operation enumerator AND a matching section here, then update this count --
 // otherwise this fails to compile as a reminder instead of silently shipping
 // an unverified operation.
-static_assert(static_cast<int>(Operation::Count) == 11,
+static_assert(static_cast<int>(Operation::Count) == 12,
     "SessionStore::Operation changed size -- add a matrix section to "
     "test_contract_matrix.cpp for the new/removed operation, then update "
     "this static_assert's count.");
@@ -77,6 +77,20 @@ std::deque<TimeDuration> oneRow() {
     std::deque<TimeDuration> rows;
     rows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, t0, t1));
     return rows;
+}
+
+// H5/WP2: builds a HistoryDayChange whose dayStartUtc/dayEndUtc are the
+// canonical half-open UTC span of `date`, matching what a real caller
+// (TimeTracker/HistoryEditSession) would compute.
+HistoryDayChange dayChangeFor(const QDate& date, std::vector<SegmentId> deleted,
+                               std::deque<TimeDuration> upserts) {
+    HistoryDayChange c;
+    c.date = date;
+    c.dayStartUtc = DayValidity::localDayStart(date).toUTC();
+    c.dayEndUtc = DayValidity::localDayEnd(date).toUTC();
+    c.deletedIds = std::move(deleted);
+    c.upserts = std::move(upserts);
+    return c;
 }
 
 } // namespace
@@ -465,6 +479,182 @@ void ContractMatrixTest::test_C4_fake_loadHistoryRows_projects_storedDurations_a
     }
     QCOMPARE(finalizedCount, 1);
     QCOMPARE(unfinalizedCount, 1);
+}
+
+// ── saveHistoryDays (H5/WP2) ─────────────────────────────────────────────────
+
+// Success: a simple one-row update against the real store.
+void ContractMatrixTest::test_saveHistoryDays_success_updates_row()
+{
+    resetDatabaseFile();
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    SqliteSessionStore db(Settings(enabledSettings(dir)));
+    db.checkSchemaOnStartup();
+
+    const QDate today = QDate::currentDate();
+    const SegmentId id = SegmentId::mint();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(today, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(today, QTime(10, 30, 0), Qt::LocalTime), id));
+    QVERIFY(db.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+    QCOMPARE(snapshot.status, SessionStoreResult::Success);
+
+    TimeDuration updated = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(today, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(today, QTime(11, 0, 0), Qt::LocalTime), id);
+    std::deque<TimeDuration> upserts{updated};
+    const HistoryDayChange day = dayChangeFor(today, {}, upserts);
+
+    const SessionStoreResult r = db.saveHistoryDays(snapshot.rows, {day});
+    QCOMPARE(r.category, SessionStoreResult::Success);
+
+    const HistoryRowsResult after = db.loadHistoryRows();
+    QCOMPARE(after.rows.size(), static_cast<size_t>(1));
+    QVERIFY(after.rows[0].parsed.has_value());
+    QCOMPARE(after.rows[0].parsed->endTime, updated.endTime);
+}
+
+// Disabled: history_days_to_keep == 0, no mutation. A structurally valid
+// (non-empty, well-formed span, no ids) days payload avoids tripping the
+// CallerBug guard so the Disabled path is actually reached.
+void ContractMatrixTest::test_saveHistoryDays_disabled_returns_Disabled()
+{
+    resetDatabaseFile();
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    SqliteSessionStore db(Settings(disabledSettings(dir)));
+
+    const QDate today = QDate::currentDate();
+    const HistoryDayChange day = dayChangeFor(today, {}, {});
+
+    const SessionStoreResult r = db.saveHistoryDays({}, {day});
+    QCOMPARE(r.category, SessionStoreResult::Disabled);
+}
+
+// CallerBug: empty `days`.
+void ContractMatrixTest::test_saveHistoryDays_callerBug_empty_days()
+{
+    resetDatabaseFile();
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    SqliteSessionStore db(Settings(enabledSettings(dir)));
+    db.checkSchemaOnStartup();
+
+    const SessionStoreResult r = db.saveHistoryDays({}, {});
+    QCOMPARE(r.category, SessionStoreResult::CallerBug);
+}
+
+// CallerBug precedence over Disabled (C4/R05-003 precedence rule extended to
+// saveHistoryDays): empty `days` on a Disabled store is still CallerBug.
+void ContractMatrixTest::test_saveHistoryDays_callerBug_precedence_over_disabled()
+{
+    resetDatabaseFile();
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    SqliteSessionStore db(Settings(disabledSettings(dir)));
+
+    const SessionStoreResult r = db.saveHistoryDays({}, {});
+    QCOMPARE(r.category, SessionStoreResult::CallerBug);
+}
+
+// Fake parity: logs the call and records the exact arguments.
+void ContractMatrixTest::test_C4_fake_saveHistoryDays_logs_and_records_args()
+{
+    FakeSessionStore fakeDb;
+    const QDate today = QDate::currentDate();
+    const SegmentId id = SegmentId::mint();
+    std::vector<StoredHistoryRow> snapshot;
+    StoredHistoryRow row;
+    row.segmentId = id.toString();
+    row.type = "0";
+    row.startUtc = QDateTime(today, QTime(9, 0, 0), Qt::UTC).toString(Qt::ISODateWithMs);
+    row.endUtc = QDateTime(today, QTime(9, 30, 0), Qt::UTC).toString(Qt::ISODateWithMs);
+    row.isFinalized = "1";
+    snapshot.push_back(row);
+
+    std::deque<TimeDuration> upserts;
+    upserts.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(today, QTime(9, 0, 0), Qt::UTC), QDateTime(today, QTime(9, 45, 0), Qt::UTC), id));
+    const std::vector<HistoryDayChange> days{dayChangeFor(today, {}, upserts)};
+
+    const SessionStoreResult r = fakeDb.saveHistoryDays(snapshot, days);
+
+    QVERIFY(r.ok());
+    QVERIFY(fakeDb.callLog.contains("saveHistoryDays"));
+    QCOMPARE(fakeDb.lastHistorySaveSnapshot.size(), snapshot.size());
+    QCOMPARE(fakeDb.lastHistorySaveSnapshot[0].segmentId, snapshot[0].segmentId);
+    QCOMPARE(fakeDb.lastHistorySaveDays.size(), days.size());
+    QCOMPARE(fakeDb.lastHistorySaveDays[0].date, days[0].date);
+    QCOMPARE(fakeDb.lastHistorySaveDays[0].upserts.size(), days[0].upserts.size());
+}
+
+// Fake parity: on Success, applies deletes and upserts to storedDurations.
+void ContractMatrixTest::test_C4_fake_saveHistoryDays_applies_deletes_and_upserts_on_success()
+{
+    FakeSessionStore fakeDb;
+    const QDate today = QDate::currentDate();
+    const SegmentId keepId = SegmentId::mint();
+    const SegmentId deleteId = SegmentId::mint();
+    const SegmentId newId = SegmentId::mint();
+
+    TimeDuration keep = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(today, QTime(8, 0, 0), Qt::UTC), QDateTime(today, QTime(8, 30, 0), Qt::UTC), keepId);
+    TimeDuration toDelete = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(today, QTime(9, 0, 0), Qt::UTC), QDateTime(today, QTime(9, 30, 0), Qt::UTC), deleteId);
+    fakeDb.storedDurations.push_back(keep);
+    fakeDb.storedDurations.push_back(toDelete);
+
+    std::deque<TimeDuration> upserts;
+    upserts.push_back(TimeDuration::fromPersistedRow(DurationType::Pause,
+        QDateTime(today, QTime(10, 0, 0), Qt::UTC), QDateTime(today, QTime(10, 30, 0), Qt::UTC), newId));
+    const HistoryDayChange day = dayChangeFor(today, {deleteId}, upserts);
+
+    const SessionStoreResult r = fakeDb.saveHistoryDays({}, {day});
+    QVERIFY(r.ok());
+    QCOMPARE(fakeDb.storedDurations.size(), static_cast<size_t>(2));
+    bool sawKeep = false, sawNew = false, sawDeleted = false;
+    for (const auto& d : fakeDb.storedDurations) {
+        if (d.segment_id == keepId) sawKeep = true;
+        if (d.segment_id == newId) sawNew = true;
+        if (d.segment_id == deleteId) sawDeleted = true;
+    }
+    QVERIFY(sawKeep);
+    QVERIFY(sawNew);
+    QVERIFY(!sawDeleted);
+}
+
+// Fake parity: a duplicate segment_id across the payload is CallerBug, exactly
+// like the identity fact enforced elsewhere in the fake.
+void ContractMatrixTest::test_C4_fake_saveHistoryDays_callerBug_duplicate_id()
+{
+    FakeSessionStore fakeDb;
+    const QDate today = QDate::currentDate();
+    const SegmentId sharedId = SegmentId::mint();
+
+    std::deque<TimeDuration> upserts;
+    upserts.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(today, QTime(8, 0, 0), Qt::UTC), QDateTime(today, QTime(8, 30, 0), Qt::UTC), sharedId));
+    const HistoryDayChange day = dayChangeFor(today, {sharedId}, upserts);
+
+    const SessionStoreResult r = fakeDb.saveHistoryDays({}, {day});
+    QCOMPARE(r.category, SessionStoreResult::CallerBug);
+    QVERIFY(fakeDb.storedDurations.empty());
+}
+
+// Fake parity: a non-conflicting payload that WOULD violate the real store's
+// span/editability policy (an id not present in the snapshot at all, deleted
+// as if it were an existing editable row) is NOT rejected by the fake -- it
+// is a spy, not a policy engine (sessionstore.h/fakesessionstore.cpp).
+void ContractMatrixTest::test_C4_fake_saveHistoryDays_does_not_enforce_span_editability()
+{
+    FakeSessionStore fakeDb;
+    const QDate today = QDate::currentDate();
+    const SegmentId unknownId = SegmentId::mint();
+
+    const HistoryDayChange day = dayChangeFor(today, {unknownId}, {});
+
+    const SessionStoreResult r = fakeDb.saveHistoryDays({}, {day});
+    QVERIFY(r.ok());
 }
 
 // ── hasEntriesForDate ────────────────────────────────────────────────────────
@@ -871,6 +1061,7 @@ void ContractMatrixTest::test_C4_ensureOpen_failure_classified_consistently_data
     QTest::newRow("loadDurations")              << QString("loadDurations");
     QTest::newRow("saveCheckpoint")             << QString("saveCheckpoint");
     QTest::newRow("discardCheckpoint")          << QString("discardCheckpoint");
+    QTest::newRow("saveHistoryDays")            << QString("saveHistoryDays");
     // Named for what this row actually exercises (C4 finding 3): a closed
     // connection is caught by readLastCleanShutdownMarker()'s own
     // ensureOpen() call, not by the dedicated phase-2 guard just before the
@@ -921,6 +1112,10 @@ void ContractMatrixTest::test_C4_ensureOpen_failure_classified_consistently()
         category = db.saveCheckpoint(DurationType::Activity, t0, t0.addSecs(60), SegmentId::mint()).category;
     } else if (method == "discardCheckpoint") {
         category = db.discardCheckpoint(SegmentId::mint()).category;
+    } else if (method == "saveHistoryDays") {
+        const QDate today = QDate::currentDate();
+        const HistoryDayChange day = dayChangeFor(today, {}, {});
+        category = db.saveHistoryDays({}, {day}).category;
     } else {
         // recoverStartupCheckpoints: a closed connection is detected earliest
         // by readLastCleanShutdownMarker()'s own ensureOpen() call, before the

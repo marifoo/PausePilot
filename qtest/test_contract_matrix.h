@@ -78,6 +78,18 @@ private slots:
     // CallerBug/fatal: N/A -- no caller-supplied parameters, no write
     void test_C4_fake_loadHistoryRows_projects_storedDurations_and_unfinalized();
 
+    // ── saveHistoryDays (H5/WP2) ──────────────────────────────────────
+    void test_saveHistoryDays_success_updates_row();
+    void test_saveHistoryDays_disabled_returns_Disabled();
+    void test_saveHistoryDays_callerBug_empty_days();
+    void test_saveHistoryDays_callerBug_precedence_over_disabled();
+    // transient: ensureOpen() failure covered by the "saveHistoryDays" row
+    // added to test_C4_ensureOpen_failure_classified_consistently_data() below.
+    void test_C4_fake_saveHistoryDays_logs_and_records_args();
+    void test_C4_fake_saveHistoryDays_applies_deletes_and_upserts_on_success();
+    void test_C4_fake_saveHistoryDays_callerBug_duplicate_id();
+    void test_C4_fake_saveHistoryDays_does_not_enforce_span_editability();
+
     // ── hasEntriesForDate ────────────────────────────────────────────
     void test_hasEntriesForDate_returns_Yes_when_entry_exists();
     void test_hasEntriesForDate_returns_No_when_no_entry();
