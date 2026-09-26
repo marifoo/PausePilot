@@ -123,9 +123,7 @@ does all of the reconciliation internally (see `sqlitesessionstore.cpp`
    overlaps its `[start_utc, end_utc)` interval; an overlapping orphan is
    not left untouched — it is deleted transactionally as part of the same
    disposition and counted as a policy drop (R08-002), so it cannot recur
-   on every future launch. (`finalizeIfNoOverlap` is a separate,
-   self-transacting wrapper around the same overlap check, kept only for
-   its own unit tests — recovery does not call it.)
+   on every future launch.
 
 `TimeTracker` receives only domain facts back via `StartupRecoveryResult`
 (`recovered_msec`, `finalized_count`, `policy_dropped_count`,

@@ -1816,8 +1816,7 @@ SqliteSessionStore::FinalizeResult SqliteSessionStore::finalizeOrOverlapWithinOp
     if (probe.next()) {
         // Overlap detected: leave the row unchanged here (the caller decides
         // what to do with an OverlapRejected outcome -- B2's recovery
-        // transaction deletes it; the standalone finalizeIfNoOverlap() wrapper
-        // just rolls back, leaving the row as it was).
+        // transaction deletes it).
         return {FinalizeOutcome::OverlapRejected, QString()};
     }
 
@@ -1836,54 +1835,6 @@ SqliteSessionStore::FinalizeResult SqliteSessionStore::finalizeOrOverlapWithinOp
     }
 
     return {FinalizeOutcome::Finalized, QString()};
-}
-
-/**
- * Self-transacting single-row finalize: owns its own BEGIN/COMMIT/ROLLBACK
- * around finalizeOrOverlapWithinOpenTransaction() so it remains usable (and
- * independently testable) as one atomic unit on its own. B2's recovery
- * transaction does not call this -- it calls the inner helper directly so
- * multiple rows' worth of work share ONE outer transaction (see
- * reconcileUnfinalizedCheckpoints()).
- */
-SqliteSessionStore::FinalizeResult SqliteSessionStore::finalizeIfNoOverlap(qint64 rowId, const QDateTime& startUtc, const QDateTime& endUtc)
-{
-    QMutexLocker locker(&db_mutex_);
-
-    if (history_days_to_keep_ == 0) {
-        return {FinalizeOutcome::Error, "history persistence is disabled"};
-    }
-
-    if (!ensureOpen()) {
-        return {FinalizeOutcome::Error, "failed to open database connection"};
-    }
-
-    if (!db.transaction()) {
-        const QString err = db.lastError().text();
-        Logger::Log("[DB] Error starting finalizeIfNoOverlap transaction: " + err);
-        return {FinalizeOutcome::Error, err};
-    }
-
-    const FinalizeResult inner = finalizeOrOverlapWithinOpenTransaction(rowId, startUtc, endUtc);
-
-    if (inner.outcome == FinalizeOutcome::Finalized) {
-        if (!db.commit()) {
-            const QString err = db.lastError().text();
-            Logger::Log("[DB] Error committing finalizeIfNoOverlap: " + err);
-            if (!db.rollback()) {
-                Logger::Log("[DB] Warning: rollback after commit failure also failed: " + db.lastError().text());
-            }
-            return {FinalizeOutcome::Error, err};
-        }
-        return inner;
-    }
-
-    // Error, OverlapRejected, or Missing: nothing to keep -- roll back so the
-    // row is left exactly as it was found.
-    if (!db.rollback()) {
-        Logger::Log("[DB] Warning: rollback after finalizeIfNoOverlap non-success outcome also failed: " + db.lastError().text());
-    }
-    return inner;
 }
 
 /**

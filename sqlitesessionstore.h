@@ -73,9 +73,10 @@ private:
         std::deque<OrphanCheckpoint> valid;
         std::vector<long long> malformedIds;
     };
-    // R07-002 (B1): typed outcome for finalizeIfNoOverlap() so a deliberate
-    // policy decision (overlap rejection, missing row) can never be reported
-    // as -- or silently substitute for -- a real transaction/SQL failure.
+    // R07-002 (B1): typed outcome for finalizeOrOverlapWithinOpenTransaction()
+    // so a deliberate policy decision (overlap rejection, missing row) can
+    // never be reported as -- or silently substitute for -- a real
+    // transaction/SQL failure.
     enum class FinalizeOutcome { Finalized, OverlapRejected, Missing, Error };
     struct FinalizeResult {
         FinalizeOutcome outcome = FinalizeOutcome::Error;
@@ -242,9 +243,9 @@ private:
     // so the next ensureOpen() reconnects clean instead of every later
     // db.transaction() failing forever. Returns committed=true on success;
     // otherwise committed=false and errorMessage carries the primary
-    // commit-failure message, captured before rollback (mirroring
-    // finalizeIfNoOverlap's pattern) so a rollback failure is logged
-    // separately instead of overwriting the caller-visible error. Callers
+    // commit-failure message, captured before rollback so a rollback
+    // failure is logged separately instead of overwriting the
+    // caller-visible error. Callers
     // MUST branch on `committed`, not on errorMessage.isEmpty(): db.commit()
     // can return false without calling setLastError() (e.g. commit after the
     // connection was closed), which would otherwise read as success.
@@ -256,11 +257,6 @@ private:
     // B2: loads AND classifies every unfinalized row before any externally
     // visible mutation (R08-003) -- malformed rows are never a silent omission.
     std::optional<OrphanLoadResult> loadUnfinalizedCheckpoints();
-    // Self-transacting single-row finalize (BEGIN/COMMIT/ROLLBACK owned here).
-    // Kept for direct/isolated use (finalizeIfNoOverlap_dbg); B2's atomic
-    // recovery transaction instead calls finalizeOrOverlapWithinOpenTransaction
-    // directly so the whole disposition shares one transaction.
-    FinalizeResult finalizeIfNoOverlap(qint64 rowId, const QDateTime& startUtc, const QDateTime& endUtc);
     // Pure probe-and-finalize logic (no BEGIN/COMMIT/ROLLBACK of its own);
     // assumes the caller already holds an open transaction.
     FinalizeResult finalizeOrOverlapWithinOpenTransaction(qint64 rowId, const QDateTime& startUtc, const QDateTime& endUtc);
@@ -319,9 +315,6 @@ public:
     std::vector<long long> loadUnfinalizedCheckpointsMalformedIds_dbg() {
         const auto r = loadUnfinalizedCheckpoints();
         return r.has_value() ? r->malformedIds : std::vector<long long>{};
-    }
-    FinalizeResult finalizeIfNoOverlap_dbg(qint64 rowId, const QDateTime& s, const QDateTime& e) {
-        return finalizeIfNoOverlap(rowId, s, e);
     }
     /// Wraps reconcileUnfinalizedCheckpoints() (which itself assumes an
     /// already-open transaction, matching how recoverStartupCheckpoints()
