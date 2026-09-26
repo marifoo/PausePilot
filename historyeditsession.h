@@ -9,6 +9,7 @@
 #include "types.h"
 #include "timeline.h"
 #include "dayvalidity.h"
+#include "historyeligibility.h"
 
 class TimeTracker;
 
@@ -87,6 +88,39 @@ public:
     /// accessor, so this stays testable without adding engine API surface.
     void buildFromTimer(TimeTracker& timer, const QDate& today);
 
+    /// Populates pages_, pendingTimelines_ and the per-page permission/span
+    /// state from an open-time HistoryEditContext (H5/WP4), without touching
+    /// TimeTracker or the store. Finalized, well-formed stored rows sharing a
+    /// calendar date become that page's editable candidates; rows crossing
+    /// exactly one local-midnight boundary are display-only (crossMidnight/
+    /// continuations, as buildFromTimer() already does); rows crossing more
+    /// than one boundary are skipped from the pages entirely -- but kept
+    /// internally so buildScopedSave()'s new-cross-type-overlap check can
+    /// still see them (B4). Unfinalized and malformed stored rows are never
+    /// displayed. Memory rows (ctx.live.completed()) are grouped by their own
+    /// date and deduplicated against stored rows by id, memory winning. The
+    /// ongoing row (if any) is attached to ctx.today, read-only.
+    /// pageEditable(i) is set from ctx.isEditable(pages_[i].pageDate);
+    /// daySpan(i) is DayValidity::localDayStart/localDayEnd(pageDate).toUTC(),
+    /// captured once here. The old buildFromTimer()/buildSavePayload() path
+    /// is untouched and does not use this method.
+    void buildFromContext(const HistoryEditContext& ctx);
+
+    /// True iff pages_[pageIdx] may be mutated: ctx.isEditable(pageDate) as
+    /// captured by buildFromContext(). buildFromTimer() marks every page
+    /// editable instead (until WP7a removes the old API), so old-model tests
+    /// and callers are unaffected.
+    bool pageEditable(size_t pageIdx) const;
+
+    /// The half-open UTC span of pages_[pageIdx]'s calendar date, captured at
+    /// buildFromContext() time. Default-constructed (invalid QDateTimes) for
+    /// an out-of-range index or a session built with buildFromTimer().
+    struct DaySpan {
+        QDateTime startUtc;
+        QDateTime endUtc;
+    };
+    DaySpan daySpan(size_t pageIdx) const;
+
     /// Refreshes the ongoing segment's end-time from the engine. If the user has
     /// edited the type, the type edit is preserved while the end-time advances.
     /// Call just before save.
@@ -130,6 +164,42 @@ public:
     /// is D9/D7 step 4's job, not this method's.
     SavePayload buildSavePayload() const;
 
+    /// Output of buildScopedSave() (H5/WP4): the date-scoped diff between
+    /// every editable, modified page's pending rows and its open-time
+    /// snapshot, ready for TimeTracker::saveHistoryEdit()/
+    /// SessionStore::saveHistoryDays(). needsMergeConfirmation and violation
+    /// mirror SavePayload's fields; days is empty when nothing editable
+    /// changed.
+    struct ScopedSaveResult {
+        std::vector<HistoryDayChange> days;
+        bool needsMergeConfirmation = false;
+        DayValidity::Violation violation = DayValidity::Violation::None;
+    };
+
+    /// Builds the date-scoped save diff (H5/WP4), alongside buildSavePayload()
+    /// which the old dialog still uses. For each page that is editable
+    /// (pageEditable()) and modified (pageModified()):
+    ///   - E = the page's rows at open (originalTimelines_); F = its pending
+    ///     rows. A row is "changed" if its id is new or any field differs
+    ///     from its E counterpart.
+    ///   - Restricted merge: repeatedly merges two adjacent same-type rows of
+    ///     F that touch or overlap, but only when at least one is changed.
+    ///     The earlier-starting row survives (ties broken by the smaller id),
+    ///     is extended to cover both, and becomes changed; a merge loser that
+    ///     existed in E is recorded as deleted, a brand-new loser is simply
+    ///     dropped. Any merge sets needsMergeConfirmation.
+    ///   - upserts = the changed rows of the post-merge F; deletedIds = the E
+    ///     ids missing from the post-merge F.
+    ///   - violation is the first of: DayValidity::validatePayload(upserts);
+    ///     an upsert lying outside the page's daySpan(); or
+    ///     DayValidity::hasNewCrossTypeOverlap(upserts, retained), where
+    ///     retained is the page's untouched E survivors plus its
+    ///     crossMidnight/continuations rows plus the parsed multi-boundary
+    ///     snapshot rows overlapping the page's date (U3).
+    /// Never mutates pending state. Does not use buildSavePayload()'s whole-
+    /// timeline normalized(), its overlap tie-break, or originIsMemory_.
+    ScopedSaveResult buildScopedSave() const;
+
     /// True iff the user changed any page's rows since the session was built
     /// (type toggle, split, etc.). When false the save is a no-op and must be
     /// skipped so an editless OK never rewrites or merges untouched DB history.
@@ -167,11 +237,13 @@ public:
     /// Replaces the Timeline for page[pageIdx] wholesale. D9 review: no
     /// production caller uses this anymore -- setCompletedType(),
     /// setOngoingType(), and splitRow() cover the dialog's actual operations
-    /// directly. Kept as a general primitive for test setup.
-    void setPageTimeline(size_t pageIdx, const Timeline& tl);
+    /// directly. Kept as a general primitive for test setup. Returns false
+    /// (no-op) for an out-of-range or read-only (H5/WP4) page.
+    bool setPageTimeline(size_t pageIdx, const Timeline& tl);
 
     /// Changes the type of the completed row identified by `segId` on
-    /// page[pageIdx]. Returns false (no-op) if the id is not found on that page.
+    /// page[pageIdx]. Returns false (no-op) if the id is not found on that
+    /// page, or if the page is not editable (H5/WP4).
     bool setCompletedType(size_t pageIdx, const SegmentId& segId, DurationType type);
 
     /// Changes the type of the pending ongoing row on page[pageIdx]. Returns
@@ -188,6 +260,7 @@ public:
         OutOfRange,    ///< pageIdx/rowIdx was not a valid completed row
         TooShort,      ///< the source row is below the minimum splittable length
         HalfTooShort,  ///< `at` would leave one half below the minimum half length
+        ReadOnly,      ///< pages_[pageIdx] is not editable (H5/WP4)
     };
 
     /// Outcome of splitRow(): the two resulting segment ids when applied, or
@@ -239,11 +312,27 @@ public:
     bool historyLoadFailed() const { return history_load_failed_; }
 
 private:
+    bool isPageEditable(size_t pageIdx) const {
+        return pageIdx < pageEditable_.size() && pageEditable_[pageIdx];
+    }
+
     std::vector<Page> pages_;
     std::vector<Timeline> pendingTimelines_;
     std::vector<Timeline> originalTimelines_; ///< snapshot of pendingTimelines_ at build (for hasEdits)
     QHash<QString, bool> originIsMemory_; ///< segment_id.toString() → true if memory row
     bool history_load_failed_ = false;
+
+    /// Parallel to pages_ (H5/WP4): buildFromContext() sets these from
+    /// ctx.isEditable()/DayValidity; buildFromTimer() sets pageEditable_ to
+    /// all-true and leaves daySpan_ empty (the old path never calls
+    /// buildScopedSave()).
+    std::vector<bool> pageEditable_;
+    std::vector<DaySpan> daySpan_;
+    /// Stored rows crossing more than one local-midnight boundary (H5/WP4):
+    /// skipped from pages_ entirely, but kept here so buildScopedSave()'s
+    /// new-cross-type-overlap check can still see them as retained context.
+    /// Populated only by buildFromContext().
+    std::vector<TimeDuration> multiBoundaryStoredRows_;
 };
 
 #endif // HISTORYEDITSESSION_H

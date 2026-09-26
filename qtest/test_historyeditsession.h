@@ -137,6 +137,28 @@ private slots:
     // M3: an ordinary timezone change can turn a valid same-day UTC row into
     // a single-boundary cross-midnight row on reload.
     void test_M3_timezone_change_makes_row_single_boundary_cross_midnight();
+
+    // H5/WP4 — buildFromContext() page building
+    void test_WP4_pastMemoryRow_isReadOnly_todayUnaffected();
+    void test_WP4_ongoingRow_onToday_notEditable();
+    void test_WP4_mutationsOnReadOnlyPage_leaveItUnchanged();
+    void test_WP4_rowsOutOfOrder_sortedOnPage();
+    void test_WP4_futureDatedPage_isEditable();
+    void test_WP4_daySpan_matchesLocalDayStartEnd();
+
+    // H5/WP4 — buildScopedSave() scoped diff
+    void test_WP4_scopedSave_toggle_yieldsOneUpsert();
+    void test_WP4_scopedSave_split_yieldsOriginalPlusNewId();
+    void test_WP4_scopedSave_toggleNextToSameTypeNeighbour_merges();
+    void test_WP4_scopedSave_untouchedTouchingPair_absentFromDays_idsKept();
+    void test_WP4_scopedSave_toggleBackToOriginal_yieldsEmptyDays();
+    void test_WP4_scopedSave_editsOnTwoDates_yieldTwoDaysEntries();
+
+    // H5/WP4 — buildScopedSave() violations
+    void test_WP4_scopedSave_overlapsRetainedCrossMidnight_givesTypeOverlap();
+    void test_WP4_scopedSave_overlapsRetainedMultiBoundary_givesTypeOverlap();
+    void test_WP4_scopedSave_unrelatedPreExistingOverlap_doesNotBlockOtherEdit();
+    void test_WP4_scopedSave_editedRowOverlapsUntouchedRetained_givesTypeOverlap();
 };
 
 #endif // TEST_HISTORYEDITSESSION_H

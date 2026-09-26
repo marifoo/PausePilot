@@ -839,6 +839,13 @@ void HistoryDialog::onSplitRow()
         Logger::Log(QString("[HISTORY] Error: onSplitRow: split failed - page: %1, row: %2")
             .arg(idx).arg(row));
         break;
+    case HistoryEditSession::SplitError::ReadOnly:
+        // Defensive: buildFromTimer() (still the only build this dialog uses)
+        // marks every page editable, so this cannot fire yet -- H5/WP5 wires
+        // the scoped-save model in.
+        Logger::Log(QString("[HISTORY] Error: onSplitRow: page not editable - page: %1, row: %2")
+            .arg(idx).arg(row));
+        break;
     }
 }
 

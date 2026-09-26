@@ -54,6 +54,59 @@ QDate fixedToday() {
     return kFixedDate;
 }
 
+// H5/WP4: a plain local -> raw-text StoredHistoryRow projection, for building
+// HistoryEditContext values directly (no TimeTracker/store involved -- see
+// makeContext() below). Mirrors fakesessionstore.cpp's own
+// toStoredHistoryRow() closely enough for these tests' purposes: only
+// finalized()/parsed matter to buildFromContext(), so the exact raw text is
+// not asserted anywhere here.
+StoredHistoryRow storedRow(const TimeDuration& d, bool finalized = true)
+{
+    StoredHistoryRow row;
+    row.segmentId = d.segment_id.toString();
+    row.type = QString::number(static_cast<int>(d.type));
+    row.startUtc = d.startTime.toUTC().toString(Qt::ISODateWithMs);
+    row.endUtc = d.endTime.toUTC().toString(Qt::ISODateWithMs);
+    row.isFinalized = finalized ? "1" : "0";
+    row.parsed = d;
+    return row;
+}
+
+// Same fixed-anchor convention as todayUTC()/yesterdayUTC(), for an arbitrary
+// calendar date (H5/WP4 tests need dates other than "today"/"yesterday",
+// e.g. a future-dated page or a two-days-ago page).
+QDateTime atLocal(const QDate& date, int hour, int minute = 0, int second = 0) {
+    return QDateTime(date, QTime(hour, minute, second), Qt::LocalTime);
+}
+
+int pageIndexForDate(const HistoryEditSession& session, const QDate& date) {
+    for (size_t i = 0; i < session.pageCount(); ++i)
+        if (session.pages()[i].pageDate == date)
+            return static_cast<int>(i);
+    return -1;
+}
+
+// WP4 plan (B7): builds a HistoryEditContext directly, exactly as
+// TimeTracker::beginExclusiveEdit() would have captured it, without needing a
+// TimeTracker or a store.
+HistoryEditContext makeContext(const QDate& today,
+                                const Timeline& live,
+                                const std::vector<StoredHistoryRow>& rows,
+                                const std::deque<TimeDuration>& pending,
+                                bool stopped,
+                                SessionStoreResult::Category storedStatus = SessionStoreResult::Success)
+{
+    HistoryEditContext ctx;
+    ctx.today = today;
+    ctx.openedAt = QDateTime(today, QTime(12, 0), Qt::LocalTime);
+    ctx.stored.status = storedStatus;
+    ctx.stored.rows = rows;
+    ctx.live = live;
+    ctx.pendingCommit = pending;
+    ctx.stopped = stopped;
+    return ctx;
+}
+
 } // namespace
 
 void HistoryEditSessionTest::initTestCase()
@@ -1767,4 +1820,565 @@ void HistoryEditSessionTest::test_M3_timezone_change_makes_row_single_boundary_c
         QCOMPARE(pendingCount, 0);
     }
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// H5/WP4 -- buildFromContext() page building
+// ---------------------------------------------------------------------------
+
+void HistoryEditSessionTest::test_WP4_pastMemoryRow_isReadOnly_todayUnaffected()
+{
+    // Arrange: a memory (live) row sits on yesterday; Today has its own
+    // finalized row and the tracker is stopped, so Today should be editable
+    // regardless of what yesterday's memory row does to yesterday's page.
+    const QDate yesterday = fixedToday().addDays(-1);
+    const TimeDuration memRow = TimeDuration::fromPersistedRow(
+        DurationType::Activity, atLocal(yesterday, 10, 0), atLocal(yesterday, 10, 30));
+    const TimeDuration todayRow = TimeDuration::fromPersistedRow(
+        DurationType::Activity, todayUTC(9, 0), todayUTC(9, 30));
+
+    const HistoryEditContext ctx = makeContext(
+        fixedToday(),
+        Timeline({memRow}, std::nullopt),
+        {storedRow(todayRow)},
+        {},
+        /*stopped=*/true);
+
+    HistoryEditSession session;
+    session.buildFromContext(ctx);
+
+    const int yesterdayIdx = pageIndexForDate(session, yesterday);
+    const int todayIdx = pageIndexForDate(session, fixedToday());
+    QVERIFY(yesterdayIdx >= 0);
+    QVERIFY(todayIdx >= 0);
+
+    // Act/Assert: yesterday's page is read-only (a live row overlaps it);
+    // Today's permission and content are unaffected.
+    QCOMPARE(session.pageEditable(static_cast<size_t>(yesterdayIdx)), false);
+    QCOMPARE(session.pendingTimelines()[static_cast<size_t>(yesterdayIdx)].completed().size(),
+        static_cast<size_t>(1));
+    QCOMPARE(session.pendingTimelines()[static_cast<size_t>(yesterdayIdx)].completed()[0].segment_id,
+        memRow.segment_id);
+
+    QCOMPARE(session.pageEditable(static_cast<size_t>(todayIdx)), true);
+    QCOMPARE(session.pendingTimelines()[static_cast<size_t>(todayIdx)].completed().size(),
+        static_cast<size_t>(1));
+    QCOMPARE(session.pendingTimelines()[static_cast<size_t>(todayIdx)].completed()[0].segment_id,
+        todayRow.segment_id);
+}
+
+void HistoryEditSessionTest::test_WP4_ongoingRow_onToday_notEditable()
+{
+    // Arrange: the tracker is running, so ctx carries an ongoing row on Today.
+    const TimeDuration ongoing = TimeDuration::fromLiveSession(
+        DurationType::Activity, todayUTC(9, 0), todayUTC(9, 5));
+
+    const HistoryEditContext ctx = makeContext(
+        fixedToday(),
+        Timeline({}, ongoing),
+        {},
+        {},
+        /*stopped=*/false);
+
+    HistoryEditSession session;
+    session.buildFromContext(ctx);
+
+    const int todayIdx = pageIndexForDate(session, fixedToday());
+    QVERIFY(todayIdx >= 0);
+
+    // Act/Assert
+    QVERIFY(session.pendingTimelines()[static_cast<size_t>(todayIdx)].ongoing().has_value());
+    QCOMPARE(session.pendingTimelines()[static_cast<size_t>(todayIdx)].ongoing()->segment_id,
+        ongoing.segment_id);
+    QCOMPARE(session.pageEditable(static_cast<size_t>(todayIdx)), false);
+}
+
+void HistoryEditSessionTest::test_WP4_mutationsOnReadOnlyPage_leaveItUnchanged()
+{
+    // Arrange: Today is read-only (running, with an ongoing row) and also
+    // has a finalized completed row, so there is something to try to mutate.
+    const SegmentId rowId = SegmentId::mint();
+    const TimeDuration completedRow = TimeDuration::fromPersistedRow(
+        DurationType::Activity, todayUTC(8, 0), todayUTC(8, 30), rowId);
+    const TimeDuration ongoing = TimeDuration::fromLiveSession(
+        DurationType::Activity, todayUTC(9, 0), todayUTC(9, 5));
+
+    const HistoryEditContext ctx = makeContext(
+        fixedToday(),
+        Timeline({}, ongoing),
+        {storedRow(completedRow)},
+        {},
+        /*stopped=*/false);
+
+    HistoryEditSession session;
+    session.buildFromContext(ctx);
+
+    const int todayIdx = pageIndexForDate(session, fixedToday());
+    QVERIFY(todayIdx >= 0);
+    QCOMPARE(session.pageEditable(static_cast<size_t>(todayIdx)), false);
+
+    // Act: every mutation on this read-only page must refuse.
+    const bool typeChanged = session.setCompletedType(static_cast<size_t>(todayIdx), rowId, DurationType::Pause);
+    const auto splitOutcome = session.splitRow(static_cast<size_t>(todayIdx), 0,
+        todayUTC(8, 15), DurationType::Activity, DurationType::Pause);
+    const bool timelineSet = session.setPageTimeline(static_cast<size_t>(todayIdx),
+        Timeline({}, std::nullopt));
+
+    // Assert: refused, and the page's rows are byte-identical to before.
+    QCOMPARE(typeChanged, false);
+    QCOMPARE(splitOutcome.applied, false);
+    QCOMPARE(splitOutcome.error, HistoryEditSession::SplitError::ReadOnly);
+    QCOMPARE(timelineSet, false);
+
+    const auto& completed = session.pendingTimelines()[static_cast<size_t>(todayIdx)].completed();
+    QCOMPARE(completed.size(), static_cast<size_t>(1));
+    QCOMPARE(completed[0].segment_id, rowId);
+    QCOMPARE(completed[0].type, DurationType::Activity);
+    QCOMPARE(completed[0].startTime, completedRow.startTime);
+    QCOMPARE(completed[0].endTime, completedRow.endTime);
+    QVERIFY(session.pendingTimelines()[static_cast<size_t>(todayIdx)].ongoing().has_value());
+    QCOMPARE(session.pendingTimelines()[static_cast<size_t>(todayIdx)].ongoing()->segment_id,
+        ongoing.segment_id);
+}
+
+void HistoryEditSessionTest::test_WP4_rowsOutOfOrder_sortedOnPage()
+{
+    // Arrange: three stored rows for yesterday, supplied out of chronological
+    // order.
+    const QDate yesterday = fixedToday().addDays(-1);
+    const TimeDuration rowA = TimeDuration::fromPersistedRow(
+        DurationType::Activity, atLocal(yesterday, 10, 0), atLocal(yesterday, 10, 5));
+    const TimeDuration rowB = TimeDuration::fromPersistedRow(
+        DurationType::Activity, atLocal(yesterday, 12, 0), atLocal(yesterday, 12, 5));
+    const TimeDuration rowC = TimeDuration::fromPersistedRow(
+        DurationType::Activity, atLocal(yesterday, 15, 0), atLocal(yesterday, 15, 5));
+
+    const HistoryEditContext ctx = makeContext(
+        fixedToday(),
+        Timeline({}, std::nullopt),
+        {storedRow(rowC), storedRow(rowA), storedRow(rowB)},
+        {},
+        /*stopped=*/true);
+
+    HistoryEditSession session;
+    session.buildFromContext(ctx);
+
+    const int idx = pageIndexForDate(session, yesterday);
+    QVERIFY(idx >= 0);
+
+    // Act/Assert: the page's rows come back sorted by start time.
+    const auto& completed = session.pendingTimelines()[static_cast<size_t>(idx)].completed();
+    QCOMPARE(completed.size(), static_cast<size_t>(3));
+    QCOMPARE(completed[0].segment_id, rowA.segment_id);
+    QCOMPARE(completed[1].segment_id, rowB.segment_id);
+    QCOMPARE(completed[2].segment_id, rowC.segment_id);
+}
+
+void HistoryEditSessionTest::test_WP4_futureDatedPage_isEditable()
+{
+    // Arrange (U2): a page dated after Today, with no live/pending overlap.
+    const QDate future = fixedToday().addDays(3);
+    const TimeDuration futureRow = TimeDuration::fromPersistedRow(
+        DurationType::Activity, atLocal(future, 10, 0), atLocal(future, 10, 30));
+
+    const HistoryEditContext ctx = makeContext(
+        fixedToday(),
+        Timeline({}, std::nullopt),
+        {storedRow(futureRow)},
+        {},
+        /*stopped=*/true);
+
+    HistoryEditSession session;
+    session.buildFromContext(ctx);
+
+    const int idx = pageIndexForDate(session, future);
+    QVERIFY(idx >= 0);
+
+    // Act/Assert
+    QCOMPARE(session.pageEditable(static_cast<size_t>(idx)), true);
+}
+
+void HistoryEditSessionTest::test_WP4_daySpan_matchesLocalDayStartEnd()
+{
+    // Arrange
+    const QDate yesterday = fixedToday().addDays(-1);
+    const TimeDuration row = TimeDuration::fromPersistedRow(
+        DurationType::Activity, atLocal(yesterday, 10, 0), atLocal(yesterday, 10, 30));
+
+    const HistoryEditContext ctx = makeContext(
+        fixedToday(),
+        Timeline({}, std::nullopt),
+        {storedRow(row)},
+        {},
+        /*stopped=*/true);
+
+    HistoryEditSession session;
+    session.buildFromContext(ctx);
+
+    // Act/Assert: every page's span matches localDayStart/End(pageDate).
+    for (size_t i = 0; i < session.pageCount(); ++i) {
+        const auto span = session.daySpan(i);
+        QCOMPARE(span.startUtc, DayValidity::localDayStart(session.pages()[i].pageDate).toUTC());
+        QCOMPARE(span.endUtc, DayValidity::localDayEnd(session.pages()[i].pageDate).toUTC());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// H5/WP4 -- buildScopedSave() scoped diff
+// ---------------------------------------------------------------------------
+
+void HistoryEditSessionTest::test_WP4_scopedSave_toggle_yieldsOneUpsert()
+{
+    // Arrange
+    const QDate yesterday = fixedToday().addDays(-1);
+    const SegmentId rowId = SegmentId::mint();
+    const TimeDuration row = TimeDuration::fromPersistedRow(
+        DurationType::Activity, atLocal(yesterday, 10, 0), atLocal(yesterday, 10, 30), rowId);
+
+    const HistoryEditContext ctx = makeContext(
+        fixedToday(), Timeline({}, std::nullopt), {storedRow(row)}, {}, /*stopped=*/true);
+
+    HistoryEditSession session;
+    session.buildFromContext(ctx);
+    const int idx = pageIndexForDate(session, yesterday);
+    QVERIFY(idx >= 0);
+
+    QVERIFY(session.setCompletedType(static_cast<size_t>(idx), rowId, DurationType::Pause));
+    QVERIFY(session.hasEdits());
+
+    // Act
+    const auto result = session.buildScopedSave();
+
+    // Assert
+    QCOMPARE(result.violation, DayValidity::Violation::None);
+    QCOMPARE(result.needsMergeConfirmation, false);
+    QCOMPARE(result.days.size(), static_cast<size_t>(1));
+    QCOMPARE(result.days[0].date, yesterday);
+    QCOMPARE(result.days[0].deletedIds.size(), static_cast<size_t>(0));
+    QCOMPARE(result.days[0].upserts.size(), static_cast<size_t>(1));
+    QCOMPARE(result.days[0].upserts[0].segment_id, rowId);
+    QCOMPARE(result.days[0].upserts[0].type, DurationType::Pause);
+}
+
+void HistoryEditSessionTest::test_WP4_scopedSave_split_yieldsOriginalPlusNewId()
+{
+    // Arrange
+    const QDate yesterday = fixedToday().addDays(-1);
+    const SegmentId rowId = SegmentId::mint();
+    const TimeDuration row = TimeDuration::fromPersistedRow(
+        DurationType::Activity, atLocal(yesterday, 10, 0), atLocal(yesterday, 10, 10), rowId);
+
+    const HistoryEditContext ctx = makeContext(
+        fixedToday(), Timeline({}, std::nullopt), {storedRow(row)}, {}, /*stopped=*/true);
+
+    HistoryEditSession session;
+    session.buildFromContext(ctx);
+    const int idx = pageIndexForDate(session, yesterday);
+    QVERIFY(idx >= 0);
+
+    const auto outcome = session.splitRow(static_cast<size_t>(idx), 0,
+        atLocal(yesterday, 10, 5), DurationType::Activity, DurationType::Pause);
+    QVERIFY(outcome.applied);
+    QVERIFY(session.hasEdits());
+
+    // Act
+    const auto result = session.buildScopedSave();
+
+    // Assert
+    QCOMPARE(result.days.size(), static_cast<size_t>(1));
+    QCOMPARE(result.days[0].deletedIds.size(), static_cast<size_t>(0));
+    QCOMPARE(result.days[0].upserts.size(), static_cast<size_t>(2));
+    QSet<QString> upsertIds;
+    for (const auto& u : result.days[0].upserts)
+        upsertIds.insert(u.segment_id.toString());
+    QVERIFY(upsertIds.contains(outcome.firstId.toString()));
+    QVERIFY(upsertIds.contains(outcome.secondId.toString()));
+}
+
+void HistoryEditSessionTest::test_WP4_scopedSave_toggleNextToSameTypeNeighbour_merges()
+{
+    // Arrange: two touching rows of different type; toggling A to match B's
+    // type makes them a same-type, touching pair with A changed.
+    const QDate yesterday = fixedToday().addDays(-1);
+    const SegmentId idA = SegmentId::mint();
+    const SegmentId idB = SegmentId::mint();
+    const TimeDuration rowA = TimeDuration::fromPersistedRow(
+        DurationType::Pause, atLocal(yesterday, 10, 0), atLocal(yesterday, 10, 30), idA);
+    const TimeDuration rowB = TimeDuration::fromPersistedRow(
+        DurationType::Activity, atLocal(yesterday, 10, 30), atLocal(yesterday, 11, 0), idB);
+
+    const HistoryEditContext ctx = makeContext(
+        fixedToday(), Timeline({}, std::nullopt), {storedRow(rowA), storedRow(rowB)}, {}, true);
+
+    HistoryEditSession session;
+    session.buildFromContext(ctx);
+    const int idx = pageIndexForDate(session, yesterday);
+    QVERIFY(idx >= 0);
+
+    QVERIFY(session.setCompletedType(static_cast<size_t>(idx), idA, DurationType::Activity));
+    QVERIFY(session.hasEdits());
+
+    // Act
+    const auto result = session.buildScopedSave();
+
+    // Assert
+    QCOMPARE(result.needsMergeConfirmation, true);
+    QCOMPARE(result.days.size(), static_cast<size_t>(1));
+    QCOMPARE(result.days[0].upserts.size(), static_cast<size_t>(1));
+    QCOMPARE(result.days[0].upserts[0].segment_id, idA);
+    QCOMPARE(result.days[0].upserts[0].type, DurationType::Activity);
+    QCOMPARE(result.days[0].upserts[0].startTime, rowA.startTime);
+    QCOMPARE(result.days[0].upserts[0].endTime, rowB.endTime);
+    QCOMPARE(result.days[0].deletedIds.size(), static_cast<size_t>(1));
+    QCOMPARE(result.days[0].deletedIds[0], idB);
+}
+
+void HistoryEditSessionTest::test_WP4_scopedSave_untouchedTouchingPair_absentFromDays_idsKept()
+{
+    // Arrange: an untouched touching same-type pair must not merge just
+    // because a third, unrelated row on the same page is edited.
+    const QDate yesterday = fixedToday().addDays(-1);
+    const SegmentId idP1 = SegmentId::mint();
+    const SegmentId idP2 = SegmentId::mint();
+    const SegmentId idC = SegmentId::mint();
+    const TimeDuration rowP1 = TimeDuration::fromPersistedRow(
+        DurationType::Pause, atLocal(yesterday, 8, 0), atLocal(yesterday, 8, 30), idP1);
+    const TimeDuration rowP2 = TimeDuration::fromPersistedRow(
+        DurationType::Pause, atLocal(yesterday, 8, 30), atLocal(yesterday, 9, 0), idP2);
+    const TimeDuration rowC = TimeDuration::fromPersistedRow(
+        DurationType::Activity, atLocal(yesterday, 10, 0), atLocal(yesterday, 10, 30), idC);
+
+    const HistoryEditContext ctx = makeContext(
+        fixedToday(), Timeline({}, std::nullopt),
+        {storedRow(rowP1), storedRow(rowP2), storedRow(rowC)}, {}, true);
+
+    HistoryEditSession session;
+    session.buildFromContext(ctx);
+    const int idx = pageIndexForDate(session, yesterday);
+    QVERIFY(idx >= 0);
+
+    QVERIFY(session.setCompletedType(static_cast<size_t>(idx), idC, DurationType::Pause));
+    QVERIFY(session.hasEdits());
+
+    // Act
+    const auto result = session.buildScopedSave();
+
+    // Assert
+    QCOMPARE(result.needsMergeConfirmation, false);
+    QCOMPARE(result.days.size(), static_cast<size_t>(1));
+    QCOMPARE(result.days[0].upserts.size(), static_cast<size_t>(1));
+    QCOMPARE(result.days[0].upserts[0].segment_id, idC);
+    QVERIFY(result.days[0].deletedIds.empty());
+}
+
+void HistoryEditSessionTest::test_WP4_scopedSave_toggleBackToOriginal_yieldsEmptyDays()
+{
+    // Arrange: toggle, then toggle back -- net zero change.
+    const QDate yesterday = fixedToday().addDays(-1);
+    const SegmentId rowId = SegmentId::mint();
+    const TimeDuration row = TimeDuration::fromPersistedRow(
+        DurationType::Pause, atLocal(yesterday, 10, 0), atLocal(yesterday, 10, 30), rowId);
+
+    const HistoryEditContext ctx = makeContext(
+        fixedToday(), Timeline({}, std::nullopt), {storedRow(row)}, {}, true);
+
+    HistoryEditSession session;
+    session.buildFromContext(ctx);
+    const int idx = pageIndexForDate(session, yesterday);
+    QVERIFY(idx >= 0);
+
+    QVERIFY(session.setCompletedType(static_cast<size_t>(idx), rowId, DurationType::Activity));
+    QVERIFY(session.setCompletedType(static_cast<size_t>(idx), rowId, DurationType::Pause));
+    QVERIFY(!session.hasEdits());
+
+    // Act
+    const auto result = session.buildScopedSave();
+
+    // Assert
+    QVERIFY(result.days.empty());
+}
+
+void HistoryEditSessionTest::test_WP4_scopedSave_editsOnTwoDates_yieldTwoDaysEntries()
+{
+    // Arrange
+    const QDate yesterday = fixedToday().addDays(-1);
+    const QDate twoDaysAgo = fixedToday().addDays(-2);
+    const SegmentId idY = SegmentId::mint();
+    const SegmentId idZ = SegmentId::mint();
+    const TimeDuration rowY = TimeDuration::fromPersistedRow(
+        DurationType::Activity, atLocal(yesterday, 10, 0), atLocal(yesterday, 10, 30), idY);
+    const TimeDuration rowZ = TimeDuration::fromPersistedRow(
+        DurationType::Activity, atLocal(twoDaysAgo, 10, 0), atLocal(twoDaysAgo, 10, 30), idZ);
+
+    const HistoryEditContext ctx = makeContext(
+        fixedToday(), Timeline({}, std::nullopt), {storedRow(rowY), storedRow(rowZ)}, {}, true);
+
+    HistoryEditSession session;
+    session.buildFromContext(ctx);
+    const int idxY = pageIndexForDate(session, yesterday);
+    const int idxZ = pageIndexForDate(session, twoDaysAgo);
+    QVERIFY(idxY >= 0);
+    QVERIFY(idxZ >= 0);
+
+    QVERIFY(session.setCompletedType(static_cast<size_t>(idxY), idY, DurationType::Pause));
+    QVERIFY(session.setCompletedType(static_cast<size_t>(idxZ), idZ, DurationType::Pause));
+    QVERIFY(session.hasEdits());
+
+    // Act
+    const auto result = session.buildScopedSave();
+
+    // Assert
+    QCOMPARE(result.days.size(), static_cast<size_t>(2));
+    QSet<QDate> dates;
+    for (const auto& d : result.days)
+        dates.insert(d.date);
+    QVERIFY(dates.contains(yesterday));
+    QVERIFY(dates.contains(twoDaysAgo));
+}
+
+// ---------------------------------------------------------------------------
+// H5/WP4 -- buildScopedSave() violations
+// ---------------------------------------------------------------------------
+
+void HistoryEditSessionTest::test_WP4_scopedSave_overlapsRetainedCrossMidnight_givesTypeOverlap()
+{
+    // Arrange: a single-boundary cross-midnight Pause row is retained
+    // context on `day`; a same-day row shares day's type at first, then gets
+    // toggled to Activity, creating a NEW overlap with the retained row.
+    const QDate day = fixedToday().addDays(-1);
+    const TimeDuration crossMidnight = TimeDuration::fromPersistedRow(
+        DurationType::Pause, atLocal(day, 23, 0), atLocal(day.addDays(1), 1, 0));
+    const SegmentId idX = SegmentId::mint();
+    const TimeDuration rowX = TimeDuration::fromPersistedRow(
+        DurationType::Pause, atLocal(day, 22, 50), atLocal(day, 23, 5), idX);
+
+    const HistoryEditContext ctx = makeContext(
+        fixedToday(), Timeline({}, std::nullopt),
+        {storedRow(crossMidnight), storedRow(rowX)}, {}, true);
+
+    HistoryEditSession session;
+    session.buildFromContext(ctx);
+    const int idx = pageIndexForDate(session, day);
+    QVERIFY(idx >= 0);
+    // Arrange precondition: the cross-midnight row is display-only context,
+    // not an editable candidate on this page.
+    QCOMPARE(session.pages()[static_cast<size_t>(idx)].crossMidnight.size(), static_cast<size_t>(1));
+
+    QVERIFY(session.setCompletedType(static_cast<size_t>(idx), idX, DurationType::Activity));
+    QVERIFY(session.hasEdits());
+
+    // Act
+    const auto result = session.buildScopedSave();
+
+    // Assert
+    QCOMPARE(result.violation, DayValidity::Violation::TypeOverlap);
+}
+
+void HistoryEditSessionTest::test_WP4_scopedSave_overlapsRetainedMultiBoundary_givesTypeOverlap()
+{
+    // Arrange: a stored row spanning more than one boundary is skipped from
+    // the pages entirely, but must still count as retained context for the
+    // overlap check.
+    const QDate day = fixedToday().addDays(-1);
+    const TimeDuration multiBoundary = TimeDuration::fromPersistedRow(
+        DurationType::Pause, atLocal(day, 22, 0), atLocal(day.addDays(2), 2, 0));
+    const SegmentId idX = SegmentId::mint();
+    const TimeDuration rowX = TimeDuration::fromPersistedRow(
+        DurationType::Pause, atLocal(day, 23, 0), atLocal(day, 23, 10), idX);
+
+    const HistoryEditContext ctx = makeContext(
+        fixedToday(), Timeline({}, std::nullopt),
+        {storedRow(multiBoundary), storedRow(rowX)}, {}, true);
+
+    HistoryEditSession session;
+    session.buildFromContext(ctx);
+    const int idx = pageIndexForDate(session, day);
+    QVERIFY(idx >= 0);
+    // Arrange precondition: the multi-boundary row produced no page rows of
+    // its own (it never appears as an editable row or a display row).
+    for (size_t i = 0; i < session.pageCount(); ++i) {
+        for (const auto& d : session.pendingTimelines()[i].completed())
+            QVERIFY(d.segment_id != multiBoundary.segment_id);
+        for (const auto& d : session.pages()[i].crossMidnight)
+            QVERIFY(d.segment_id != multiBoundary.segment_id);
+        for (const auto& d : session.pages()[i].continuations)
+            QVERIFY(d.segment_id != multiBoundary.segment_id);
+    }
+
+    QVERIFY(session.setCompletedType(static_cast<size_t>(idx), idX, DurationType::Activity));
+    QVERIFY(session.hasEdits());
+
+    // Act
+    const auto result = session.buildScopedSave();
+
+    // Assert
+    QCOMPARE(result.violation, DayValidity::Violation::TypeOverlap);
+}
+
+void HistoryEditSessionTest::test_WP4_scopedSave_unrelatedPreExistingOverlap_doesNotBlockOtherEdit()
+{
+    // Arrange: an untouched cross-type overlap already exists between two
+    // retained rows; a third, unrelated row is edited elsewhere on the page.
+    const QDate day = fixedToday().addDays(-1);
+    const TimeDuration rowP = TimeDuration::fromPersistedRow(
+        DurationType::Pause, atLocal(day, 8, 0), atLocal(day, 9, 0));
+    const TimeDuration rowA = TimeDuration::fromPersistedRow(
+        DurationType::Activity, atLocal(day, 8, 30), atLocal(day, 8, 45));
+    const SegmentId idC = SegmentId::mint();
+    const TimeDuration rowC = TimeDuration::fromPersistedRow(
+        DurationType::Activity, atLocal(day, 12, 0), atLocal(day, 12, 30), idC);
+
+    const HistoryEditContext ctx = makeContext(
+        fixedToday(), Timeline({}, std::nullopt),
+        {storedRow(rowP), storedRow(rowA), storedRow(rowC)}, {}, true);
+
+    HistoryEditSession session;
+    session.buildFromContext(ctx);
+    const int idx = pageIndexForDate(session, day);
+    QVERIFY(idx >= 0);
+
+    QVERIFY(session.setCompletedType(static_cast<size_t>(idx), idC, DurationType::Pause));
+    QVERIFY(session.hasEdits());
+
+    // Act
+    const auto result = session.buildScopedSave();
+
+    // Assert
+    QCOMPARE(result.violation, DayValidity::Violation::None);
+    QCOMPARE(result.days.size(), static_cast<size_t>(1));
+    QCOMPARE(result.days[0].upserts.size(), static_cast<size_t>(1));
+    QCOMPARE(result.days[0].upserts[0].segment_id, idC);
+}
+
+void HistoryEditSessionTest::test_WP4_scopedSave_editedRowOverlapsUntouchedRetained_givesTypeOverlap()
+{
+    // Arrange (M1): an untouched Pause row stays retained on the page; a
+    // second Pause row is toggled to Activity and now overlaps it. This must
+    // be caught even though neither row is a cross-midnight/multi-boundary
+    // row -- the untouched-rows-into-retained loop in buildScopedSave() is
+    // the only thing that can catch it.
+    const QDate day = fixedToday().addDays(-1);
+    const TimeDuration rowP = TimeDuration::fromPersistedRow(
+        DurationType::Pause, atLocal(day, 10, 0), atLocal(day, 11, 0));
+    const SegmentId idX = SegmentId::mint();
+    const TimeDuration rowX = TimeDuration::fromPersistedRow(
+        DurationType::Pause, atLocal(day, 10, 30), atLocal(day, 10, 45), idX);
+
+    const HistoryEditContext ctx = makeContext(
+        fixedToday(), Timeline({}, std::nullopt),
+        {storedRow(rowP), storedRow(rowX)}, {}, true);
+
+    HistoryEditSession session;
+    session.buildFromContext(ctx);
+    const int idx = pageIndexForDate(session, day);
+    QVERIFY(idx >= 0);
+
+    QVERIFY(session.setCompletedType(static_cast<size_t>(idx), idX, DurationType::Activity));
+    QVERIFY(session.hasEdits());
+
+    // Act
+    const auto result = session.buildScopedSave();
+
+    // Assert
+    QCOMPARE(result.violation, DayValidity::Violation::TypeOverlap);
 }
