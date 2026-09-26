@@ -1738,3 +1738,92 @@ void IntegrationTest::test_D6_real_sqlite_shutdown_marker_uses_injected_clock_an
     QCOMPARE(QDateTime::fromString(q2.value(0).toString(), Qt::ISODateWithMs), shutdownTime.toUTC());
     reopened.closeConnection_dbg();
 }
+
+// WP3 (step6_plan_revised.md): after a restart, Today is editable once a
+// finalized row that startup recovery itself finalized lies fully inside
+// today's span -- real SQLite end to end (see
+// test_integration_checkpoint_recovery_on_restart() for the recovery half of
+// this scenario).
+void IntegrationTest::test_WP3_today_editable_after_restart_over_recovery_finalized_rows()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+
+    {
+        // First session: Start, checkpoint, then "crash" -- an unfinalized
+        // orphan checkpoint is left in the DB for today.
+        Settings settings(settingsPath);
+        SqliteSessionStore db(settings);
+        FakeClock clock(fixedNow().addSecs(-10));
+        TimeTracker tracker(settings, db);
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+        tracker.useTimerViaButton(Button::Start);
+        clock.advance(1200);
+        tracker.saveCheckpoint_locked_dbg(clock.now());
+        QVERIFY(tracker.getOngoingDuration().has_value());
+
+        tracker.simulateCrashWithoutShutdown_dbg();
+    }
+
+    // Second session: startup recovery finalizes the orphan. The tracker is
+    // never started -- it is stopped, matching an ordinary "open History
+    // after restart" scenario.
+    Settings settings(settingsPath);
+    SqliteSessionStore db(settings);
+    FakeClock clock(fixedNow());
+    TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.initializeFromStore();
+    QVERIFY(tracker.getStartupRecoveredMsec() > 0);
+    QVERIFY(tracker.isStopped());
+
+    // Act
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    tracker.endExclusiveEdit();
+
+    // Assert: the recovery-finalized row lies fully inside today's span.
+    QCOMPARE(ctx.stored.status, SessionStoreResult::Success);
+    QVERIFY(ctx.isEditable(QDate::currentDate()));
+}
+
+// WP3 (step6_plan_revised.md): a backward-clock Stop (D2's scenario) leaves
+// an unfinalized checkpoint row on Today, untouched by the Stop itself --
+// real SQLite. That leftover row must make Today read-only.
+void IntegrationTest::test_WP3_today_readonly_leftover_unfinalized_row_from_backward_clock_stop()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    Settings settings(settingsPath);
+    SqliteSessionStore db(settings);
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::LocalTime);
+    const QDateTime checkpointEnd = t0.addSecs(300);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+
+    // A real checkpoint row is written for the recorded prefix.
+    clock.setNow(checkpointEnd);
+    tracker.triggerCheckpoint_dbg();
+
+    // Act: a backward wall-clock step, then Stop -- the closing interval is
+    // dropped but the already-checkpointed prefix survives untouched.
+    clock.setNow(t0.addSecs(-600));
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.isStopped());
+
+    clock.setNow(t0.addSecs(3600));
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    tracker.endExclusiveEdit();
+
+    // Assert
+    QCOMPARE(ctx.stored.status, SessionStoreResult::Success);
+    QVERIFY(!ctx.isEditable(t0.date()));
+}

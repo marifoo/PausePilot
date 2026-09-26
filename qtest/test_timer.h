@@ -519,6 +519,27 @@ private slots:
 
     // WP6: shutdown revokes History first.
     void test_shutdown_with_history_open_revokes_before_stopping();
+
+    // ====================================================================
+    // WP3 (step6_plan_revised.md): beginExclusiveEdit() context, per-date
+    // eligibility (HistoryEligibility::isEditable) and saveHistoryEdit().
+    // ====================================================================
+    void test_WP3_today_readonly_while_active_and_paused_past_and_future_editable();
+    void test_WP3_today_editable_after_accepted_stop();
+    void test_WP3_today_readonly_stopped_empty_history();
+    void test_WP3_today_readonly_transient_error_load();
+    void test_WP3_today_readonly_only_cross_midnight_continuation();
+    void test_WP3_today_readonly_disabled_history_load();
+    void test_WP3_today_readonly_failed_stop_with_pending_commit();
+    void test_WP3_today_readonly_leftover_unfinalized_row();
+    void test_WP3_failed_midnight_stop_then_open_next_day_yesterday_readonly_today_unaffected();
+    void test_WP3_ongoing_end_time_equals_openedAt_single_clock_read();
+    void test_WP3_saveHistoryEdit_forwards_snapshot_and_days_state_untouched();
+    void test_WP3_saveHistoryEdit_date_not_editable_at_open_is_callerbug_no_store_call();
+    void test_WP3_saveHistoryEdit_backward_clock_date_change_is_conflict_no_store_call();
+    void test_WP3_saveHistoryEdit_timezone_change_is_conflict_no_store_call();
+    void test_WP3_saveHistoryEdit_after_endExclusiveEdit_is_conflict_no_store_call();
+    void test_WP3_saveHistoryEdit_after_revoke_is_conflict_no_store_call();
 };
 
 #endif // TEST_TIMER_H

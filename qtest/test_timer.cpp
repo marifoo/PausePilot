@@ -6254,3 +6254,544 @@ void TimerTest::test_shutdown_with_history_open_revokes_before_stopping()
     QCOMPARE(events.count(), 0);
     QCOMPARE(userWarningSpy.count(), 0);
 }
+
+// ============================================================================
+// WP3 (step6_plan_revised.md): beginExclusiveEdit() context, per-date
+// eligibility (HistoryEligibility::isEditable) and saveHistoryEdit().
+// ============================================================================
+
+void TimerTest::test_WP3_today_readonly_while_active_and_paused_past_and_future_editable()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    const QDate today(2025, 6, 15);
+    FakeClock clock(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+
+    // Act: open while Active.
+    const HistoryEditContext ctxActive = tracker.beginExclusiveEdit();
+    tracker.endExclusiveEdit();
+
+    // Assert: Today is read-only, a past date and a future-dated page are editable.
+    QVERIFY(!ctxActive.isEditable(today));
+    QVERIFY(ctxActive.isEditable(today.addDays(-1)));
+    QVERIFY(ctxActive.isEditable(today.addDays(1)));
+
+    // Arrange: Pause.
+    tracker.useTimerViaButton(Button::Pause);
+    QVERIFY(tracker.isPaused());
+
+    // Act: open while Pause.
+    const HistoryEditContext ctxPaused = tracker.beginExclusiveEdit();
+    tracker.endExclusiveEdit();
+
+    // Assert: Today is still read-only in Pause; past/future stay editable.
+    QVERIFY(!ctxPaused.isEditable(today));
+    QVERIFY(ctxPaused.isEditable(today.addDays(-1)));
+    QVERIFY(ctxPaused.isEditable(today.addDays(1)));
+}
+
+void TimerTest::test_WP3_today_editable_after_accepted_stop()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    const QDate today(2025, 6, 15);
+    FakeClock clock(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(3600000);
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.isStopped());
+    QVERIFY(!fakeDb.storedDurations.empty());
+
+    // Act
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    tracker.endExclusiveEdit();
+
+    // Assert
+    QVERIFY(ctx.isEditable(today));
+}
+
+void TimerTest::test_WP3_today_readonly_stopped_empty_history()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    const QDate today(2025, 6, 15);
+    FakeClock clock(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    QVERIFY(tracker.isStopped());
+
+    // Act
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    tracker.endExclusiveEdit();
+
+    // Assert: stopped, but no finalized row fully inside today -> read-only.
+    QVERIFY(!ctx.isEditable(today));
+}
+
+void TimerTest::test_WP3_today_readonly_transient_error_load()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    fakeDb.loadDurationsResult.status = SessionStoreResult::TransientError;
+    const QDate today(2025, 6, 15);
+    FakeClock clock(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    QVERIFY(tracker.isStopped());
+
+    // Act
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    tracker.endExclusiveEdit();
+
+    // Assert
+    QCOMPARE(ctx.stored.status, SessionStoreResult::TransientError);
+    QVERIFY(!ctx.isEditable(today));
+    QVERIFY(!ctx.isEditable(today.addDays(-1)));
+}
+
+void TimerTest::test_WP3_today_readonly_only_cross_midnight_continuation()
+{
+    // Arrange: a legacy finalized row spanning local midnight into today.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    const QDate today(2025, 6, 15);
+    const QDateTime legacyStart(today.addDays(-1), QTime(23, 30, 0), Qt::LocalTime);
+    const QDateTime legacyEnd(today, QTime(0, 30, 0), Qt::LocalTime);
+    fakeDb.loadDurationsResult.durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, legacyStart, legacyEnd));
+    FakeClock clock(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    QVERIFY(tracker.isStopped());
+
+    // Act
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    tracker.endExclusiveEdit();
+
+    // Assert: the only "today" row is a continuation, not fully inside today.
+    QVERIFY(!ctx.isEditable(today));
+}
+
+void TimerTest::test_WP3_today_readonly_disabled_history_load()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    fakeDb.loadDurationsResult.status = SessionStoreResult::Disabled;
+    const QDate today(2025, 6, 15);
+    FakeClock clock(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    QVERIFY(tracker.isStopped());
+
+    // Act
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    tracker.endExclusiveEdit();
+
+    // Assert
+    QCOMPARE(ctx.stored.status, SessionStoreResult::Disabled);
+    QVERIFY(!ctx.isEditable(today));
+}
+
+void TimerTest::test_WP3_today_readonly_failed_stop_with_pending_commit()
+{
+    // Arrange: a Stop whose persistence fails leaves a pending commit
+    // payload covering today.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    fakeDb.commitSessionResult = SessionStoreResult::transient("boom");
+    const QDate today(2025, 6, 15);
+    FakeClock clock(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(3600000);
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.isStopped());
+    QVERIFY(tracker.hasPendingCommit_dbg());
+
+    // Act
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    tracker.endExclusiveEdit();
+
+    // Assert: the unpersisted pending-commit row overlaps today.
+    QVERIFY(!ctx.pendingCommit.empty());
+    QVERIFY(!ctx.isEditable(today));
+
+    // Cleanup: shutdown() so destruction finds no unresolved orchestration bug.
+    tracker.shutdown();
+}
+
+void TimerTest::test_WP3_today_readonly_leftover_unfinalized_row()
+{
+    // Arrange: an unfinalized checkpoint row sits on today, with no other
+    // activity at all.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    const QDate today(2025, 6, 15);
+    const QDateTime cpStart(today, QTime(8, 0, 0), Qt::LocalTime);
+    const QDateTime cpEnd(today, QTime(8, 5, 0), Qt::LocalTime);
+    fakeDb.historyUnfinalizedRows.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, cpStart, cpEnd));
+    FakeClock clock(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    QVERIFY(tracker.isStopped());
+
+    // Act
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    tracker.endExclusiveEdit();
+
+    // Assert
+    QVERIFY(!ctx.isEditable(today));
+}
+
+void TimerTest::test_WP3_failed_midnight_stop_then_open_next_day_yesterday_readonly_today_unaffected()
+{
+    // Arrange: an Activity segment fails to persist at the 23:59:59.500
+    // scheduled stop, leaving a pending-commit payload for yesterday.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    const QDate yesterday(2025, 6, 15);
+    const QDate today(2025, 6, 16);
+    FakeClock clock(QDateTime(yesterday, QTime(23, 50, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    fakeDb.commitSessionResult = SessionStoreResult::transient("boom");
+    clock.setNow(QDateTime(yesterday, QTime(23, 59, 59, 500), Qt::LocalTime));
+    tracker.onTick(clock.now());
+    QVERIFY(tracker.isStopped());
+    QVERIFY(tracker.hasPendingCommit_dbg());
+
+    // Arrange: a finalized row fully inside today, so today's own permission
+    // (independent of the leftover pending commit) can be observed as true.
+    const QDateTime todayStart(today, QTime(7, 0, 0), Qt::LocalTime);
+    const QDateTime todayEnd(today, QTime(8, 0, 0), Qt::LocalTime);
+    fakeDb.loadDurationsResult.durations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, todayStart, todayEnd));
+    clock.setNow(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+
+    // Act
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    tracker.endExclusiveEdit();
+
+    // Assert: yesterday is blocked by the leftover pending commit; today is
+    // unaffected by it (editable on its own, ordinary merits).
+    QVERIFY(!ctx.isEditable(yesterday));
+    QVERIFY(ctx.isEditable(today));
+
+    // Cleanup: shutdown() so destruction finds no unresolved orchestration bug.
+    tracker.shutdown();
+}
+
+void TimerTest::test_WP3_ongoing_end_time_equals_openedAt_single_clock_read()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    const QDate today(2025, 6, 15);
+    FakeClock clock(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(120000);
+
+    // Act
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    tracker.endExclusiveEdit();
+
+    // Assert: the ongoing row's end is exactly the one clock read this
+    // context was built from.
+    QVERIFY(ctx.live.ongoing().has_value());
+    QCOMPARE(ctx.live.ongoing()->endTime, ctx.openedAt);
+    QCOMPARE(ctx.openedAt, clock.now());
+}
+
+void TimerTest::test_WP3_saveHistoryEdit_forwards_snapshot_and_days_state_untouched()
+{
+    // Arrange: a stopped tracker with a finalized past-day row.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    const QDate today(2025, 6, 15);
+    const QDate pastDate(2025, 6, 10);
+    const QDateTime pastStart(pastDate, QTime(9, 0, 0), Qt::LocalTime);
+    const QDateTime pastEnd(pastDate, QTime(10, 0, 0), Qt::LocalTime);
+    const TimeDuration pastRow =
+        TimeDuration::fromPersistedRow(DurationType::Activity, pastStart, pastEnd);
+    fakeDb.storedDurations.push_back(pastRow);
+    FakeClock clock(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    QVERIFY(tracker.isStopped());
+
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    QVERIFY(ctx.isEditable(pastDate));
+
+    HistoryDayChange day;
+    day.date = pastDate;
+    day.dayStartUtc = DayValidity::localDayStart(pastDate).toUTC();
+    day.dayEndUtc = DayValidity::localDayEnd(pastDate).toUTC();
+    day.upserts.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Pause, pastStart, pastEnd, pastRow.segment_id));
+    const std::vector<HistoryDayChange> days{day};
+
+    const auto modeBefore = tracker.isActive() ? TimeTracker::Mode::Activity
+        : tracker.isPaused() ? TimeTracker::Mode::Pause : TimeTracker::Mode::None;
+    const auto durationsBefore = tracker.sessionState_dbg().durations;
+    const bool pendingBefore = tracker.hasPendingCommit_dbg();
+
+    // Act
+    const SessionStoreResult result = tracker.saveHistoryEdit(ctx, days);
+
+    // Assert: the exact snapshot and days reached the store unchanged.
+    QVERIFY(result.ok());
+    QCOMPARE(fakeDb.lastHistorySaveSnapshot.size(), ctx.stored.rows.size());
+    for (size_t i = 0; i < ctx.stored.rows.size(); ++i) {
+        QCOMPARE(fakeDb.lastHistorySaveSnapshot[i].segmentId, ctx.stored.rows[i].segmentId);
+        QCOMPARE(fakeDb.lastHistorySaveSnapshot[i].startUtc, ctx.stored.rows[i].startUtc);
+        QCOMPARE(fakeDb.lastHistorySaveSnapshot[i].endUtc, ctx.stored.rows[i].endUtc);
+        QCOMPARE(fakeDb.lastHistorySaveSnapshot[i].isFinalized, ctx.stored.rows[i].isFinalized);
+    }
+    QCOMPARE(fakeDb.lastHistorySaveDays.size(), (size_t)1);
+    QCOMPARE(fakeDb.lastHistorySaveDays[0].date, day.date);
+    QCOMPARE(fakeDb.lastHistorySaveDays[0].dayStartUtc, day.dayStartUtc);
+    QCOMPARE(fakeDb.lastHistorySaveDays[0].dayEndUtc, day.dayEndUtc);
+    QCOMPARE(fakeDb.lastHistorySaveDays[0].upserts.size(), (size_t)1);
+    QCOMPARE(fakeDb.lastHistorySaveDays[0].upserts[0].segment_id, pastRow.segment_id);
+
+    // Assert: engine memory/mode/pending-commit are untouched by the save.
+    const auto modeAfter = tracker.isActive() ? TimeTracker::Mode::Activity
+        : tracker.isPaused() ? TimeTracker::Mode::Pause : TimeTracker::Mode::None;
+    QCOMPARE(modeAfter, modeBefore);
+    QCOMPARE(tracker.sessionState_dbg().durations.size(), durationsBefore.size());
+    QCOMPARE(tracker.hasPendingCommit_dbg(), pendingBefore);
+}
+
+void TimerTest::test_WP3_saveHistoryEdit_date_not_editable_at_open_is_callerbug_no_store_call()
+{
+    // Arrange: Today is not editable while Active.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    const QDate today(2025, 6, 15);
+    FakeClock clock(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    QVERIFY(!ctx.isEditable(today));
+
+    HistoryDayChange day;
+    day.date = today;
+    day.dayStartUtc = DayValidity::localDayStart(today).toUTC();
+    day.dayEndUtc = DayValidity::localDayEnd(today).toUTC();
+    const std::vector<HistoryDayChange> days{day};
+    const int saveCallsBefore = fakeDb.callLog.count("saveHistoryDays");
+
+    // Act
+    const SessionStoreResult result = tracker.saveHistoryEdit(ctx, days);
+    tracker.endExclusiveEdit();
+
+    // Assert
+    QCOMPARE(result.category, SessionStoreResult::CallerBug);
+    QCOMPARE(fakeDb.callLog.count("saveHistoryDays"), saveCallsBefore);
+}
+
+void TimerTest::test_WP3_saveHistoryEdit_backward_clock_date_change_is_conflict_no_store_call()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    const QDate today(2025, 6, 15);
+    const QDate pastDate(2025, 6, 10);
+    fakeDb.storedDurations.push_back(TimeDuration::fromPersistedRow(
+        DurationType::Activity, QDateTime(pastDate, QTime(9, 0, 0), Qt::LocalTime),
+        QDateTime(pastDate, QTime(10, 0, 0), Qt::LocalTime)));
+    FakeClock clock(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    QVERIFY(tracker.isStopped());
+
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    QVERIFY(ctx.isEditable(pastDate));
+
+    HistoryDayChange day;
+    day.date = pastDate;
+    day.dayStartUtc = DayValidity::localDayStart(pastDate).toUTC();
+    day.dayEndUtc = DayValidity::localDayEnd(pastDate).toUTC();
+    const std::vector<HistoryDayChange> days{day};
+
+    // Act: the wall clock steps backward to a previous local date before Save.
+    clock.setNow(QDateTime(today.addDays(-1), QTime(9, 0, 0), Qt::LocalTime));
+    const int saveCallsBefore = fakeDb.callLog.count("saveHistoryDays");
+    const SessionStoreResult result = tracker.saveHistoryEdit(ctx, days);
+    tracker.endExclusiveEdit();
+
+    // Assert
+    QCOMPARE(result.category, SessionStoreResult::Conflict);
+    QCOMPARE(fakeDb.callLog.count("saveHistoryDays"), saveCallsBefore);
+}
+
+void TimerTest::test_WP3_saveHistoryEdit_timezone_change_is_conflict_no_store_call()
+{
+    // Arrange: TZ restored on scope exit (test_dayvalidity.cpp's pattern).
+    struct TzGuard {
+        QByteArray orig;
+        TzGuard() : orig(qgetenv("TZ")) {}
+        ~TzGuard() { orig.isEmpty() ? qunsetenv("TZ") : qputenv("TZ", orig); tzset(); }
+    } tzGuard;
+    qputenv("TZ", "Etc/UTC");
+    tzset();
+
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    const QDate today(2025, 6, 15);
+    const QDate pastDate(2025, 6, 10);
+    fakeDb.storedDurations.push_back(TimeDuration::fromPersistedRow(
+        DurationType::Activity, QDateTime(pastDate, QTime(9, 0, 0), Qt::LocalTime),
+        QDateTime(pastDate, QTime(10, 0, 0), Qt::LocalTime)));
+    FakeClock clock(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    QVERIFY(tracker.isStopped());
+
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    QVERIFY(ctx.isEditable(pastDate));
+
+    HistoryDayChange day;
+    day.date = pastDate;
+    // Captured under Etc/UTC, exactly as the real caller would at open.
+    day.dayStartUtc = DayValidity::localDayStart(pastDate).toUTC();
+    day.dayEndUtc = DayValidity::localDayEnd(pastDate).toUTC();
+    const std::vector<HistoryDayChange> days{day};
+
+    // Act: the process timezone changes before Save (the local date stays
+    // the same, but the local day's UTC span shifts).
+    qputenv("TZ", "America/Los_Angeles");
+    tzset();
+    const int saveCallsBefore = fakeDb.callLog.count("saveHistoryDays");
+    const SessionStoreResult result = tracker.saveHistoryEdit(ctx, days);
+    tracker.endExclusiveEdit();
+
+    // Assert
+    QCOMPARE(result.category, SessionStoreResult::Conflict);
+    QCOMPARE(fakeDb.callLog.count("saveHistoryDays"), saveCallsBefore);
+}
+
+void TimerTest::test_WP3_saveHistoryEdit_after_endExclusiveEdit_is_conflict_no_store_call()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    const QDate today(2025, 6, 15);
+    const QDate pastDate(2025, 6, 10);
+    fakeDb.storedDurations.push_back(TimeDuration::fromPersistedRow(
+        DurationType::Activity, QDateTime(pastDate, QTime(9, 0, 0), Qt::LocalTime),
+        QDateTime(pastDate, QTime(10, 0, 0), Qt::LocalTime)));
+    FakeClock clock(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    QVERIFY(tracker.isStopped());
+
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    QVERIFY(ctx.isEditable(pastDate));
+    tracker.endExclusiveEdit();
+
+    HistoryDayChange day;
+    day.date = pastDate;
+    day.dayStartUtc = DayValidity::localDayStart(pastDate).toUTC();
+    day.dayEndUtc = DayValidity::localDayEnd(pastDate).toUTC();
+    const std::vector<HistoryDayChange> days{day};
+    const int saveCallsBefore = fakeDb.callLog.count("saveHistoryDays");
+
+    // Act
+    const SessionStoreResult result = tracker.saveHistoryEdit(ctx, days);
+
+    // Assert
+    QCOMPARE(result.category, SessionStoreResult::Conflict);
+    QCOMPARE(fakeDb.callLog.count("saveHistoryDays"), saveCallsBefore);
+}
+
+void TimerTest::test_WP3_saveHistoryEdit_after_revoke_is_conflict_no_store_call()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    const QDate today(2025, 6, 15);
+    const QDate pastDate(2025, 6, 10);
+    fakeDb.storedDurations.push_back(TimeDuration::fromPersistedRow(
+        DurationType::Activity, QDateTime(pastDate, QTime(9, 0, 0), Qt::LocalTime),
+        QDateTime(pastDate, QTime(10, 0, 0), Qt::LocalTime)));
+    FakeClock clock(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    QVERIFY(tracker.isStopped());
+
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    QVERIFY(ctx.isEditable(pastDate));
+
+    // Act: shutdown revokes the open edit (dialog_open_ -> false) before Save.
+    tracker.shutdown();
+    QVERIFY(!tracker.isDialogOpen_dbg());
+
+    HistoryDayChange day;
+    day.date = pastDate;
+    day.dayStartUtc = DayValidity::localDayStart(pastDate).toUTC();
+    day.dayEndUtc = DayValidity::localDayEnd(pastDate).toUTC();
+    const std::vector<HistoryDayChange> days{day};
+    const int saveCallsBefore = fakeDb.callLog.count("saveHistoryDays");
+
+    const SessionStoreResult result = tracker.saveHistoryEdit(ctx, days);
+
+    // Assert
+    QCOMPARE(result.category, SessionStoreResult::Conflict);
+    QCOMPARE(fakeDb.callLog.count("saveHistoryDays"), saveCallsBefore);
+}

@@ -74,6 +74,7 @@ HEADERS += \
     test_selftest_aggregate.h \
     $$PWD/../apppaths.h \
     $$PWD/../dayvalidity.h \
+    $$PWD/../historyeligibility.h \
     $$PWD/../splitdialog.h \
     $$PWD/../historyeditsession.h \
     $$PWD/../healthmonitor.h \

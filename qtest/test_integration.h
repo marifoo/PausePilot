@@ -97,6 +97,14 @@ private slots:
     // now-provider (not the real clock), and that marker durably survives a
     // close and reopen of the database file.
     void test_D6_real_sqlite_shutdown_marker_uses_injected_clock_and_survives_reopen();
+
+    // WP3 (step6_plan_revised.md): real-SQLite eligibility cases.
+    // Today is editable after a restart over finalized Today rows, including
+    // rows startup recovery itself finalized.
+    void test_WP3_today_editable_after_restart_over_recovery_finalized_rows();
+    // A leftover unfinalized checkpoint row left behind by a backward-clock
+    // Stop (D2's scenario) makes Today read-only.
+    void test_WP3_today_readonly_leftover_unfinalized_row_from_backward_clock_stop();
 };
 
 #endif // TEST_INTEGRATION_H

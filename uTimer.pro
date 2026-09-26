@@ -4,6 +4,7 @@ HEADERS = \
    $$PWD/apppaths.h \
    $$PWD/contentwidget.h \
    $$PWD/dayvalidity.h \
+   $$PWD/historyeligibility.h \
    $$PWD/sqlitesessionstore.h \
    $$PWD/healthmonitor.h \
    $$PWD/sessionstore.h \

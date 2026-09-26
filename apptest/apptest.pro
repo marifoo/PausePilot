@@ -58,6 +58,7 @@ HEADERS += \
     $$PWD/../qtest/fakesessionstore.h \
     $$PWD/../apppaths.h \
     $$PWD/../dayvalidity.h \
+    $$PWD/../historyeligibility.h \
     $$PWD/../mainwin.h \
     $$PWD/../contentwidget.h \
     $$PWD/../splitdialog.h \

@@ -1139,9 +1139,13 @@ std::optional<TimeDuration> TimeTracker::getOngoingDuration() const
 
 std::optional<TimeDuration> TimeTracker::getOngoingDuration_locked() const
 {
+    return getOngoingDuration_locked(now_provider_());
+}
+
+std::optional<TimeDuration> TimeTracker::getOngoingDuration_locked(const QDateTime& now) const
+{
     if (mode_ == Mode::None) return std::nullopt;
     if (!session_.segment_start_time.isValid()) return std::nullopt;
-    const QDateTime now = now_provider_();
     const DurationType type = (mode_ == Mode::Activity) ? DurationType::Activity : DurationType::Pause;
     // D2/LOW-E: isClockReversed() covers the strict backward-step case;
     // `now == segment_start_time` (zero elapsed, not a reversal) gets the
@@ -1254,8 +1258,12 @@ void TimeTracker::logDbResultOrWarn(const SessionStoreResult& result, const QStr
         enterFatalState(result.message);
     } else if (result.category == SessionStoreResult::TransientError) {
         Logger::Log("[DB] " + context + " transient error: " + result.message);
+    } else if (result.category == SessionStoreResult::Conflict) {
+        // H5/WP3: log-only -- saveHistoryEdit()'s caller (HistoryDialog) is
+        // the one that decides how to present a Conflict to the user.
+        Logger::Log("[DB] " + context + " conflict: " + result.message);
     }
-    // Success: nothing to log/emit
+    // Success/Disabled: nothing to log/emit
 }
 
 void TimeTracker::enterFatalState(const QString& message)
@@ -1553,13 +1561,23 @@ void TimeTracker::saveCheckpoint_locked(const QDateTime& now)
     }
 }
 
-void TimeTracker::beginExclusiveEdit()
+HistoryEditContext TimeTracker::beginExclusiveEdit()
 {
     QMutexLocker locker(&mutex_);
     dialog_open_ = true;
-    exclusive_edit_date_ = now_provider_().toLocalTime().date();
+    const QDateTime openedAt = now_provider_();
+    exclusive_edit_date_ = openedAt.toLocalTime().date();
     checkpointTimer_.stop();
     Logger::Log("[CHECKPOINT] Checkpoints paused (dialog open)");
+
+    HistoryEditContext ctx;
+    ctx.openedAt = openedAt;
+    ctx.today = exclusive_edit_date_;
+    ctx.stored = db_.loadHistoryRows();
+    ctx.live = Timeline(session_.durations, getOngoingDuration_locked(openedAt));
+    ctx.pendingCommit = pending_commit_.hasPending() ? pending_commit_.payload() : std::deque<TimeDuration>{};
+    ctx.stopped = (mode_ == Mode::None);
+    return ctx;
 }
 
 /**
@@ -1587,5 +1605,30 @@ void TimeTracker::endExclusiveEdit()
     if (mode_ == Mode::Activity && !is_locked_) {
         checkpointTimer_.start();
     }
+}
+
+SessionStoreResult TimeTracker::saveHistoryEdit(const HistoryEditContext& opened,
+                                                const std::vector<HistoryDayChange>& days)
+{
+    QMutexLocker locker(&mutex_);
+    SessionStoreResult result;
+    if (!dialog_open_) {
+        result = SessionStoreResult::conflict("saveHistoryEdit: edit was revoked");
+    } else if (std::any_of(days.begin(), days.end(), [&opened](const HistoryDayChange& day) {
+                   return !opened.isEditable(day.date);
+               })) {
+        result = SessionStoreResult::callerBug("saveHistoryEdit: date not editable at open");
+    } else if (now_provider_().toLocalTime().date() != opened.today) {
+        result = SessionStoreResult::conflict("saveHistoryEdit: local date changed since open");
+    } else if (std::any_of(days.begin(), days.end(), [](const HistoryDayChange& day) {
+                   return DayValidity::localDayStart(day.date).toUTC() != day.dayStartUtc ||
+                          DayValidity::localDayEnd(day.date).toUTC() != day.dayEndUtc;
+               })) {
+        result = SessionStoreResult::conflict("saveHistoryEdit: day span changed since open");
+    } else {
+        result = db_.saveHistoryDays(opened.stored.rows, days);
+    }
+    logDbResultOrWarn(result, "saveHistoryEdit");
+    return result;
 }
 

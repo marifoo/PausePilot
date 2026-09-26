@@ -17,6 +17,7 @@
 #include "types.h"
 #include "sessionstore.h"
 #include "timeline.h"
+#include "historyeligibility.h"
 
 /**
  * SessionState — groups the mutable per-session data that TimeTracker manages.
@@ -356,6 +357,12 @@ private:
     bool maybeReanchorCheckpoint(const TimeDuration& seg);
     /// Locked variant of getOngoingDuration() for callers that already hold mutex_.
     std::optional<TimeDuration> getOngoingDuration_locked() const;
+    /// Same, but built from a caller-supplied `now` instead of a fresh
+    /// now_provider_() read (H5/WP3): beginExclusiveEdit() uses this so the
+    /// ongoing row in the captured HistoryEditContext shares the dialog's
+    /// one open-time clock read instead of taking a second one. The no-arg
+    /// overload above forwards to this with now_provider_().
+    std::optional<TimeDuration> getOngoingDuration_locked(const QDateTime& now) const;
     /// Rewrites all completed segments to the DB. Returns the store's result
     /// (needed by persistDurationsOrRetainForRetry() to apply the standard
     /// okOrDisabled() success/retain policy).
@@ -504,10 +511,28 @@ public:
     bool shouldShowStartupRecoveryNotification() const;
     int getStartupPolicyDroppedCount() const;
     SessionStoreResult replaceAll(const Timeline& history, const Timeline& session);
-    /// Freezes checkpoints. Call before opening HistoryDialog.
-    void beginExclusiveEdit();
+    /// Freezes checkpoints and captures the open-time HistoryEditContext
+    /// (H5/WP3): one now_provider_() read, one db_.loadHistoryRows() call,
+    /// and a snapshot of the live/pending-commit/stopped state. Call before
+    /// opening HistoryDialog.
+    HistoryEditContext beginExclusiveEdit();
     /// Resumes checkpoints. Call after closing HistoryDialog.
     void endExclusiveEdit();
+    /// Saves a scoped History edit (H5/WP3) built against the context
+    /// `opened` returned by beginExclusiveEdit(). Holds mutex_ across the
+    /// whole call and checks, in order:
+    ///   1. the edit was revoked (dialog_open_ is now false) -> Conflict;
+    ///   2. any day's date was not editable in `opened` -> CallerBug;
+    ///   3. the current local date differs from opened.today (backward
+    ///      clock) -> Conflict;
+    ///   4. any day's captured UTC span no longer matches its local day's
+    ///      span (timezone change) -> Conflict;
+    ///   5. otherwise, db_.saveHistoryDays(opened.stored.rows, days).
+    /// Checks 1-4 never call the store. Never touches session_,
+    /// pending_commit_, mode_, the checkpoint anchor or the timer -- the
+    /// snapshot in `opened` is the only input besides `days`.
+    SessionStoreResult saveHistoryEdit(const HistoryEditContext& opened,
+                                       const std::vector<HistoryDayChange>& days);
     /// True once a FatalError result has latched TimeTracker into the
     /// unavailable state (C4/R05-006). Start refuses to run while this is
     /// true; nothing but a fresh TimeTracker instance clears it. Public (C4

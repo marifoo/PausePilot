@@ -217,6 +217,7 @@
     <QtMoc Include="timetracker.h" />
     <ClInclude Include="apppaths.h" />
     <ClInclude Include="dayvalidity.h" />
+    <ClInclude Include="historyeligibility.h" />
     <ClInclude Include="historyeditsession.h" />
     <ClInclude Include="lockdecision.h" />
     <ClInclude Include="unixsignalbridge.h" />

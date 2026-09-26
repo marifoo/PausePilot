@@ -23,8 +23,8 @@ class QPushButton;
  */
 class TimerExclusiveEditGuard {
 public:
-    explicit TimerExclusiveEditGuard(TimeTracker& timer) : timer_(timer) {
-        timer_.beginExclusiveEdit();
+    explicit TimerExclusiveEditGuard(TimeTracker& timer)
+        : timer_(timer), context_(timer_.beginExclusiveEdit()) {
     }
     ~TimerExclusiveEditGuard() {
         timer_.endExclusiveEdit();
@@ -33,8 +33,13 @@ public:
     TimerExclusiveEditGuard(const TimerExclusiveEditGuard&) = delete;
     TimerExclusiveEditGuard& operator=(const TimerExclusiveEditGuard&) = delete;
 
+    /// The open-time HistoryEditContext captured by beginExclusiveEdit()
+    /// (H5/WP3). The dialog does not consume this yet (WP5).
+    const HistoryEditContext& context() const { return context_; }
+
 private:
     TimeTracker& timer_;
+    HistoryEditContext context_;
 };
 
 class HistoryDialog : public QDialog
