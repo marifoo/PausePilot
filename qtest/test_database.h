@@ -254,6 +254,13 @@ private slots:
     // re-applied on every reconnect, not only at construction.
     void test_D8_ensureOpen_reconnect_restores_synchronous_normal();
     void test_D8_createBackup_reopen_restores_synchronous_normal();
+
+    // WP1b (H2): loadHistoryRows acceptance tests -- raw text and parsing
+    void test_H2_loadHistoryRows_unsorted_seeding_returns_sorted_by_start_then_id();
+    void test_H2_loadHistoryRows_finalized_row_raw_isFinalized_is_1();
+    void test_H2_loadHistoryRows_checkpoint_raw_isFinalized_is_0();
+    void test_H2_loadHistoryRows_parsed_has_exact_id_type_and_local_times();
+    void test_H2_loadHistoryRows_saveCheckpoint_commitSession_round_trip();
 };
 
 #endif // TEST_DATABASE_H

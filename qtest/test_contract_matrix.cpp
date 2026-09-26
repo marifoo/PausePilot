@@ -1011,3 +1011,197 @@ void ContractMatrixTest::test_C4_fake_saveCheckpoint_callerBug_finalized_segment
     QCOMPARE(r.category, SessionStoreResult::CallerBug);
     QVERIFY(fakeDb.savedCheckpoints.empty());
 }
+
+// ── WP1b (H2): fake loadHistoryRows acceptance tests ──
+
+// Acceptance: a checkpoint shows up as unfinalized
+void ContractMatrixTest::test_H2_fake_checkpoint_projects_as_unfinalized()
+{
+    FakeSessionStore fakeDb;
+    const QDate today = QDate::currentDate();
+    const SegmentId id = SegmentId::mint();
+    const QDateTime t0(today, QTime(10, 0, 0), Qt::UTC);
+    const QDateTime t1(today, QTime(10, 30, 0), Qt::UTC);
+
+    QVERIFY(fakeDb.saveCheckpoint(DurationType::Activity, t0, t1, id).ok());
+
+    const HistoryRowsResult result = fakeDb.loadHistoryRows();
+    QCOMPARE(result.status, SessionStoreResult::Success);
+    QCOMPARE(result.rows.size(), static_cast<size_t>(1));
+    QCOMPARE(result.rows[0].isFinalized, QString("0"));
+}
+
+// Acceptance: after commit it appears once, finalized
+void ContractMatrixTest::test_H2_fake_checkpoint_promoted_to_finalized_on_commit()
+{
+    FakeSessionStore fakeDb;
+    const QDate today = QDate::currentDate();
+    const SegmentId id = SegmentId::mint();
+    const QDateTime t0(today, QTime(10, 0, 0), Qt::UTC);
+    const QDateTime t1(today, QTime(10, 30, 0), Qt::UTC);
+
+    QVERIFY(fakeDb.saveCheckpoint(DurationType::Activity, t0, t1, id).ok());
+
+    std::deque<TimeDuration> rows;
+    rows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, t0, t1, id));
+    QVERIFY(fakeDb.commitSession(Timeline(rows, std::nullopt)).ok());
+
+    const HistoryRowsResult result = fakeDb.loadHistoryRows();
+    QCOMPARE(result.status, SessionStoreResult::Success);
+    QCOMPARE(result.rows.size(), static_cast<size_t>(1));
+    QCOMPARE(result.rows[0].isFinalized, QString("1"));
+}
+
+// Acceptance: after successful discard it is gone
+void ContractMatrixTest::test_H2_fake_checkpoint_removed_by_successful_discard()
+{
+    FakeSessionStore fakeDb;
+    const QDate today = QDate::currentDate();
+    const SegmentId id = SegmentId::mint();
+    const QDateTime t0(today, QTime(10, 0, 0), Qt::UTC);
+    const QDateTime t1(today, QTime(10, 30, 0), Qt::UTC);
+
+    QVERIFY(fakeDb.saveCheckpoint(DurationType::Activity, t0, t1, id).ok());
+
+    QVERIFY(fakeDb.discardCheckpoint(id).ok());
+
+    const HistoryRowsResult result = fakeDb.loadHistoryRows();
+    QCOMPARE(result.status, SessionStoreResult::Success);
+    QVERIFY(result.rows.empty());
+}
+
+// Acceptance: after failing discard it is still there
+void ContractMatrixTest::test_H2_fake_checkpoint_retained_on_failing_discard()
+{
+    FakeSessionStore fakeDb;
+    const QDate today = QDate::currentDate();
+    const SegmentId id = SegmentId::mint();
+    const QDateTime t0(today, QTime(10, 0, 0), Qt::UTC);
+    const QDateTime t1(today, QTime(10, 30, 0), Qt::UTC);
+
+    QVERIFY(fakeDb.saveCheckpoint(DurationType::Activity, t0, t1, id).ok());
+
+    fakeDb.discardCheckpointResult = SessionStoreResult::disabled();
+    const SessionStoreResult discardResult = fakeDb.discardCheckpoint(id);
+    QCOMPARE(discardResult.category, SessionStoreResult::Disabled);
+
+    // Checkpoint should still be there
+    const HistoryRowsResult result = fakeDb.loadHistoryRows();
+    QCOMPARE(result.status, SessionStoreResult::Success);
+    QCOMPARE(result.rows.size(), static_cast<size_t>(1));
+    QCOMPARE(result.rows[0].isFinalized, QString("0"));
+}
+
+// Acceptance: preset unfinalized row removed by successful discard
+void ContractMatrixTest::test_H2_fake_preset_unfinalized_row_removed_by_discard()
+{
+    FakeSessionStore fakeDb;
+    const QDate today = QDate::currentDate();
+    const SegmentId id = SegmentId::mint();
+
+    // Add a preset unfinalized row
+    fakeDb.historyUnfinalizedRows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(today, QTime(9, 0, 0), Qt::UTC), QDateTime(today, QTime(9, 30, 0), Qt::UTC), id));
+
+    QVERIFY(fakeDb.discardCheckpoint(id).ok());
+
+    const HistoryRowsResult result = fakeDb.loadHistoryRows();
+    QCOMPARE(result.status, SessionStoreResult::Success);
+    QVERIFY(result.rows.empty());
+}
+
+// Acceptance: duplicate unfinalized preset id dropped
+void ContractMatrixTest::test_H2_fake_duplicate_unfinalized_preset_id_dropped()
+{
+    FakeSessionStore fakeDb;
+    const QDate today = QDate::currentDate();
+    const SegmentId id = SegmentId::mint();
+
+    // Add two preset unfinalized rows with the same id
+    fakeDb.historyUnfinalizedRows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(today, QTime(9, 0, 0), Qt::UTC), QDateTime(today, QTime(9, 30, 0), Qt::UTC), id));
+    fakeDb.historyUnfinalizedRows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(today, QTime(9, 0, 0), Qt::UTC), QDateTime(today, QTime(10, 0, 0), Qt::UTC), id));
+
+    const HistoryRowsResult result = fakeDb.loadHistoryRows();
+    QCOMPARE(result.status, SessionStoreResult::Success);
+    // Should only return one row (the first one, due to dedup by id)
+    QCOMPARE(result.rows.size(), static_cast<size_t>(1));
+}
+
+// Acceptance: output is sorted and parsed times are local
+void ContractMatrixTest::test_H2_fake_loadHistoryRows_output_sorted_and_parsed_local()
+{
+    FakeSessionStore fakeDb;
+    const QDate today = QDate::currentDate();
+    const SegmentId id1 = SegmentId::mint();
+    const SegmentId id2 = SegmentId::mint();
+
+    // Add checkpoint rows out of order
+    fakeDb.savedCheckpoints.push_back({DurationType::Activity,
+        QDateTime(today, QTime(14, 0, 0), Qt::UTC),
+        QDateTime(today, QTime(14, 30, 0), Qt::UTC),
+        id1});
+    fakeDb.savedCheckpoints.push_back({DurationType::Pause,
+        QDateTime(today, QTime(10, 0, 0), Qt::UTC),
+        QDateTime(today, QTime(10, 30, 0), Qt::UTC),
+        id2});
+
+    const HistoryRowsResult result = fakeDb.loadHistoryRows();
+    QCOMPARE(result.status, SessionStoreResult::Success);
+    QCOMPARE(result.rows.size(), static_cast<size_t>(2));
+
+    // Verify sorted by startUtc
+    QVERIFY(result.rows[0].startUtc < result.rows[1].startUtc);
+
+    // Verify parsed times are in local time (not UTC)
+    QVERIFY(result.rows[0].parsed.has_value());
+    QVERIFY(result.rows[1].parsed.has_value());
+    QCOMPARE(result.rows[0].parsed->startTime.timeSpec(), Qt::LocalTime);
+    QCOMPARE(result.rows[1].parsed->startTime.timeSpec(), Qt::LocalTime);
+}
+
+// Acceptance: successful replaceAll clears unfinalized rows and reports session rows with "0"
+void ContractMatrixTest::test_H2_fake_replaceAll_reports_session_rows_as_unfinalized()
+{
+    FakeSessionStore fakeDb;
+    const QDate today = QDate::currentDate();
+    const SegmentId historyId = SegmentId::mint();
+    const SegmentId sessionId = SegmentId::mint();
+
+    // Pre-seed some unfinalized rows that should be cleared
+    fakeDb.historyUnfinalizedRows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(today, QTime(7, 0, 0), Qt::UTC), QDateTime(today, QTime(7, 30, 0), Qt::UTC)));
+    fakeDb.savedCheckpoints.push_back({DurationType::Pause,
+        QDateTime(today, QTime(7, 30, 0), Qt::UTC),
+        QDateTime(today, QTime(8, 0, 0), Qt::UTC),
+        SegmentId::mint()});
+
+    // replaceAll with history rows (finalized) and session rows (unfinalized)
+    std::deque<TimeDuration> history;
+    history.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(today, QTime(9, 0, 0), Qt::UTC), QDateTime(today, QTime(9, 30, 0), Qt::UTC), historyId));
+
+    std::deque<TimeDuration> session;
+    session.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(today, QTime(10, 0, 0), Qt::UTC), QDateTime(today, QTime(10, 30, 0), Qt::UTC), sessionId));
+
+    QVERIFY(fakeDb.replaceAll(Timeline(history, std::nullopt), Timeline(session, std::nullopt)).ok());
+
+    const HistoryRowsResult result = fakeDb.loadHistoryRows();
+    QCOMPARE(result.status, SessionStoreResult::Success);
+    QCOMPARE(result.rows.size(), static_cast<size_t>(2));
+
+    // Find history and session rows
+    StoredHistoryRow historyRow = result.rows[0];  // Earlier time
+    StoredHistoryRow sessionRow = result.rows[1];  // Later time
+
+    // History row should be finalized
+    QCOMPARE(historyRow.isFinalized, QString("1"));
+    // Session row should be unfinalized
+    QCOMPARE(sessionRow.isFinalized, QString("0"));
+
+    // Verify unfinalized rows were cleared
+    QVERIFY(fakeDb.historyUnfinalizedRows.empty());
+    QVERIFY(fakeDb.savedCheckpoints.empty());
+}

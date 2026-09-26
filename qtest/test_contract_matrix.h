@@ -189,6 +189,16 @@ private slots:
     // (test_saveCheckpoint_callerBug_finalized_segmentId above), instead of
     // aborting the process via Q_ASSERT_X.
     void test_C4_fake_saveCheckpoint_callerBug_finalized_segmentId();
+
+    // WP1b (H2): fake loadHistoryRows acceptance tests
+    void test_H2_fake_checkpoint_projects_as_unfinalized();
+    void test_H2_fake_checkpoint_promoted_to_finalized_on_commit();
+    void test_H2_fake_checkpoint_removed_by_successful_discard();
+    void test_H2_fake_checkpoint_retained_on_failing_discard();
+    void test_H2_fake_preset_unfinalized_row_removed_by_discard();
+    void test_H2_fake_duplicate_unfinalized_preset_id_dropped();
+    void test_H2_fake_loadHistoryRows_output_sorted_and_parsed_local();
+    void test_H2_fake_replaceAll_reports_session_rows_as_unfinalized();
 };
 
 #endif // TEST_CONTRACT_MATRIX_H

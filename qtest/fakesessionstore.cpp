@@ -94,23 +94,21 @@ SessionStoreResult FakeSessionStore::replaceAll(const Timeline& history, const T
     if (replaceDurationsResult.ok()) {
         storedDurations.clear();
         committedSegmentIds.clear();
-        // D13e (M1, review): the real store writes history rows with
-        // is_finalized = 1 and session rows with is_finalized = 0
-        // (sqlitesessionstore.cpp), and loadDurations() there only selects
-        // is_finalized = 1 rows -- so a real replaceAll() with a non-empty
-        // session Timeline is NOT fully visible to a later loadDurations().
-        // This fake has no is_finalized notion and stores/projects both
-        // buckets alike. Currently safe: no fake replaceAll() call site
-        // reaches this mutation block with a non-empty session Timeline
-        // (the one that passes a non-empty session, test_contract_matrix.cpp:757,
-        // returns CallerBug above first), so the two buckets never actually
-        // diverge in practice.
+        // WP1b: also clear the unfinalized rows and checkpoint projection (loadHistoryRows fidelity)
+        historyUnfinalizedRows.clear();
+        savedCheckpoints.clear();
+        sessionUnfinalizedRows.clear();
+        // WP1b: the real store writes history rows with is_finalized = 1 and
+        // session rows with is_finalized = 0 (sqlitesessionstore.cpp), and
+        // loadDurations() there only selects is_finalized = 1 rows. Mirror
+        // this: store history rows as finalized and session rows separately
+        // so loadHistoryRows() can project them as unfinalized.
         for (const auto& d : history.completed()) {
             storedDurations.push_back(d);
             committedSegmentIds.insert(d.segment_id.toString());
         }
         for (const auto& d : session.completed()) {
-            storedDurations.push_back(d);
+            sessionUnfinalizedRows.push_back(d);
             committedSegmentIds.insert(d.segment_id.toString());
         }
     }
@@ -173,7 +171,20 @@ StoredHistoryRow toStoredHistoryRow(const TimeDuration& d, bool finalized)
     row.startUtc = d.startTime.toUTC().toString(Qt::ISODateWithMs);
     row.endUtc = d.endTime.toUTC().toString(Qt::ISODateWithMs);
     row.isFinalized = finalized ? "1" : "0";
-    row.parsed = d;
+    // Parse the raw times to local time (like parseHistoryRow in the real store)
+    if (!row.segmentId.isEmpty()) {
+        const int typeInt = row.type.toInt();
+        if (typeInt == static_cast<int>(DurationType::Activity) ||
+            typeInt == static_cast<int>(DurationType::Pause)) {
+            const QDateTime startLocal = QDateTime::fromString(row.startUtc, Qt::ISODateWithMs).toLocalTime();
+            const QDateTime endLocal = QDateTime::fromString(row.endUtc, Qt::ISODateWithMs).toLocalTime();
+            if (startLocal.isValid() && endLocal.isValid() && startLocal <= endLocal && startLocal.msecsTo(endLocal) > 0) {
+                const SegmentId segmentId = SegmentId::fromString(row.segmentId);
+                const DurationType type = static_cast<DurationType>(typeInt);
+                row.parsed = TimeDuration::fromPersistedRow(type, startLocal, endLocal, segmentId);
+            }
+        }
+    }
     return row;
 }
 }
@@ -186,25 +197,73 @@ HistoryRowsResult FakeSessionStore::loadHistoryRows()
     if (result.status != SessionStoreResult::Success) {
         return result;
     }
-    // Same finalized projection as loadDurations() (preset rows deduped
-    // against storedDurations, storedDurations winning), all marked
-    // finalized, plus historyUnfinalizedRows appended as unfinalized.
+
+    // Collect all rows that will go into the result, with proper sorting and merging.
+    // WP1b: Fake fidelity for loadHistoryRows() must:
+    // 1. Sort rows by startUtc text; ties keep insertion order as a stand-in for id
+    // 2. Convert parsed times with toLocalTime()
+    // 3. Add unfinalized rows:
+    //    - historyUnfinalizedRows, plus
+    //    - savedCheckpoints projected as the latest record per segmentId with raw isFinalized "0"
+    //    - Exclude any id that already exists as a finalized row
+    //    - Drop an unfinalized preset whose id matches a finalized row's id
+
+    std::vector<StoredHistoryRow> allRows;
+
+    // Collect finalized rows: preset rows (deduped against storedDurations, storedDurations winning)
+    QSet<QString> usedIds;
+    for (const auto& d : storedDurations) {
+        usedIds.insert(d.segment_id.toString());
+        allRows.push_back(toStoredHistoryRow(d, true));
+    }
     for (const auto& d : loadDurationsResult.durations) {
-        const bool supersededByStored =
-            std::any_of(storedDurations.begin(), storedDurations.end(),
-                        [&](const TimeDuration& row) {
-                            return row.segment_id.toString() == d.segment_id.toString();
-                        });
-        if (!supersededByStored) {
-            result.rows.push_back(toStoredHistoryRow(d, true));
+        const QString id = d.segment_id.toString();
+        if (!usedIds.contains(id)) {
+            allRows.push_back(toStoredHistoryRow(d, true));
+            usedIds.insert(id);
         }
     }
-    for (const auto& d : storedDurations) {
-        result.rows.push_back(toStoredHistoryRow(d, true));
+
+    // Collect checkpoint rows: latest record per segmentId from savedCheckpoints
+    // Project as unfinalized, but only if the id is not already finalized
+    QMap<QString, const CheckpointRecord*> latestCheckpoint;
+    for (const auto& cp : savedCheckpoints) {
+        latestCheckpoint[cp.segmentId.toString()] = &cp;
     }
+    for (const auto& cp : latestCheckpoint) {
+        const QString id = cp->segmentId.toString();
+        if (!usedIds.contains(id)) {
+            TimeDuration d = TimeDuration::fromPersistedRow(cp->type, cp->startTime, cp->endTime, cp->segmentId);
+            allRows.push_back(toStoredHistoryRow(d, false));
+            usedIds.insert(id);
+        }
+    }
+
+    // Collect unfinalized rows from historyUnfinalizedRows
     for (const auto& d : historyUnfinalizedRows) {
-        result.rows.push_back(toStoredHistoryRow(d, false));
+        const QString id = d.segment_id.toString();
+        if (!usedIds.contains(id)) {
+            allRows.push_back(toStoredHistoryRow(d, false));
+            usedIds.insert(id);
+        }
     }
+
+    // WP1b: Collect unfinalized session rows from replaceAll()
+    for (const auto& d : sessionUnfinalizedRows) {
+        const QString id = d.segment_id.toString();
+        if (!usedIds.contains(id)) {
+            allRows.push_back(toStoredHistoryRow(d, false));
+            usedIds.insert(id);
+        }
+    }
+
+    // Sort by startUtc text; ties keep insertion order (stable sort)
+    std::stable_sort(allRows.begin(), allRows.end(),
+                     [](const StoredHistoryRow& a, const StoredHistoryRow& b) {
+                         return a.startUtc < b.startUtc;
+                     });
+
+    result.rows = allRows;
     return result;
 }
 
@@ -259,11 +318,16 @@ SessionStoreResult FakeSessionStore::discardCheckpoint(const SegmentId& segmentI
         // Disabled or a failure category: a deliberate no-op, not a mutation.
         return discardCheckpointResult;
     }
-    // Mirror deleting the unfinalized rows: drop any recorded checkpoints for this id.
+    // WP1b: Mirror deleting the unfinalized rows: drop any recorded checkpoints
+    // for this id, plus remove matching historyUnfinalizedRows entries.
     savedCheckpoints.erase(
         std::remove_if(savedCheckpoints.begin(), savedCheckpoints.end(),
                        [&](const CheckpointRecord& cp) { return cp.segmentId == segmentId; }),
         savedCheckpoints.end());
+    historyUnfinalizedRows.erase(
+        std::remove_if(historyUnfinalizedRows.begin(), historyUnfinalizedRows.end(),
+                       [&](const TimeDuration& row) { return row.segment_id == segmentId; }),
+        historyUnfinalizedRows.end());
     return discardCheckpointResult;
 }
 

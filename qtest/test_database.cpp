@@ -5082,3 +5082,163 @@ void DatabaseTest::test_D8_createBackup_reopen_restores_synchronous_normal()
     QVERIFY(q.next());
     QCOMPARE(q.value(0).toInt(), 1);
 }
+
+// ── WP1b (H2): loadHistoryRows acceptance tests ──
+
+// Acceptance: rows seeded out of order come back sorted by start_utc, then id.
+void DatabaseTest::test_H2_loadHistoryRows_unsorted_seeding_returns_sorted_by_start_then_id()
+{
+    resetDatabaseFile();
+    QTemporaryDir dir; QVERIFY(dir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(dir.path(), 30)));
+    db.checkSchemaOnStartup();
+
+    const QDate today = QDate::currentDate();
+    const SegmentId id1 = SegmentId::mint();
+    const SegmentId id2 = SegmentId::mint();
+    const SegmentId id3 = SegmentId::mint();
+
+    // Seed three rows out of order (by start time) via raw SQL to avoid timing issues
+    QSqlQuery q(db.rawDb_dbg());
+    const QString id1Str = id1.toString();
+    const QString id2Str = id2.toString();
+    const QString id3Str = id3.toString();
+    const QString t0 = QDateTime(today, QTime(8, 0, 0), Qt::UTC).toString(Qt::ISODateWithMs);
+    const QString t1 = QDateTime(today, QTime(8, 30, 0), Qt::UTC).toString(Qt::ISODateWithMs);
+    const QString t2 = QDateTime(today, QTime(8, 15, 0), Qt::UTC).toString(Qt::ISODateWithMs);
+    const QString t3 = QDateTime(today, QTime(14, 0, 0), Qt::UTC).toString(Qt::ISODateWithMs);
+    const QString t4 = QDateTime(today, QTime(14, 30, 0), Qt::UTC).toString(Qt::ISODateWithMs);
+
+    // Insert via raw SQL to avoid session normalization
+    QVERIFY(q.exec(QString(
+        "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+        "VALUES ('%1', %2, '%3', '%4', 1)")
+        .arg(id3Str).arg(static_cast<int>(DurationType::Activity)).arg(t3).arg(t4)));
+    QVERIFY(q.exec(QString(
+        "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+        "VALUES ('%1', %2, '%3', '%4', 1)")
+        .arg(id1Str).arg(static_cast<int>(DurationType::Activity)).arg(t0).arg(t1)));
+    QVERIFY(q.exec(QString(
+        "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+        "VALUES ('%1', %2, '%3', '%4', 1)")
+        .arg(id2Str).arg(static_cast<int>(DurationType::Pause)).arg(t0).arg(t2)));
+
+    const HistoryRowsResult result = db.loadHistoryRows();
+    QCOMPARE(result.status, SessionStoreResult::Success);
+    QCOMPARE(result.rows.size(), static_cast<size_t>(3));
+
+    // Verify sorted by start_utc, then id
+    QCOMPARE(result.rows[0].startUtc, t0);
+    QCOMPARE(result.rows[0].segmentId, id1Str);
+    QCOMPARE(result.rows[1].startUtc, t0);
+    QCOMPARE(result.rows[1].segmentId, id2Str);
+    QCOMPARE(result.rows[2].startUtc, t3);
+    QCOMPARE(result.rows[2].segmentId, id3Str);
+}
+
+// Acceptance: raw isFinalized is exactly "1" for finalized rows.
+void DatabaseTest::test_H2_loadHistoryRows_finalized_row_raw_isFinalized_is_1()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    QVERIFY(db.ensureOpen_dbg());
+
+    const QDate today = QDate::currentDate();
+    const SegmentId id = SegmentId::mint();
+    std::deque<TimeDuration> rows;
+    rows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(today, QTime(10, 0, 0), Qt::UTC),
+        QDateTime(today, QTime(10, 30, 0), Qt::UTC), id));
+
+    QVERIFY(db.commitSession(Timeline(rows, std::nullopt)).ok());
+
+    const HistoryRowsResult result = db.loadHistoryRows();
+    QCOMPARE(result.status, SessionStoreResult::Success);
+    QCOMPARE(result.rows.size(), static_cast<size_t>(1));
+    QCOMPARE(result.rows[0].isFinalized, QString("1"));
+}
+
+// Acceptance: raw isFinalized is "0" for checkpoint rows.
+void DatabaseTest::test_H2_loadHistoryRows_checkpoint_raw_isFinalized_is_0()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    QVERIFY(db.ensureOpen_dbg());
+
+    const QDate today = QDate::currentDate();
+    const SegmentId id = SegmentId::mint();
+    const QDateTime t0(today, QTime(10, 0, 0), Qt::UTC);
+    const QDateTime t1(today, QTime(10, 30, 0), Qt::UTC);
+
+    QVERIFY(db.saveCheckpoint(DurationType::Activity, t0, t1, id).ok());
+
+    const HistoryRowsResult result = db.loadHistoryRows();
+    QCOMPARE(result.status, SessionStoreResult::Success);
+    QCOMPARE(result.rows.size(), static_cast<size_t>(1));
+    QCOMPARE(result.rows[0].isFinalized, QString("0"));
+}
+
+// Acceptance: parsed has exact id, type, with local-time QDateTimes.
+void DatabaseTest::test_H2_loadHistoryRows_parsed_has_exact_id_type_and_local_times()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    QVERIFY(db.ensureOpen_dbg());
+
+    const QDate today = QDate::currentDate();
+    const SegmentId id = SegmentId::mint();
+    const QDateTime localStart(today, QTime(10, 0, 0), Qt::LocalTime);
+    const QDateTime localEnd(today, QTime(10, 30, 0), Qt::LocalTime);
+
+    std::deque<TimeDuration> rows;
+    rows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, localStart, localEnd, id));
+
+    QVERIFY(db.commitSession(Timeline(rows, std::nullopt)).ok());
+
+    const HistoryRowsResult result = db.loadHistoryRows();
+    QCOMPARE(result.status, SessionStoreResult::Success);
+    QCOMPARE(result.rows.size(), static_cast<size_t>(1));
+
+    QVERIFY(result.rows[0].parsed.has_value());
+    const TimeDuration& parsed = result.rows[0].parsed.value();
+    QCOMPARE(parsed.segment_id, id);
+    QCOMPARE(parsed.type, DurationType::Activity);
+    // Local time should match
+    QCOMPARE(parsed.startTime.toLocalTime(), localStart);
+    QCOMPARE(parsed.endTime.toLocalTime(), localEnd);
+}
+
+// Acceptance: a row written by saveCheckpoint appears with "0", after commitSession it appears with "1".
+void DatabaseTest::test_H2_loadHistoryRows_saveCheckpoint_commitSession_round_trip()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir; QVERIFY(tempDir.isValid());
+    SqliteSessionStore db(Settings(createSettingsFile(tempDir.path(), 30)));
+    QVERIFY(db.ensureOpen_dbg());
+
+    const QDate today = QDate::currentDate();
+    const SegmentId id = SegmentId::mint();
+    const QDateTime t0(today, QTime(10, 0, 0), Qt::UTC);
+    const QDateTime t1(today, QTime(10, 30, 0), Qt::UTC);
+
+    // First: save a checkpoint
+    QVERIFY(db.saveCheckpoint(DurationType::Activity, t0, t1, id).ok());
+
+    HistoryRowsResult result = db.loadHistoryRows();
+    QCOMPARE(result.status, SessionStoreResult::Success);
+    QCOMPARE(result.rows.size(), static_cast<size_t>(1));
+    QCOMPARE(result.rows[0].isFinalized, QString("0"));
+
+    // Second: commit that same id
+    std::deque<TimeDuration> rows;
+    rows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, t0, t1, id));
+    QVERIFY(db.commitSession(Timeline(rows, std::nullopt)).ok());
+
+    result = db.loadHistoryRows();
+    QCOMPARE(result.status, SessionStoreResult::Success);
+    QCOMPARE(result.rows.size(), static_cast<size_t>(1));
+    QCOMPARE(result.rows[0].isFinalized, QString("1"));
+}

@@ -102,6 +102,13 @@ public:
     /// or merged into storedDurations.
     std::deque<TimeDuration> historyUnfinalizedRows;
 
+    /// WP1b: session rows from replaceAll(), stored unfinalized (is_finalized=0).
+    /// The real store writes history rows with is_finalized=1 and session rows
+    /// with is_finalized=0. loadDurations() only returns is_finalized=1 rows,
+    /// but loadHistoryRows() returns both. These are distinguished here so
+    /// loadHistoryRows() can project them correctly as raw "0".
+    std::deque<TimeDuration> sessionUnfinalizedRows;
+
     /// Result returned by hasEntriesForDate(). Default: No entries.
     EntriesForDateResult entriesForDateResult = EntriesForDateResult::No;
 
