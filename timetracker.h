@@ -49,6 +49,11 @@ struct SessionState {
     /// segment's duration.
     QDateTime segment_start_time;
 
+    /// End of the last checkpoint of the current segment that the store
+    /// confirmed with Success; invalid if none. Reset by beginNewSegment()
+    /// and clearSegment().
+    QDateTime confirmed_checkpoint_end;
+
     // ---- Explicit transition methods ----
     // Each method logs the old→new state at debug level so that state
     // mutations are always traceable in the log output.
@@ -177,9 +182,9 @@ private:
     /**
      * PendingDiscards — durable-discard-intent tracking (A4/R05-001).
      *
-     * TimeTracker deliberately rejects a live segment (currently: the
-     * cross-midnight watchdog/scheduled-stop path) by asking the store to
-     * discard its unfinalized checkpoint row. begin() records the segment's
+     * TimeTracker deliberately rejects a live segment (a cross-midnight
+     * close with no confirmed checkpoint prefix; see C3) by asking the store
+     * to discard its unfinalized checkpoint row. begin() records the segment's
      * stable identity BEFORE the store call is made, so the identity is
      * never lost even if the store call itself fails -- the identity is all
      * TimeTracker needs to keep retrying; the store owns making the discard
@@ -274,10 +279,10 @@ private:
                      SegmentId segmentId = SegmentId{});
 
     // If the ongoing segment is cross-midnight, forces the engine into None,
-    // discarding the in-flight segment. If a History edit is open, first
-    // revokes it, then falls through to the discard exactly as with no dialog.
-    // Returns true when it fired. Safe to call multiple times; only the first
-    // call does real work.
+    // keeping the confirmed checkpoint prefix if any, else discarding the
+    // in-flight segment (C3). If a History edit is open, first revokes it,
+    // then falls through exactly as with no dialog. Returns true when it
+    // fired. Safe to call multiple times; only the first call does real work.
     bool discardCrossMidnightOngoingAndStop(const QDateTime& now);
     // WP2: force-closes an open History edit (see the definition for the
     // full contract) and runs the caller's own no-dialog code next.

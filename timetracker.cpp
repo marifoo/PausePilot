@@ -160,6 +160,7 @@ void SessionState::beginNewSegment(const QDateTime& startTime)
     QDateTime oldStart = segment_start_time;
     segment_id = SegmentId::mint();
     segment_start_time = startTime;
+    confirmed_checkpoint_end = QDateTime();
     Logger::Log(QString("[STATE] beginNewSegment: segId '%1' -> '%2', start %3 -> %4")
         .arg(oldId.toString(), segment_id.toString(),
              oldStart.toString(Qt::ISODate), startTime.toString(Qt::ISODate)));
@@ -171,6 +172,7 @@ void SessionState::clearSegment()
     QDateTime oldStart = segment_start_time;
     segment_id = SegmentId{};
     segment_start_time = QDateTime();
+    confirmed_checkpoint_end = QDateTime();
     Logger::Log(QString("[STATE] clearSegment: segId '%1' -> (empty), start %2 -> (invalid)")
         .arg(oldId.toString(), oldStart.toString(Qt::ISODate)));
 }
@@ -415,7 +417,7 @@ TimeTracker::~TimeTracker()
  * - No pending payload: no-op, returns true (startTimer continues).
  * - Success/Disabled: payload cleared, returns true (startTimer continues).
  * - Any other failure: payload retained unchanged, one concise error is
- *   emitted (Fatal already emitted its own message via logDbResultOrWarn),
+ *   emitted (logDbResultOrWarn already logged the store failure),
  *   returns false (startTimer aborts; tracker remains stopped).
  */
 bool TimeTracker::retryUnsavedDurations()
@@ -663,12 +665,18 @@ void TimeTracker::stopTimer(const QDateTime& now, StopReason reason)
     }
     const Mode fromMode = mode_;
 
-    // A cross-midnight ongoing segment cannot be safely closed -- its
-    // closing interval is discarded by addDuration() below (TimeDuration::
-    // create's CrossMidnight rejection). Capture its id BEFORE any store
-    // call so its unfinalized checkpoint row is durably discarded too
-    // (A4/R05-001): otherwise startup recovery could resurrect
-    // deliberately-discarded time.
+    // A cross-midnight ongoing segment cannot be safely closed at `now` --
+    // C3: if the current segment has a store-confirmed same-day checkpoint
+    // prefix (session_.confirmed_checkpoint_end, set only after an actual
+    // saveCheckpoint Success), that proven prefix is finalized through the
+    // normal same-ID close path below, at its checkpointed end -- never at
+    // resume-time `now`, and never as a cross-day row. The unverified tail
+    // between the prefix end and `now` is simply not recorded (closeAt is
+    // not `now`, so addDuration()'s CrossMidnight/NonPositive checks never
+    // see it). With no usable prefix, the whole segment is discarded as
+    // before: its id is captured BEFORE any store call so its unfinalized
+    // checkpoint row is durably discarded too (A4/R05-001) -- otherwise
+    // startup recovery could resurrect deliberately-discarded time.
     //
     // A backward wall-clock step (R11-003/HIGH-A) is different: only the
     // CLOSING delta [segment_start, now) is invalid (NonPositive, dropped by
@@ -682,10 +690,21 @@ void TimeTracker::stopTimer(const QDateTime& now, StopReason reason)
     // no clean-marker gate is needed either: the marker only feeds
     // notify_user, never orphan finalization eligibility.
     const bool clockReversed = isClockReversed(now, session_.segment_start_time);
+    QDateTime closeAt = now;
     SegmentId discardedSegmentId;
     if (session_.segment_start_time.isValid()
         && isCrossMidnight(session_.segment_start_time, now)) {
-        discardedSegmentId = session_.segment_id;
+        if (session_.confirmed_checkpoint_end.isValid()) {
+            closeAt = session_.confirmed_checkpoint_end;
+            Logger::Log(QString("[MIDNIGHT] Stop: cross-midnight close keeps the confirmed checkpoint "
+                                 "prefix ending %1; the unverified tail up to %2 is not recorded")
+                .arg(closeAt.toString(Qt::ISODateWithMs), now.toString(Qt::ISODateWithMs)));
+        } else {
+            discardedSegmentId = session_.segment_id;
+            Logger::Log(QString("[MIDNIGHT] Stop: cross-midnight close has no confirmed checkpoint "
+                                 "prefix; discarding the whole segment (now=%1)")
+                .arg(now.toString(Qt::ISODateWithMs)));
+        }
     }
     if (clockReversed) {
         Logger::Log(QString("[CLOCK] Stop: backward wall-clock step detected (now=%1 < segment_start=%2) — "
@@ -696,10 +715,10 @@ void TimeTracker::stopTimer(const QDateTime& now, StopReason reason)
 
     if (mode_ == Mode::Pause) {
         Logger::Log("[DEBUG] Stopping from Pause - D=" + QString::number(session_.durations.size()));
-        addDuration(DurationType::Pause, session_.segment_start_time, now, session_.segment_id);
+        addDuration(DurationType::Pause, session_.segment_start_time, closeAt, session_.segment_id);
     } else if (mode_ == Mode::Activity) {
         Logger::Log("[DEBUG] Stopping from Activity - D=" + QString::number(session_.durations.size()));
-        addDuration(DurationType::Activity, session_.segment_start_time, now, session_.segment_id);
+        addDuration(DurationType::Activity, session_.segment_start_time, closeAt, session_.segment_id);
     }
     mode_ = Mode::None;
     session_.clearSegment();
@@ -1189,11 +1208,12 @@ void TimeTracker::addDuration(DurationType type,
 
 /**
  * Forces the engine into the stopped state when the ongoing segment has
- * crossed midnight, discarding the in-flight segment.
+ * crossed midnight, keeping the confirmed checkpoint prefix if any, else
+ * discarding the in-flight segment (C3).
  *
  * If a History edit is open, first revokes it (revokeExclusiveEdit()),
- * then falls through: the discard below runs exactly as it would with no
- * dialog having intervened.
+ * then falls through: stopTimer() runs exactly as it would with no dialog
+ * having intervened.
  *
  * Returns true when it fired (telling the caller to abandon any pending
  * transition). Safe to call multiple times; only the first call does real work.
@@ -1210,25 +1230,25 @@ bool TimeTracker::discardCrossMidnightOngoingAndStop(const QDateTime& now)
     if (dialog_open_) revokeExclusiveEdit();
 
     Logger::Log(QString("[MIDNIGHT] Cross-midnight ongoing detected "
-                        "(segment_start=%1, now=%2) — discarding segment, forcing stop")
+                        "(segment_start=%1, now=%2) — closing at the confirmed checkpoint "
+                        "prefix if any, else discarding, forcing stop")
         .arg(session_.segment_start_time.toString(Qt::ISODateWithMs))
         .arg(now.toString(Qt::ISODateWithMs)));
 
     // Best-effort: persist any already-completed (same-day) segments that
-    // accumulated before midnight. Only the ONGOING segment is discarded.
+    // accumulated before midnight. Only the ONGOING segment is affected by
+    // the cross-midnight close below.
     if (!session_.durations.empty()) {
         if (persistDurationsOrRetainForRetry()) {
             session_.resetForNewSession();
         }
     }
 
-    // Reuse stopTimer for teardown. The cross-midnight ongoing segment is
-    // discarded by addDuration (TimeDuration::create returns CrossMidnight).
-    // durations is already empty (success path) or retained in unsaved buffer
-    // (flush-failure path), so the updateDurationsInDB call inside stopTimer is a
-    // no-op on success and a harmless retry on flush failure. stopTimer() also
-    // owns deleting the discarded segment's checkpoint row (it detects the
-    // same cross-midnight condition itself) — one owner, not two.
+    // Reuse stopTimer for teardown: it owns the choice between finalizing the
+    // confirmed same-day prefix and discarding the whole segment (C3), and it
+    // owns deleting the discarded segment's checkpoint row in the no-prefix
+    // case (it detects the same cross-midnight condition itself) — one
+    // owner, not two.
     stopTimer(now, StopReason::MidnightWatchdog);
     return true;
 }
@@ -1275,6 +1295,11 @@ void TimeTracker::saveCheckpoint_locked(const QDateTime& now)
     const SessionStoreResult result = db_.saveCheckpoint(type, session_.segment_start_time, now, session_.segment_id);
 
     if (result.ok()) {
+        // C3: this checkpoint is now a store-confirmed same-day prefix of
+        // the current segment. A later failed/Disabled checkpoint attempt
+        // must not erase it -- only this branch, rotation (beginNewSegment)
+        // or Stop (clearSegment) may change it.
+        session_.confirmed_checkpoint_end = now;
         Logger::Log(QString("[CHECKPOINT] Saved checkpoint - Type: %1, Duration: %2ms, SegmentId: %3")
             .arg(type == DurationType::Activity ? "Activity" : "Pause")
             .arg(wallClockMs)

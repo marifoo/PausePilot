@@ -166,7 +166,23 @@ private slots:
 
     // A3: the cross-midnight watchdog discard deletes the in-flight segment's
     // unfinalized checkpoint row so it cannot be resurrected or dropped as stale.
-    void test_A3_watchdog_discard_deletes_checkpoint_row();
+    void test_A3_watchdog_keeps_confirmed_checkpoint_finalizes_row();
+    void test_A3_watchdog_discard_deletes_unconfirmed_checkpoint_row();
+
+    // C3 (step7_plan.md WP-B): a store-confirmed same-day checkpoint prefix
+    // is kept at a cross-midnight close; with no usable prefix the whole
+    // segment is discarded, as before.
+    void test_C3_lock_checkpoint_success_overnight_sleep_keeps_prefix();
+    void test_C3_lock_checkpoint_failure_with_no_earlier_success_discards_whole();
+    void test_C3_later_failed_checkpoint_does_not_erase_earlier_prefix();
+    void test_C3_disabled_checkpoint_result_gives_no_prefix_discard_resolves();
+    void test_C3_segment_rotation_discards_unconfirmed_new_segment();
+    void test_C3_stop_then_start_clears_confirmed_prefix();
+    void test_C3_prefix_ending_exactly_at_local_midnight_is_finalized();
+    void test_C3_failed_final_commit_retains_prefix_for_retry();
+    void test_C3_past_day_history_edit_preserves_confirmed_prefix();
+    void test_C3_button_stop_after_missed_midnight_keeps_prefix();
+    void test_C3_shutdown_after_missed_midnight_keeps_prefix();
 
     // C9b: shutdown is terminal until cancelShutdown() -- Start is refused
     // (button and lock-resume) while shutdown_called_ is set.
@@ -174,9 +190,11 @@ private slots:
     void test_C9b_start_refused_does_not_retry_pending_commit();
     void test_C9b_lock_resume_refused_after_shutdown();
 
-    // F2: a late (post-resume) stop that crosses midnight must discard the
-    // in-flight segment's checkpoint row itself, not rely on the watchdog path.
-    void test_F2_shutdown_after_midnight_discards_checkpoint();
+    // F2/C3: a late (post-resume) stop that crosses midnight finalizes the
+    // confirmed checkpoint prefix if any, else discards the in-flight
+    // segment itself, not relying on the watchdog path.
+    void test_F2_shutdown_after_midnight_keeps_confirmed_prefix();
+    void test_F2_shutdown_after_midnight_discards_checkpoint_with_no_prefix();
     void test_F2_ontime_stop_does_not_discard_checkpoint();
 
     // F3: pause/backpause persistence failures must feed the same
@@ -191,11 +209,11 @@ private slots:
     // ========================================================================
     void test_N1_scheduled_stop_revokes_edit_and_credits_activity_through_cutoff();
     void test_N2_scheduled_stop_revokes_edit_and_credits_pause_through_cutoff();
-    void test_N3_watchdog_tick_revokes_edit_and_discards_segment();
+    void test_N3_watchdog_tick_revokes_edit_and_keeps_confirmed_prefix();
     void test_N4_lock_event_revokes_edit_and_stops();
     void test_N5_scheduled_stop_after_autopause_revokes_and_credits_all_segments();
     void test_N5b_scheduled_stop_while_still_locked_revokes_and_stops_paused();
-    void test_N6_watchdog_tick_before_unlock_revokes_and_discards_whole_segment();
+    void test_N6_watchdog_tick_before_unlock_discards_unconfirmed_pause_segment();
     void test_N7_shutdown_after_revoked_scheduled_stop_leaves_segment_unchanged();
     void test_N8_before_cutoff_tick_does_not_revoke_or_stop();
     void test_N9_repeated_endExclusiveEdit_after_revoke_changes_nothing();

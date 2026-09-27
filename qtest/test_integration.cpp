@@ -1389,12 +1389,17 @@ void IntegrationTest::test_A4_watchdog_discard_failure_survives_reopen_never_cre
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
 
     {
-        // Session 1: Start Activity before midnight and durably checkpoint
-        // it, then the machine "sleeps" past midnight. Shutdown finds the
-        // live segment crossed midnight and deliberately rejects it, but the
-        // store's row-delete step fails -- simulating a transient failure
-        // right at the discard call. Exit Anyway: one drain attempt, no
-        // further retry, process terminates.
+        // Session 1: Start Activity before midnight, then the machine
+        // "sleeps" past midnight. C3: the checkpoint row is seeded directly
+        // via raw SQL (not through the engine's own saveCheckpoint call), so
+        // the engine has no confirmed prefix and the cross-midnight close
+        // still takes the whole-segment discard path -- this models a
+        // "possibly persisted" write (e.g. an earlier ambiguous I/O) rather
+        // than an engine-confirmed one. Shutdown finds the live segment
+        // crossed midnight and deliberately rejects it, but the store's
+        // row-delete step fails -- simulating a transient failure right at
+        // the discard call. Exit Anyway: one drain attempt, no further
+        // retry, process terminates.
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
         const QDateTime preMidnight(QDate::currentDate(), QTime(23, 50, 0), Qt::LocalTime);
@@ -1405,12 +1410,22 @@ void IntegrationTest::test_A4_watchdog_discard_failure_survives_reopen_never_cre
 
         tracker.useTimerViaButton(Button::Start);
         clock.advance(60000);
-        tracker.saveCheckpoint_locked_dbg(clock.now());
         QVERIFY(tracker.getOngoingDuration().has_value());
+        const SegmentId checkpointSegmentId = tracker.getOngoingDuration()->segment_id;
+        QVERIFY(db.ensureOpen_dbg());
+        {
+            QSqlQuery q(db.rawDb_dbg());
+            q.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                      "VALUES (:seg, 0, :s, :e, 0)");
+            q.bindValue(":seg", checkpointSegmentId.toString());
+            q.bindValue(":s", preMidnight.toUTC().toString(Qt::ISODateWithMs));
+            q.bindValue(":e", clock.now().toUTC().toString(Qt::ISODateWithMs));
+            QVERIFY(q.exec());
+        }
         {
             auto orphans = db.loadUnfinalizedCheckpoints_dbg();
             QCOMPARE(orphans.size(), static_cast<size_t>(1));
-            QCOMPARE(orphans[0].segment_id, tracker.getOngoingDuration()->segment_id);
+            QCOMPARE(orphans[0].segment_id, checkpointSegmentId);
         }
 
         clock.setNow(QDateTime(preMidnight.date().addDays(1), QTime(0, 5, 0), Qt::LocalTime));

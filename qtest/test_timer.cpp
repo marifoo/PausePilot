@@ -2076,8 +2076,12 @@ static int countUnfinalizedRows(SqliteSessionStore& db)
     return q.value(0).toInt();
 }
 
-void TimerTest::test_A3_watchdog_discard_deletes_checkpoint_row()
+// A3(a)/C3: a confirmed checkpoint (the engine's own successful save) is
+// finalized through the normal same-ID close path at the watchdog, not
+// discarded.
+void TimerTest::test_A3_watchdog_keeps_confirmed_checkpoint_finalizes_row()
 {
+    resetDatabaseFile();
     // Arrange: real store so we can inspect checkpoint rows, plus a fake clock.
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -2096,7 +2100,59 @@ void TimerTest::test_A3_watchdog_discard_deletes_checkpoint_row()
     tracker.saveCheckpoint_locked_dbg(clock.now());
     QCOMPARE(countUnfinalizedRows(db), 1);
 
-    // Act: cross midnight — the watchdog discards the in-flight segment.
+    // Act: cross midnight — the watchdog finalizes the confirmed prefix.
+    const QDateTime postMidnight(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime);
+    clock.setNow(postMidnight);
+    QVERIFY(tracker.discardCrossMidnightOngoingAndStop_dbg(postMidnight));
+    QVERIFY(tracker.isStopped());
+
+    // Assert: no unfinalized row remains (it was finalized, not deleted) --
+    // and exactly one finalized row exists with the checkpointed end.
+    QCOMPARE(countUnfinalizedRows(db), 0);
+    QSqlQuery q(db.rawDb_dbg());
+    QVERIFY(q.exec("SELECT COUNT(*) FROM durations WHERE is_finalized = 1"));
+    q.next();
+    QCOMPARE(q.value(0).toInt(), 1);
+}
+
+// A3(b)/C3: a same-ID unfinalized row that exists in the store but that the
+// engine never confirmed with a Success (e.g. left over from an earlier
+// ambiguous write) is "possibly persisted, untrusted" -- the watchdog
+// discards it, exactly as with no checkpoint at all.
+void TimerTest::test_A3_watchdog_discard_deletes_unconfirmed_checkpoint_row()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore db(settings);
+
+    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(preMidnight);
+    TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    clock.advance(5ll * 60ll * 1000ll); // 23:55
+    const SegmentId segId = tracker.getOngoingDuration()->segment_id;
+
+    // Seed a same-ID unfinalized row directly (bypassing the engine's own
+    // saveCheckpoint call), so the engine's in-memory confirmed prefix stays
+    // invalid while the store has a row that looks like a checkpoint.
+    QVERIFY(db.ensureOpen_dbg());
+    {
+        QSqlQuery q(db.rawDb_dbg());
+        q.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                  "VALUES (:seg, 0, :s, :e, 0)");
+        q.bindValue(":seg", segId.toString());
+        q.bindValue(":s", preMidnight.toUTC().toString(Qt::ISODateWithMs));
+        q.bindValue(":e", clock.now().toUTC().toString(Qt::ISODateWithMs));
+        QVERIFY(q.exec());
+    }
+    QCOMPARE(countUnfinalizedRows(db), 1);
+
+    // Act: cross midnight — no confirmed prefix, so the watchdog discards.
     const QDateTime postMidnight(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime);
     clock.setNow(postMidnight);
     QVERIFY(tracker.discardCrossMidnightOngoingAndStop_dbg(postMidnight));
@@ -2105,6 +2161,464 @@ void TimerTest::test_A3_watchdog_discard_deletes_checkpoint_row()
     // Assert: the orphaned checkpoint row is gone — nothing for recovery to
     // resurrect and nothing for the stale policy to silently drop.
     QCOMPARE(countUnfinalizedRows(db), 0);
+}
+
+// ============================================================================
+// C3 (step7_plan.md WP-B): the engine keeps only a store-confirmed same-day
+// checkpoint prefix at a cross-midnight close, discarding the unverified
+// tail; with no usable prefix it discards the whole segment, exactly as
+// before.
+// ============================================================================
+
+// WP-B 1: a Lock-instant checkpoint that succeeds is kept as the confirmed
+// prefix through an overnight sleep.
+void TimerTest::test_C3_lock_checkpoint_success_overnight_sleep_keeps_prefix()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    const auto ongoing = tracker.getOngoingDuration();
+    QVERIFY(ongoing.has_value());
+    const SegmentId segId = ongoing->segment_id;
+
+    const QDateTime lockTime(QDate(2025, 6, 1), QTime(23, 30, 0), Qt::LocalTime);
+    clock.setNow(lockTime);
+    tracker.useTimerViaLockEvent(LockEvent::Lock); // immediate lock-instant checkpoint, Success
+    QVERIFY(fakeDb.callLog.contains("saveCheckpoint"));
+
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+    const QDateTime nextMorning(QDate(2025, 6, 2), QTime(7, 0, 0), Qt::LocalTime);
+    clock.setNow(nextMorning);
+
+    // Act: the real 100ms heartbeat slot detects the missed boundary.
+    tracker.onTick(nextMorning);
+
+    // Assert
+    QCOMPARE(stoppedSpy.count(), 1);
+    QCOMPARE(stoppedSpy.first().first().value<TimeTracker::StopReason>(),
+             TimeTracker::StopReason::MidnightWatchdog);
+    QCOMPARE(fakeDb.storedDurations.size(), size_t(1));
+    QCOMPARE(fakeDb.storedDurations.front().segment_id.toString(), segId.toString());
+    QCOMPARE(fakeDb.storedDurations.front().startTime, t0);
+    QCOMPARE(fakeDb.storedDurations.front().endTime, lockTime);
+    QVERIFY(!fakeDb.callLog.contains("discardCheckpoint"));
+    QVERIFY(!tracker.hasPendingDiscards_dbg());
+    QVERIFY(!tracker.hasPendingCommit_dbg());
+}
+
+// WP-B 2: a Lock-instant checkpoint that fails, with no earlier Success,
+// leaves no confirmed prefix -- the whole segment is discarded.
+void TimerTest::test_C3_lock_checkpoint_failure_with_no_earlier_success_discards_whole()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    fakeDb.saveCheckpointResult = SessionStoreResult::transient("injected checkpoint failure");
+
+    const QDateTime lockTime(QDate(2025, 6, 1), QTime(23, 30, 0), Qt::LocalTime);
+    clock.setNow(lockTime);
+    tracker.useTimerViaLockEvent(LockEvent::Lock); // immediate lock-instant checkpoint, fails
+    QVERIFY(fakeDb.callLog.contains("saveCheckpoint"));
+
+    const QDateTime nextMorning(QDate(2025, 6, 2), QTime(7, 0, 0), Qt::LocalTime);
+    clock.setNow(nextMorning);
+    tracker.onTick(nextMorning);
+
+    // Assert: whole discard -- no confirmed prefix existed.
+    QVERIFY(tracker.isStopped());
+    QVERIFY(fakeDb.callLog.contains("discardCheckpoint"));
+    QVERIFY(fakeDb.storedDurations.empty());
+}
+
+// WP-B 3: an earlier successful checkpoint, then a later failed one, keeps
+// the earlier confirmed prefix -- a later failure never erases it.
+void TimerTest::test_C3_later_failed_checkpoint_does_not_erase_earlier_prefix()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(23, 10, 0), Qt::LocalTime));
+    const QDateTime confirmedEnd = clock.now();
+    tracker.triggerCheckpoint_dbg(); // Success
+    QVERIFY(fakeDb.callLog.contains("saveCheckpoint"));
+
+    fakeDb.saveCheckpointResult = SessionStoreResult::transient("injected checkpoint failure");
+    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(23, 40, 0), Qt::LocalTime));
+    tracker.triggerCheckpoint_dbg(); // fails; must not erase the 23:10 prefix
+
+    const QDateTime nextMorning(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime);
+    clock.setNow(nextMorning);
+    tracker.onTick(nextMorning);
+
+    // Assert: the committed row ends at the earlier confirmed prefix.
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(fakeDb.storedDurations.size(), size_t(1));
+    QCOMPARE(fakeDb.storedDurations.front().startTime, t0);
+    QCOMPARE(fakeDb.storedDurations.front().endTime, confirmedEnd);
+}
+
+// WP-B 4: a Disabled checkpoint result (History persistence off) never sets
+// a confirmed prefix -- the discard path runs and resolves the intent.
+void TimerTest::test_C3_disabled_checkpoint_result_gives_no_prefix_discard_resolves()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    fakeDb.saveCheckpointResult = SessionStoreResult::disabled();
+    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(23, 30, 0), Qt::LocalTime));
+    tracker.triggerCheckpoint_dbg();
+    QVERIFY(fakeDb.callLog.contains("saveCheckpoint"));
+
+    const QDateTime nextMorning(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime);
+    clock.setNow(nextMorning);
+    tracker.onTick(nextMorning);
+
+    // Assert: whole discard; nothing credited for the segment; the discard
+    // intent resolved immediately against the (default-Success) fake.
+    QVERIFY(tracker.isStopped());
+    QVERIFY(fakeDb.callLog.contains("discardCheckpoint"));
+    QVERIFY(fakeDb.storedDurations.empty());
+    QVERIFY(!tracker.hasPendingDiscards_dbg());
+}
+
+// WP-B 5: segment rotation invalidates the prefix -- Pause then unpause
+// starts a fresh segment with no checkpoint of its own, so it is discarded
+// whole at midnight even though the earlier Activity segment (already
+// committed at the Pause transition) is untouched.
+void TimerTest::test_C3_segment_rotation_discards_unconfirmed_new_segment()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(22, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(22, 10, 0), Qt::LocalTime));
+    tracker.triggerCheckpoint_dbg(); // Success in segment A
+
+    const QDateTime pauseTime(QDate(2025, 6, 1), QTime(22, 20, 0), Qt::LocalTime);
+    clock.setNow(pauseTime);
+    tracker.useTimerViaButton(Button::Pause); // commits A, rotates to segment B (Pause)
+
+    const QDateTime unpauseTime(QDate(2025, 6, 1), QTime(22, 30, 0), Qt::LocalTime);
+    clock.setNow(unpauseTime);
+    tracker.useTimerViaButton(Button::Start); // commits B, rotates to segment C (Activity), no checkpoint
+
+    const QDateTime nextMorning(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime);
+    clock.setNow(nextMorning);
+    tracker.onTick(nextMorning);
+
+    // Assert: the still-ongoing segment (C) is discarded whole; the earlier
+    // committed rows (A and B) are unchanged, and no row carries A's/B's
+    // start with a checkpointed end that belongs to C.
+    QVERIFY(tracker.isStopped());
+    QVERIFY(fakeDb.callLog.contains("discardCheckpoint"));
+    QCOMPARE(fakeDb.storedDurations.size(), size_t(2));
+    bool foundActivity = false, foundPause = false;
+    for (const auto& seg : fakeDb.storedDurations) {
+        if (seg.type == DurationType::Activity && seg.startTime == t0 && seg.endTime == pauseTime)
+            foundActivity = true;
+        if (seg.type == DurationType::Pause && seg.startTime == pauseTime && seg.endTime == unpauseTime)
+            foundPause = true;
+    }
+    QVERIFY2(foundActivity, "Expected the committed Activity segment 22:00->22:20");
+    QVERIFY2(foundPause, "Expected the committed Pause segment 22:20->22:30");
+}
+
+// WP-B 5b: Stop followed by Start also clears the prefix -- a checkpoint
+// confirmed in session 1 must not leak into session 2's cross-midnight close.
+void TimerTest::test_C3_stop_then_start_clears_confirmed_prefix()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(10, 10, 0), Qt::LocalTime));
+    tracker.triggerCheckpoint_dbg(); // Success in session 1's segment
+    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(10, 20, 0), Qt::LocalTime));
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.isStopped());
+    fakeDb.callLog.clear();
+    fakeDb.storedDurations.clear();
+
+    // Session 2: a fresh segment with no checkpoint of its own.
+    const QDateTime t1(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    clock.setNow(t1);
+    tracker.useTimerViaButton(Button::Start);
+
+    const QDateTime nextMorning(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime);
+    clock.setNow(nextMorning);
+    tracker.onTick(nextMorning);
+
+    // Assert: session 2's segment is discarded whole -- session 1's
+    // checkpoint did not leak across the Stop/Start boundary.
+    QVERIFY(tracker.isStopped());
+    QVERIFY(fakeDb.callLog.contains("discardCheckpoint"));
+    QVERIFY(fakeDb.storedDurations.empty());
+}
+
+// WP-B 6: a checkpoint ending exactly at local midnight is legal (half-open
+// interval) and is finalized with no discard.
+void TimerTest::test_C3_prefix_ending_exactly_at_local_midnight_is_finalized()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    const QDateTime exactMidnight(QDate(2025, 6, 2), QTime(0, 0, 0, 0), Qt::LocalTime);
+    clock.setNow(exactMidnight);
+    tracker.triggerCheckpoint_dbg();
+    QVERIFY(fakeDb.callLog.contains("saveCheckpoint"));
+
+    const QDateTime justAfter(QDate(2025, 6, 2), QTime(0, 0, 0, 100), Qt::LocalTime);
+    clock.setNow(justAfter);
+    tracker.onTick(justAfter);
+
+    // Assert: finalized [start, exactMidnight) with no discard.
+    QVERIFY(tracker.isStopped());
+    QVERIFY(!fakeDb.callLog.contains("discardCheckpoint"));
+    QCOMPARE(fakeDb.storedDurations.size(), size_t(1));
+    QCOMPARE(fakeDb.storedDurations.front().startTime, t0);
+    QCOMPARE(fakeDb.storedDurations.front().endTime, exactMidnight);
+}
+
+// WP-B 7: a confirmed prefix survives a failed final commit as the pending
+// payload, blocks Start while the fault persists, is retried by
+// drainForShutdown(), and is finally committed once Start succeeds.
+void TimerTest::test_C3_failed_final_commit_retains_prefix_for_retry()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    const QDateTime checkpointEnd = clock.now();
+    tracker.triggerCheckpoint_dbg();
+    QVERIFY(fakeDb.callLog.contains("saveCheckpoint"));
+    const SegmentId segId = tracker.getOngoingDuration()->segment_id;
+
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected commit failure");
+    const QDateTime nextMorning(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime);
+    clock.setNow(nextMorning);
+    tracker.onTick(nextMorning);
+
+    // Assert: the confirmed prefix is retained as the pending commit.
+    QVERIFY(tracker.isStopped());
+    QVERIFY(tracker.hasPendingCommit_dbg());
+    const auto payload = tracker.pendingCommitPayload_dbg();
+    QCOMPARE(payload.size(), size_t(1));
+    QCOMPARE(payload.front().segment_id.toString(), segId.toString());
+    QCOMPARE(payload.front().startTime, t0);
+    QCOMPARE(payload.front().endTime, checkpointEnd);
+
+    // Assert: Start is refused while the fault persists.
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isStopped());
+    QVERIFY(tracker.hasPendingCommit_dbg());
+
+    // Assert: drainForShutdown() retries the same payload and it is still
+    // incomplete while the fault persists.
+    QVERIFY(!tracker.drainForShutdown().clean());
+    QCOMPARE(tracker.pendingCommitPayload_dbg().size(), size_t(1));
+
+    // drainForShutdown() itself calls shutdown() (C9b: terminal until
+    // cancelled) -- re-arm before the Start-succeeds check below.
+    tracker.cancelShutdown();
+
+    // Act: the fault clears; Start now succeeds and resolves the payload.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    QVERIFY(!tracker.hasPendingCommit_dbg());
+    QCOMPARE(fakeDb.storedDurations.size(), size_t(1));
+    QCOMPARE(fakeDb.storedDurations.front().endTime, checkpointEnd);
+
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.drainForShutdown().clean());
+}
+
+// WP-B 9: a Button-driven Stop and a Shutdown, each finding a missed
+// midnight with a confirmed prefix, finalize it exactly like the watchdog.
+void TimerTest::test_C3_button_stop_after_missed_midnight_keeps_prefix()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    const QDateTime checkpointEnd = clock.now();
+    tracker.triggerCheckpoint_dbg();
+
+    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime));
+    tracker.useTimerViaButton(Button::Stop); // dispatches through onStartPausePressed's toggle logic
+
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(stoppedSpy.count(), 1);
+    QCOMPARE(stoppedSpy.first().first().value<TimeTracker::StopReason>(),
+             TimeTracker::StopReason::MidnightWatchdog);
+    QCOMPARE(fakeDb.storedDurations.size(), size_t(1));
+    QCOMPARE(fakeDb.storedDurations.front().startTime, t0);
+    QCOMPARE(fakeDb.storedDurations.front().endTime, checkpointEnd);
+}
+
+// WP-B 8: a past-day History edit while the engine keeps running does not
+// invalidate the confirmed checkpoint prefix -- the edit succeeds, and the
+// prefix is still finalized at midnight. The live/today date is not
+// editable in the open-time context: the checkpoint's own unfinalized row
+// (surfaced through loadHistoryRows()) is enough to block it, matching H5's
+// "reject an edit to a date still owned by that checkpoint" rule (A1.9 --
+// no code change needed, HistoryEligibility::isEditable already covers it).
+void TimerTest::test_C3_past_day_history_edit_preserves_confirmed_prefix()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDate today(2025, 6, 1);
+    const QDate pastDate(2025, 5, 31);
+    const QDateTime t0(today, QTime(9, 0, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.setNow(QDateTime(today, QTime(23, 10, 0), Qt::LocalTime));
+    const QDateTime checkpointEnd = clock.now();
+    tracker.triggerCheckpoint_dbg();
+    QVERIFY(fakeDb.callLog.contains("saveCheckpoint"));
+
+    // Act: open History, edit an earlier date, save, close.
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    // The live date is not editable: the checkpoint's own unfinalized row
+    // (projected by the fake's loadHistoryRows()) overlaps it.
+    QVERIFY(!ctx.isEditable(today));
+    QVERIFY(ctx.isEditable(pastDate));
+
+    HistoryDayChange day;
+    day.date = pastDate;
+    day.dayStartUtc = DayValidity::localDayStart(pastDate).toUTC();
+    day.dayEndUtc = DayValidity::localDayEnd(pastDate).toUTC();
+    const QDateTime pastStart(pastDate, QTime(9, 0, 0), Qt::LocalTime);
+    const QDateTime pastEnd(pastDate, QTime(10, 0, 0), Qt::LocalTime);
+    day.upserts.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, pastStart, pastEnd));
+    const std::vector<HistoryDayChange> days{day};
+
+    const SessionStoreResult saveResult = tracker.saveHistoryEdit(ctx, days);
+    QVERIFY(saveResult.ok());
+    tracker.endExclusiveEdit();
+
+    // Act: midnight tick.
+    const QDateTime nextMorning(today.addDays(1), QTime(0, 5, 0), Qt::LocalTime);
+    clock.setNow(nextMorning);
+    tracker.onTick(nextMorning);
+
+    // Assert: the confirmed prefix is still finalized at the checkpoint end.
+    QVERIFY(tracker.isStopped());
+    QVERIFY(!fakeDb.callLog.contains("discardCheckpoint"));
+    bool foundPrefix = false;
+    for (const auto& seg : fakeDb.storedDurations) {
+        if (seg.startTime == t0 && seg.endTime == checkpointEnd)
+            foundPrefix = true;
+    }
+    QVERIFY2(foundPrefix, "Expected the confirmed checkpoint prefix 09:00->23:10 to be finalized");
+}
+
+void TimerTest::test_C3_shutdown_after_missed_midnight_keeps_prefix()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime t0(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(t0);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    const QDateTime checkpointEnd = clock.now();
+    tracker.triggerCheckpoint_dbg();
+
+    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
+    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime));
+    tracker.shutdown();
+
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(transitionedSpy.count(), 1);
+    QCOMPARE(transitionedSpy.first().first().value<TimeTracker::Transition>().cause,
+             TimeTracker::TransitionCause::Shutdown);
+    QCOMPARE(fakeDb.storedDurations.size(), size_t(1));
+    QCOMPARE(fakeDb.storedDurations.front().startTime, t0);
+    QCOMPARE(fakeDb.storedDurations.front().endTime, checkpointEnd);
 }
 
 void TimerTest::test_C9b_start_refused_after_shutdown_until_cancel()
@@ -2227,10 +2741,12 @@ void TimerTest::test_C9b_lock_resume_refused_after_shutdown()
     QCOMPARE(fakeDb.callLog, callLogBefore);
 }
 
-// F2: shutdown() after a machine slept past midnight must discard the
-// stale checkpoint of the ongoing (cross-midnight, discarded) segment —
-// otherwise recoverStartupCheckpoints() would resurrect it on next launch.
-void TimerTest::test_F2_shutdown_after_midnight_discards_checkpoint()
+// F2/C3: shutdown() after a machine slept past midnight, with a confirmed
+// checkpoint prefix, must finalize that prefix through the normal same-ID
+// close path rather than discard it -- Decision A1-2: a Shutdown close that
+// finds a missed midnight follows the same prefix-or-discard rule as the
+// watchdog.
+void TimerTest::test_F2_shutdown_after_midnight_keeps_confirmed_prefix()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -2245,6 +2761,7 @@ void TimerTest::test_F2_shutdown_after_midnight_discards_checkpoint()
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
     clock.advance(60ll * 1000ll); // elapse a minute so the checkpoint isn't zero-length
+    const QDateTime checkpointEnd = clock.now();
     tracker.triggerCheckpoint_dbg();
     QVERIFY(fakeDb.callLog.contains("saveCheckpoint"));
     const auto ongoingAtCheckpoint = tracker.getOngoingDuration();
@@ -2255,11 +2772,45 @@ void TimerTest::test_F2_shutdown_after_midnight_discards_checkpoint()
     clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime));
     tracker.shutdown();
 
-    // Assert: the orphaned checkpoint row was discarded.
+    // Assert: the confirmed prefix was finalized through the normal close
+    // path -- no discard -- ending at the checkpoint, not at shutdown time.
+    QVERIFY(!fakeDb.callLog.contains("discardCheckpoint"));
+    QVERIFY(fakeDb.callLog.contains("commitSession"));
+    QCOMPARE(fakeDb.storedDurations.size(), size_t(1));
+    const auto& seg = fakeDb.storedDurations.front();
+    QCOMPARE(seg.segment_id.toString(), checkpointSegmentId.toString());
+    QCOMPARE(seg.startTime, preMidnight);
+    QCOMPARE(seg.endTime, checkpointEnd);
+}
+
+// F2 no-prefix variant: shutdown() after a missed midnight with no confirmed
+// checkpoint (Disabled/never attempted) must still discard the whole
+// segment, exactly as the watchdog does -- otherwise
+// recoverStartupCheckpoints() would resurrect it on next launch.
+void TimerTest::test_F2_shutdown_after_midnight_discards_checkpoint_with_no_prefix()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+
+    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+    FakeClock clock(preMidnight);
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    clock.advance(60ll * 1000ll);
+    // No checkpoint is attempted, so there is no confirmed prefix.
+
+    // Act: machine "wakes" well past midnight; shutdown() stops the engine.
+    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime));
+    tracker.shutdown();
+
+    // Assert: the whole segment was discarded, nothing credited.
     QVERIFY(fakeDb.callLog.contains("discardCheckpoint"));
-    const bool stillPresent = std::any_of(fakeDb.savedCheckpoints.begin(), fakeDb.savedCheckpoints.end(),
-        [&](const FakeSessionStore::CheckpointRecord& cp) { return cp.segmentId == checkpointSegmentId; });
-    QVERIFY(!stillPresent);
+    QVERIFY(fakeDb.storedDurations.empty());
 }
 
 // ============================================================================
@@ -2365,10 +2916,10 @@ void TimerTest::test_N2_scheduled_stop_revokes_edit_and_credits_pause_through_cu
     QVERIFY2(foundPause, "Expected the Pause segment credited exactly through the cutoff");
 }
 
-// N3 (*HEAD-red*): a watchdog tick at 00:10 with the dialog open revokes the
-// edit and discards the whole cross-midnight segment, exactly as the
-// non-deferred watchdog policy already does.
-void TimerTest::test_N3_watchdog_tick_revokes_edit_and_discards_segment()
+// N3/C3 (*HEAD-red*): a watchdog tick at 00:10 with the dialog open revokes
+// the edit and, because a checkpoint already succeeded, keeps the confirmed
+// same-day prefix instead of discarding the whole cross-midnight segment.
+void TimerTest::test_N3_watchdog_tick_revokes_edit_and_keeps_confirmed_prefix()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -2382,6 +2933,7 @@ void TimerTest::test_N3_watchdog_tick_revokes_edit_and_discards_segment()
 
     tracker.useTimerViaButton(Button::Start);
     clock.advance(60ll * 1000ll);
+    const QDateTime checkpointEnd = clock.now();
     tracker.triggerCheckpoint_dbg();
     QVERIFY(fakeDb.callLog.contains("saveCheckpoint"));
 
@@ -2403,9 +2955,13 @@ void TimerTest::test_N3_watchdog_tick_revokes_edit_and_discards_segment()
     QCOMPARE(stoppedSpy.count(), 1);
     QCOMPARE(stoppedSpy.first().first().value<TimeTracker::StopReason>(),
              TimeTracker::StopReason::MidnightWatchdog);
-    QVERIFY(fakeDb.callLog.contains("discardCheckpoint"));
-    QVERIFY(!fakeDb.callLog.contains("commitSession"));
-    QVERIFY(fakeDb.storedDurations.empty());
+    // C3: the confirmed prefix is finalized through the normal close path --
+    // no discard -- and it ends at the checkpoint, not at the watchdog tick.
+    QVERIFY(!fakeDb.callLog.contains("discardCheckpoint"));
+    QVERIFY(fakeDb.callLog.contains("commitSession"));
+    QCOMPARE(fakeDb.storedDurations.size(), size_t(1));
+    QCOMPARE(fakeDb.storedDurations.front().startTime, t0);
+    QCOMPARE(fakeDb.storedDurations.front().endTime, checkpointEnd);
     // Exactly one revoke and one revoke notice -- the midnight watchdog's own
     // revoke must not double-fire alongside the WP7c emitTransition() backstop.
     QCOMPARE(revokedSpy.count(), 1);
@@ -2571,7 +3127,12 @@ void TimerTest::test_N5b_scheduled_stop_while_still_locked_revokes_and_stops_pau
 // The overnight tick then discards only the still-ongoing Pause segment that
 // crosses midnight, exactly as the no-dialog watchdog would. HEAD instead
 // resumes Activity at 08:00.
-void TimerTest::test_N6_watchdog_tick_before_unlock_revokes_and_discards_whole_segment()
+// C3: the Lock-instant checkpoint means the evening Activity segment and the
+// Pause segment up to LongOngoingLock maturation are kept via the ordinary
+// (non-cross-midnight) commit paths; only the still-ongoing overnight Pause
+// segment has no confirmed checkpoint (Pause segments never checkpoint) and
+// is discarded whole by the watchdog.
+void TimerTest::test_N6_watchdog_tick_before_unlock_discards_unconfirmed_pause_segment()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -3538,7 +4099,11 @@ void TimerTest::test_A4_discard_transient_failure_retains_intent_and_blocks_clea
 void TimerTest::test_A4_discard_disabled_resolves_intent_without_mutating_checkpoints()
 {
     // Arrange: a failed discard leaves an intent pending and a checkpoint
-    // record still present in the fake.
+    // record still present in the fake. C3: the checkpoint row is seeded
+    // directly into the fake (not via triggerCheckpoint_dbg()), so the
+    // engine has no confirmed prefix and the cross-midnight close still
+    // takes the whole-segment discard path -- this models a "possibly
+    // persisted, untrusted" row exactly like A3(b).
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     Settings settings(createSettingsFile(tempDir.path(), 7));
@@ -3550,7 +4115,8 @@ void TimerTest::test_A4_discard_disabled_resolves_intent_without_mutating_checkp
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.useTimerViaButton(Button::Start);
     clock.advance(60ll * 1000ll);
-    tracker.triggerCheckpoint_dbg();
+    const SegmentId segId = tracker.getOngoingDuration()->segment_id;
+    fakeDb.savedCheckpoints.push_back({DurationType::Activity, preMidnight, clock.now(), segId});
     const size_t checkpointsBefore = fakeDb.savedCheckpoints.size();
     QVERIFY(checkpointsBefore > 0);
 

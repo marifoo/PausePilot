@@ -107,8 +107,17 @@ subsystem: `DayBoundaryWatcher`. Both checks below run purely from the
    and checks whether the ongoing segment has crossed midnight (which can
    happen if the machine slept past the scheduled time, or the segment
    started on an earlier local date). If so, it forces the engine into
-   `None` and discards the in-flight segment, emitting
-   `StopReason::MidnightWatchdog`.
+   `None`, emitting `StopReason::MidnightWatchdog`. **(C3)** It finalizes the
+   last successfully checkpointed same-day prefix of the segment through the
+   normal same-ID close path (`session_.confirmed_checkpoint_end`, set only
+   after an actual store `Success` and never at resume-time `now`),
+   discarding only the unverified tail between that checkpoint and `now`. A
+   later failed or `Disabled` checkpoint attempt never erases an earlier
+   confirmed prefix; segment rotation (Pause/unpause/Stop) always clears it.
+   With no usable prefix, the whole segment is discarded exactly as before,
+   with a durable discard intent (`PendingDiscards`/`discard_intents`). The
+   same prefix-or-discard rule applies to a Shutdown or Button-driven close
+   that finds a missed midnight, not only the watchdog tick.
 
 The forward-date History revoke (see below) runs first on every heartbeat,
 before either check, and applies even when the engine is stopped.
@@ -200,15 +209,29 @@ lock time or overnight).
 
 Without History open (or after History closes), the night-time behaviour is:
 
+The fixed 5-minute Activity checkpoint cadence (C12c) is a schedule, not a
+guaranteed maximum loss bound: only a successfully persisted checkpoint is
+recoverable, and a failed write, `Disabled` History persistence, or time
+spent locked (checkpoints are suspended while `is_locked_`) can all extend
+the gap since the last confirmed prefix.
+
 - **Lock before sleep, with auto-pause matured:** Activity up to the lock and
   Pause up to the auto-pause threshold are committed. After an overnight resume,
-  the watchdog discards only the ongoing Pause. The evening's Activity is kept.
+  the watchdog discards only the ongoing Pause (it has no checkpoint prefix of
+  its own -- checkpoints only ever run in Activity, and rotation clears the
+  prefix). The evening's Activity is kept.
 - **Lock before sleep, without auto-pause matured:** the segment is still
-  Activity. The overnight tick discards the **whole segment**, including the
-  evening's Activity. This matches the watchdog policy and is not a History
-  effect.
-- **Sleep across midnight without a lock:** the tick revokes any open History
-  and discards the segment, same as without a dialog.
+  Activity. The immediate lock-instant checkpoint (`onLockDetected`) attempts
+  a save at the lock instant; **(C3)** if that write succeeded, the overnight
+  watchdog keeps Activity up to the lock instant and discards only the
+  unverified tail after it. If the lock-instant write failed (or History
+  persistence is `Disabled`), there is no confirmed prefix and the overnight
+  tick discards the **whole segment**, including the evening's Activity, with
+  a durable discard intent.
+- **Sleep across midnight without a lock:** the tick revokes any open History,
+  then keeps the last successfully checkpointed same-day prefix of the
+  segment (the periodic 5-minute Activity checkpoint) if one exists, else
+  discards the whole segment -- same rule as with a dialog open.
 - **Same-day resume:** the Lock and LongOngoingLock are handled normally.
 - **Sleep same day without a lock:** History stays open, nothing is deferred
   and the DB is untouched. Slept time counts as Activity with or without
