@@ -67,9 +67,6 @@ struct SessionState {
     /// owned separately by TimeTracker::PendingCommit.
     void resetForNewSession();
 
-    /// Adopts the segment identity from an externally-provided ongoing
-    /// duration (used when HistoryDialog replaces durations).
-    void adoptOngoingSegment(const TimeDuration& ongoing);
 };
 
 
@@ -84,7 +81,6 @@ public:
         MidnightScheduled,  ///< DayBoundaryWatcher's heartbeat check reached the 23:59:59.500 cutoff.
         MidnightWatchdog,   ///< Watchdog detected a cross-midnight ongoing segment.
         Shutdown,           ///< Application shutdown (destructor or ShutdownCoordinator).
-        EditApplied,        ///< History edit committed with no ongoing segment: tracking stopped.
         FatalStoreError,    ///< C4: a store operation returned FatalError; tracking latched unavailable.
     };
 
@@ -106,7 +102,6 @@ public:
         MidnightScheduled,  ///< -> None: scheduled 23:59:59.500 cutoff.
         MidnightWatchdog,   ///< -> None: watchdog cross-midnight discard.
         Shutdown,           ///< -> None: application shutdown.
-        EditApplied,        ///< History edit committed a new mode.
         FatalStoreError,    ///< -> None: a store operation returned FatalError.
     };
 
@@ -146,8 +141,8 @@ private:
      *
      * Invariant: there is either no pending commit, or exactly one immutable
      * payload awaiting a durable write. Every complete successful
-     * persistence (an ordinary commit, a Start-time retry, a successful
-     * replaceAll, or a contractual Disabled no-op) clears it. A pending
+     * persistence (an ordinary commit, a Start-time retry, or a contractual
+     * Disabled no-op) clears it. A pending
      * payload blocks a new session from starting (see retryUnsavedDurations()).
      *
      * submit() is used by ordinary in-session persistence (Pause/Backpause/
@@ -174,9 +169,6 @@ private:
         void retry(bool success) {
             if (success) clear();
         }
-
-        /// DB is now authoritative after a successful replaceAll.
-        void replaceSucceeded() { clear(); }
 
         void clear() { payload_.reset(); }
 
@@ -257,8 +249,8 @@ private:
     /// recoverStartupCheckpoints have all been consolidated onto
     /// TransientError/CallerBug (see sessionstore.h). The other
     /// stopIfLatched()/latch-check call sites in this class (saveCheckpoint_
-    /// locked, maybeReanchorCheckpoint, startTimer's Pause and None
-    /// branches, finalizePauseTransition) are therefore defence-in-depth
+    /// locked, startTimer's Pause and None branches, finalizePauseTransition)
+    /// are therefore defence-in-depth
     /// against a future SessionStore implementation, not currently
     /// reachable from SqliteSessionStore, and are exercised in tests only
     /// via FakeSessionStore injecting FatalError from those operations.
@@ -354,7 +346,6 @@ private:
     // Retries any durable-discard intents (A4/R05-001) against the store.
     // Safe to call any time, including when nothing is pending (no-op).
     void retryPendingDiscards();
-    bool maybeReanchorCheckpoint(const TimeDuration& seg);
     /// Locked variant of getOngoingDuration() for callers that already hold mutex_.
     std::optional<TimeDuration> getOngoingDuration_locked() const;
     /// Same, but built from a caller-supplied `now` instead of a fresh
@@ -440,23 +431,6 @@ public:
     /// after cancelShutdown() clears wasShutDown() for everyone else.
     qint64 shutdownEpoch() const { QMutexLocker lk(&mutex_); return shutdown_epoch_; }
 
-    /**
-     * Result returned by commitEditedTimeline().
-     *
-     *   ok == true  — all operations succeeded (durations replaced, mode aligned,
-     *                 checkpoint re-anchored if applicable).
-     *   ok == false — the checkpoint write after re-anchoring failed; durations
-     *                 are already replaced in memory but the checkpoint row may
-     *                 be stale.  The error is also logged and emitted as
-     *                 userWarning by the internal handler.
-     */
-    struct EditCommitResult {
-        bool ok;
-        QString message;
-        static EditCommitResult success() { return {true, {}}; }
-        static EditCommitResult failure(QString msg) { return {false, std::move(msg)}; }
-    };
-
     explicit TimeTracker(const Settings & settings, SessionStore& db, QObject *parent = nullptr);
     ~TimeTracker();
 
@@ -477,46 +451,17 @@ public:
     Timeline snapshot() const;
     /// Returns completed segments only (excludes ongoing). Use for checkpoint saves.
     Timeline completedTimeline() const;
-    /**
-     * Atomically replaces the live session with `edited`, aligning mode_,
-     * re-anchoring checkpoint state, and deciding whether checkpoint writes
-     * are allowed.  Thread-safe; caller must hold no TimeTracker locks.
-     *
-     * Owns internally:
-     *   - replacing completed segments and clearing the retry cache,
-     *   - adopting or clearing the ongoing segment,
-     *   - aligning mode_ with the edited ongoing segment type,
-     *   - re-anchoring checkpoint tracking (segment id, start time, DB row),
-     *   - deciding whether checkpoint writes are allowed (suspended while
-     *     dialog_open_ or is_locked_).
-     *
-     * Observer behavior:
-     *   - ongoing present, type differs from current mode_: emits started(true)
-     *     or paused() so the UI reflects the new mode.
-     *   - ongoing absent, mode_ was not None: emits stopped(EditApplied) so
-     *     the tray/UI learns that tracking ended due to the edit.
-     *   - ongoing present but mode_ is already None: refused. Adopting the
-     *     segment identity would leave segment_id set while the engine stays
-     *     stopped — a state SessionState documents as impossible. The
-     *     ongoing segment is ignored; no signal emitted.
-     *   - no mode change: no signal emitted.
-     *
-     * Returns EditCommitResult::failure if the checkpoint write fails;
-     * success otherwise.
-     */
-    EditCommitResult commitEditedTimeline(const Timeline& edited);
-    LoadResult loadHistoryFromStore();
     std::optional<TimeDuration> getOngoingDuration() const;
     qint64 getStartupRecoveredMsec() const;
     bool shouldShowStartupRecoveryNotification() const;
     int getStartupPolicyDroppedCount() const;
-    SessionStoreResult replaceAll(const Timeline& history, const Timeline& session);
-    /// Freezes checkpoints and captures the open-time HistoryEditContext
-    /// (H5/WP3): one now_provider_() read, one db_.loadHistoryRows() call,
-    /// and a snapshot of the live/pending-commit/stopped state. Call before
-    /// opening HistoryDialog.
+    /// Marks the exclusive edit open and captures the open-time
+    /// HistoryEditContext (H5/WP3): one now_provider_() read, one
+    /// db_.loadHistoryRows() call, and a snapshot of the live/pending-commit/
+    /// stopped state. Call before opening HistoryDialog. Checkpoints keep
+    /// running while the edit is open (WP6).
     HistoryEditContext beginExclusiveEdit();
-    /// Resumes checkpoints. Call after closing HistoryDialog.
+    /// Clears the exclusive-edit marker. Call after closing HistoryDialog.
     void endExclusiveEdit();
     /// Saves a scoped History edit (H5/WP3) built against the context
     /// `opened` returned by beginExclusiveEdit(). Holds mutex_ across the

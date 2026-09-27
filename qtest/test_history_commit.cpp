@@ -8,7 +8,6 @@
 #include <algorithm>
 
 #include "../historydialog.h"
-#include "../historyeditsession.h"
 
 using TestCommon::createSettingsFile;
 using TestCommon::fixedNow;

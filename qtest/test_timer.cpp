@@ -473,67 +473,6 @@ void TimerTest::test_timer_retry_failure_keeps_unsaved_state_and_durations()
 // SessionState transition tests
 // ============================================================================
 
-void TimerTest::test_replaceAll_success_clears_unsaved_cache()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    // Arrange: a pending commit via a real failed Stop persist (behavior, not
-    // direct field injection).
-    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-    tracker.useTimerViaButton(Button::Start);
-    clock.advance(60ll * 1000ll);
-    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
-    tracker.useTimerViaButton(Button::Stop);
-    QVERIFY(tracker.hasPendingCommit_dbg());
-
-    // Act: replaceAll succeeds (default result), so the DB is now authoritative.
-    const SessionStoreResult result = tracker.replaceAll(Timeline({}, std::nullopt), Timeline({}, std::nullopt));
-
-    QVERIFY(result.ok());
-    QVERIFY(!tracker.hasPendingCommit_dbg());
-    QVERIFY(tracker.pendingCommitPayload_dbg().empty());
-}
-
-void TimerTest::test_replaceAll_failure_keeps_unsaved_cache()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    // Arrange: a pending commit via a real failed Stop persist.
-    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-    tracker.useTimerViaButton(Button::Start);
-    clock.advance(60ll * 1000ll);
-    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
-    tracker.useTimerViaButton(Button::Stop);
-    QVERIFY(tracker.hasPendingCommit_dbg());
-
-    // Act: replaceAll itself also fails.
-    fakeDb.replaceDurationsResult = SessionStoreResult::transient("injected failure");
-    const SessionStoreResult result = tracker.replaceAll(Timeline({}, std::nullopt), Timeline({}, std::nullopt));
-
-    QVERIFY(!result.ok());
-    QVERIFY(result.category == SessionStoreResult::TransientError);
-    QVERIFY(tracker.hasPendingCommit_dbg());
-    QVERIFY(!tracker.pendingCommitPayload_dbg().empty());
-
-    // Cleanup (A3): resolve the pending payload via the same idempotent
-    // drain a real shutdown would use, so destruction does not find an
-    // unresolved commit with no prior drain call.
-    fakeDb.commitSessionResult = SessionStoreResult::success();
-    QVERIFY(tracker.drainForShutdown().clean());
-}
-
 void TimerTest::test_session_state_start_to_pause_transition()
 {
     // Arrange: Start -> Activity, then pause, then stop -- FakeClock drives
@@ -648,54 +587,6 @@ void TimerTest::test_session_state_stop_clears_segment()
     // Assert: None mode, no pending commit (durations cleared, saved to DB)
     QVERIFY(tracker.isStopped());
     QVERIFY(!tracker.hasPendingCommit_dbg());
-}
-
-void TimerTest::test_session_state_adopted_segment_start_time_anchors_committed_row()
-{
-    // Arrange: Start an Activity segment, then commit a History-style edit
-    // that moves ITS start time earlier (same segment_id, same type -- just
-    // a moved anchor), the way HistoryDialog::saveChanges() does via
-    // TimeTracker::commitEditedTimeline(). This drives
-    // SessionState::adoptOngoingSegment() through its real public entry
-    // point rather than a _dbg seam.
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    clock.advance(60ll * 1000ll);
-    QVERIFY(tracker.getOngoingDuration().has_value());
-    const SegmentId segId = tracker.getOngoingDuration()->segment_id;
-
-    // Act: edit the ongoing segment's start time to 20 minutes earlier than
-    // t0 and commit it, as a History edit would.
-    const QDateTime editedStart = t0.addSecs(-20 * 60);
-    const TimeDuration editedOngoing = TimeDuration::fromLiveSession(
-        DurationType::Activity, editedStart, clock.now(), segId);
-    const TimeTracker::EditCommitResult commitResult =
-        tracker.commitEditedTimeline(Timeline({}, editedOngoing));
-    QVERIFY(commitResult.ok);
-
-    // Advance further and stop, so the ongoing segment is finalized and
-    // written to the store.
-    clock.advance(5ll * 60ll * 1000ll);
-    const QDateTime stopTime = clock.now();
-    tracker.useTimerViaButton(Button::Stop);
-
-    // Assert: the committed row's startTime (and thus its length) reflects
-    // the edited anchor, not the original t0 start -- read from the store,
-    // not a _dbg seam.
-    const auto row = std::find_if(fakeDb.storedDurations.begin(), fakeDb.storedDurations.end(),
-        [&](const TimeDuration& d) { return d.segment_id == segId; });
-    QVERIFY(row != fakeDb.storedDurations.end());
-    QCOMPARE(row->type, DurationType::Activity);
-    QCOMPARE(row->startTime, editedStart);
-    QCOMPARE(row->duration(), editedStart.msecsTo(stopTime));
 }
 
 // ============================================================================
@@ -1005,20 +896,16 @@ void TimerTest::test_useTimerViaButton_force_stops_on_cross_midnight_ongoing()
 
     // Assert: engine is in None, no cross-midnight row in DB.
     // (!tracker.sessionState_dbg().segment_start_time.isValid() is not
-    // asserted here: mode_ is assigned Mode::None at exactly two sites in
-    // the codebase -- stopTimer() (timetracker.cpp:853), immediately
-    // followed by session_.clearSegment() at :854, and
-    // commitEditedTimeline()'s no-ongoing branch (timetracker.cpp:1206),
-    // preceded by clearSegment() at :1204 -- and clearSegment()
-    // (timetracker.cpp:240-248) clears segment_start_time in the same
-    // straight-line body. The midnight watchdog delegates teardown to
-    // stopTimer() (discardCrossMidnightOngoingAndStop(), timetracker.cpp:1601)
-    // so it is covered by the :853/:854 pair; initializeFromStore()
-    // (timetracker.cpp:445-453) never touches mode_ or session_; and
-    // commitEditedTimeline()'s stopped branch (timetracker.cpp:1193-1199)
-    // refuses to adopt a segment while mode_ == None. So isStopped()
-    // implies !segment_start_time.isValid() on every path -- enforcing
-    // this centrally is P5e's job (checkDurationInvariants()).)
+    // asserted here: mode_ is assigned Mode::None at stopTimer()
+    // (timetracker.cpp:853), immediately followed by
+    // session_.clearSegment() at :854, which clears segment_start_time in
+    // the same straight-line body. The midnight watchdog delegates teardown
+    // to stopTimer() (discardCrossMidnightOngoingAndStop(),
+    // timetracker.cpp:1601) so it is covered by the :853/:854 pair, and
+    // initializeFromStore() (timetracker.cpp:445-453) never touches mode_ or
+    // session_. So isStopped() implies !segment_start_time.isValid() on
+    // every path -- enforcing this centrally is P5e's job
+    // (checkDurationInvariants()).)
     QVERIFY(tracker.isStopped());
     QVERIFY(!tracker.isAutopausePendingResume_dbg());
     // FakeSessionStore captures writes; no duration should have been written
@@ -1269,11 +1156,6 @@ void TimerTest::test_D_timetracker_public_surface_regression()
     // DB write helpers
     fakeDb.callLog.clear();
     tracker.updateDurationsInDB_dbg();
-    tracker.replaceAll(Timeline({}, std::nullopt), Timeline({}, std::nullopt));
-
-    // loadHistoryFromStore
-    auto history = tracker.loadHistoryFromStore();
-    (void)history;
 
     // lock event path
     tracker.useTimerViaLockEvent(LockEvent::Lock);
@@ -1929,70 +1811,6 @@ void TimerTest::test_T8_destructor_does_not_crash_while_active()
     QVERIFY(true);
 }
 
-// ============================================================================
-// beginExclusiveEdit / endExclusiveEdit + commitEditedTimeline checkpoint guard
-// ============================================================================
-
-// T2: commitEditedTimeline must NOT call saveCheckpoint while dialog_open_ is true.
-void TimerTest::test_T2_commitEditedTimeline_skips_checkpoint_while_dialog_open()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    Settings settings(settingsPath);
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-
-    tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
-
-    // Build a plausible ongoing segment for commitEditedTimeline to adopt.
-    const QDateTime start = fixedNow().addSecs(-60);
-    const QDateTime end   = fixedNow();
-    TimeDuration ongoing = TimeDuration::fromLiveSession(DurationType::Activity, start, end, SegmentId::fromString("seg-001"));
-
-    tracker.beginExclusiveEdit();
-    QVERIFY(tracker.isDialogOpen_dbg());
-
-    fakeDb.callLog.clear();
-
-    // commitEditedTimeline with a valid ongoing segment — checkpoint must be suppressed.
-    tracker.commitEditedTimeline(Timeline({}, ongoing));
-
-    QCOMPARE(fakeDb.callLog.count("saveCheckpoint"), 0);
-
-    tracker.endExclusiveEdit();
-}
-
-// C6: after endExclusiveEdit(), a subsequent commitEditedTimeline resumes normal writes.
-void TimerTest::test_C6_commitEditedTimeline_writes_checkpoint_after_endExclusiveEdit()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    QString settingsPath = createSettingsFile(tempDir.path(), 7);
-    Settings settings(settingsPath);
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-
-    tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
-
-    const QDateTime start = fixedNow().addSecs(-60);
-    const QDateTime end   = fixedNow();
-    TimeDuration ongoing = TimeDuration::fromLiveSession(DurationType::Activity, start, end, SegmentId::fromString("seg-002"));
-
-    tracker.beginExclusiveEdit();
-    tracker.endExclusiveEdit();
-    QVERIFY(!tracker.isDialogOpen_dbg());
-
-    fakeDb.callLog.clear();
-
-    // After endExclusiveEdit, dialog_open_ is false — checkpoint write must proceed.
-    tracker.commitEditedTimeline(Timeline({}, ongoing));
-
-    QCOMPARE(fakeDb.callLog.count("saveCheckpoint"), 1);
-}
-
 void TimerTest::test_S12_marker_error_skips_reconciliation()
 {
     // When recoverStartupCheckpoints() returns a TransientError/FatalError
@@ -2111,184 +1929,6 @@ void TimerTest::test_QF1_lock_resume_is_LockResume_cause_emitted_once()
     QCOMPARE(t.cause, TimeTracker::TransitionCause::LockResume);
 }
 
-// Issue #1: committing an ongoing segment with a different type must align mode_.
-void TimerTest::test_commit_ongoing_type_edit_changes_mode()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-
-    // 1. Start in Activity mode.
-    tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
-    QVERIFY(tracker.isActive());
-
-    // Capture the live ongoing segment's id and start time so the committed
-    // segment is a plausible replacement (same identity, different type).
-    auto liveOngoing = tracker.getOngoingDuration();
-    QVERIFY(liveOngoing.has_value());
-    QCOMPARE(liveOngoing->type, DurationType::Activity);
-
-    // 2. Build an ongoing TimeDuration with the same id/start but type = Pause,
-    //    simulating what HistoryDialog would commit after the user flips the checkbox.
-    const QDateTime start = liveOngoing->startTime;
-    const QDateTime end   = QDateTime::currentDateTime();
-    TimeDuration editedOngoing = TimeDuration::fromLiveSession(
-        DurationType::Pause, start, end, liveOngoing->segment_id);
-
-    tracker.commitEditedTimeline(Timeline({}, editedOngoing));
-
-    // 3. mode_ must be Pause after the commit.
-    QVERIFY(tracker.isPaused());
-
-    // getOngoingDuration() derives type from mode_, so it should now return Pause.
-    auto postCommit = tracker.getOngoingDuration();
-    QVERIFY(postCommit.has_value());
-    QCOMPARE(postCommit->type, DurationType::Pause);
-
-    // 4. Stop the timer and confirm the persisted row is Pause, not Activity.
-    tracker.useTimerViaButton(Button::Stop);
-    QVERIFY(tracker.isStopped());
-
-    // The completed segment written to fakeDb on stop should be a Pause row.
-    bool foundPause = false;
-    for (const auto& d : fakeDb.storedDurations) {
-        if (d.segment_id == liveOngoing->segment_id && d.type == DurationType::Pause)
-            foundPause = true;
-    }
-    QVERIFY2(foundPause, "persisted row should be Pause after type-edit commit");
-}
-
-// commitEditedTimeline returns an EditCommitResult and aligns mode_
-// with the type of the edited ongoing segment.
-void TimerTest::test_commitEditedTimeline_mode_aligns_with_edited_ongoing_type()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-
-    // Start in Activity mode.
-    tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
-    QVERIFY(tracker.isActive());
-
-    // Build a Pause-typed ongoing segment with the same segment id/start as the
-    // live Activity segment, simulating a type flip in HistoryDialog.
-    auto liveOngoing = tracker.getOngoingDuration();
-    QVERIFY(liveOngoing.has_value());
-    TimeDuration editedOngoing = TimeDuration::fromLiveSession(
-        DurationType::Pause,
-        liveOngoing->startTime,
-        QDateTime::currentDateTime(),
-        liveOngoing->segment_id);
-
-    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
-
-    // commitEditedTimeline must return success and switch mode_ to Pause.
-    const auto result = tracker.commitEditedTimeline(Timeline({}, editedOngoing));
-    QVERIFY(result.ok);
-    QVERIFY(tracker.isPaused());
-
-    // getOngoingDuration() derives type from mode_, so it should now be Pause.
-    auto postCommit = tracker.getOngoingDuration();
-    QVERIFY(postCommit.has_value());
-    QCOMPARE(postCommit->type, DurationType::Pause);
-
-    // D10: exactly one transitioned(Activity->Pause, EditApplied) event --
-    // a History edit flipping the ongoing type must not leave the UI stale.
-    QCOMPARE(transitionedSpy.count(), 1);
-    const auto t = transitionedSpy.first().first().value<TimeTracker::Transition>();
-    QCOMPARE(t.from, TimeTracker::Mode::Activity);
-    QCOMPARE(t.to, TimeTracker::Mode::Pause);
-    QCOMPARE(t.cause, TimeTracker::TransitionCause::EditApplied);
-}
-
-// D10: the mirror direction -- an edited ongoing segment flipped from Pause
-// to Activity must align mode_ AND emit exactly one transitioned(Pause->
-// Activity, EditApplied), not silently leave the button reading CONTINUE.
-void TimerTest::test_D10_editApplied_pause_to_activity_emits_transitioned()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-
-    tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
-    tracker.useTimerViaButton(Button::Pause);
-    QVERIFY(tracker.isPaused());
-
-    auto liveOngoing = tracker.getOngoingDuration();
-    QVERIFY(liveOngoing.has_value());
-    QCOMPARE(liveOngoing->type, DurationType::Pause);
-    TimeDuration editedOngoing = TimeDuration::fromLiveSession(
-        DurationType::Activity,
-        liveOngoing->startTime,
-        QDateTime::currentDateTime(),
-        liveOngoing->segment_id);
-
-    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
-
-    const auto result = tracker.commitEditedTimeline(Timeline({}, editedOngoing));
-
-    QVERIFY(result.ok);
-    QVERIFY(tracker.isActive());
-    QCOMPARE(transitionedSpy.count(), 1);
-    const auto t = transitionedSpy.first().first().value<TimeTracker::Transition>();
-    QCOMPARE(t.from, TimeTracker::Mode::Pause);
-    QCOMPARE(t.to, TimeTracker::Mode::Activity);
-    QCOMPARE(t.cause, TimeTracker::TransitionCause::EditApplied);
-}
-
-// M7: guard against re-arming timer during exclusive edit
-void TimerTest::test_M7_edit_to_activity_during_exclusive_edit_does_not_arm_timer()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-
-    tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
-    tracker.useTimerViaButton(Button::Pause);
-    QVERIFY(tracker.isPaused());
-
-    // Begin exclusive edit (simulates HistoryDialog open)
-    tracker.beginExclusiveEdit();
-
-    auto liveOngoing = tracker.getOngoingDuration();
-    QVERIFY(liveOngoing.has_value());
-    QCOMPARE(liveOngoing->type, DurationType::Pause);
-    TimeDuration editedOngoing = TimeDuration::fromLiveSession(
-        DurationType::Activity,
-        liveOngoing->startTime,
-        QDateTime::currentDateTime(),
-        liveOngoing->segment_id);
-
-    const auto result = tracker.commitEditedTimeline(Timeline({}, editedOngoing));
-
-    QVERIFY(result.ok);
-    QVERIFY(tracker.isActive());
-    QVERIFY2(!tracker.isCheckpointTimerActive_dbg(), "commitEditedTimeline must not re-arm checkpoints while an exclusive edit is in progress");
-
-    // WP6: endExclusiveEdit() no longer restarts the checkpoint timer (that
-    // coupling belonged to the old suspend/resume design). commitEditedTimeline
-    // is dead code with no caller since WP5, so this interim state -- Activity
-    // mode with the timer left inactive by commitEditedTimeline's own dialog_open_
-    // guard above -- is unreachable in production and goes away with the
-    // function itself in WP7b.
-    tracker.endExclusiveEdit();
-    QVERIFY(!tracker.isCheckpointTimerActive_dbg());
-
-    tracker.useTimerViaButton(Button::Stop);
-}
-
 // Disabled history: the store returns Disabled (a no-op) for commitSession.
 // Disabled must NOT be treated as a save failure: stopping must not retain
 // bogus unsaved data, must not bump the retry-failure counter, and must not
@@ -2312,231 +1952,6 @@ void TimerTest::test_disabled_history_stop_keeps_clean_state_no_warning()
     // Assert: Disabled was folded into success, so no failure side effects.
     QCOMPARE(warnSpy.count(), 0);
     QCOMPARE(tracker.hasPendingCommit_dbg(), false);
-}
-
-// commitEditedTimeline re-anchors a checkpoint for an ongoing Activity segment.
-// With history disabled, saveCheckpoint returns Disabled, which must be
-// reported as success, not EditCommitResult::failure.
-void TimerTest::test_disabled_history_commitEditedTimeline_succeeds()
-{
-    // Arrange: real store with history disabled; default checkpoint interval is
-    // non-zero so the checkpoint path inside commitEditedTimeline is exercised.
-    resetDatabaseFile();
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 0));
-    SqliteSessionStore db(settings);
-    TimeTracker tracker(settings, db);
-
-    tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
-    QVERIFY(tracker.isActive());
-
-    // Keep the ongoing segment Activity so maybeReanchorCheckpoint runs saveCheckpoint.
-    auto liveOngoing = tracker.getOngoingDuration();
-    QVERIFY(liveOngoing.has_value());
-    TimeDuration editedOngoing = TimeDuration::fromLiveSession(
-        DurationType::Activity,
-        liveOngoing->startTime,
-        QDateTime::currentDateTime(),
-        liveOngoing->segment_id);
-
-    // Act + Assert: disabled checkpoint write is a no-op, so commit succeeds.
-    const auto result = tracker.commitEditedTimeline(Timeline({}, editedOngoing));
-    QVERIFY(result.ok);
-
-    tracker.useTimerViaButton(Button::Stop);
-}
-
-// Item B: commitEditedTimeline must clear the segment anchor and stop the engine
-// when the edited timeline has no ongoing segment and mode_ != None.
-void TimerTest::test_commitEditedTimeline_clears_anchor_when_no_ongoing()
-{
-    // Arrange: timer running in Activity mode with a valid segment anchor.
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-
-    tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
-    QVERIFY(tracker.isActive());
-    // (!segment_id.isEmpty() is not asserted while running: beginNewSegment()
-    // unconditionally mints a fresh id (timetracker.cpp:233), so the check
-    // could not fail once isActive() is established above.)
-    QVERIFY(tracker.isCheckpointTimerActive_dbg());
-
-    // Build an edited timeline with completed segments but NO ongoing segment.
-    QDateTime now = fixedNow();
-    std::deque<TimeDuration> completed;
-    auto seg = TimeDuration::create(DurationType::Activity, now.addSecs(-60), now);
-    QVERIFY(seg.has_value());
-    completed.push_back(seg.value());
-    Timeline editedTimeline(completed, std::nullopt);
-
-    // Set up spies: the clear path must emit exactly one transition, to None.
-    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
-    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
-
-    // Act: commit a timeline with no ongoing segment while mode_ != None.
-    const auto commitResult = tracker.commitEditedTimeline(editedTimeline);
-
-    // Assert: commit succeeded.
-    QVERIFY(commitResult.ok);
-
-    // (segment_id.isEmpty() / !segment_start_time.isValid() are not asserted
-    // here: this commit takes the "no ongoing, mode_ != None" branch
-    // (timetracker.cpp:1200-1207), which calls session_.clearSegment()
-    // (:1204) straight-line before assigning mode_ = Mode::None (:1206) --
-    // one of exactly two sites in production code that ever assigns
-    // Mode::None, each paired the same way (the other is stopTimer(),
-    // timetracker.cpp:853-854). So isStopped() below already implies both
-    // checks; they could not fail.)
-
-    // Mode is None.
-    QVERIFY2(tracker.isStopped(),
-             "mode_ must be None after commit with no ongoing segment");
-
-    // Checkpoint timer is not running.
-    QVERIFY2(!tracker.isCheckpointTimerActive_dbg(),
-             "checkpoint timer must be stopped after commit with no ongoing segment");
-
-    // getOngoingDuration() returns nullopt.
-    QVERIFY2(!tracker.getOngoingDuration().has_value(),
-             "getOngoingDuration() must return nullopt after anchor is cleared");
-
-    // stopped(EditApplied) was emitted exactly once; transitioned() confirms
-    // it was the ONE real transition for this commit (no other mode change).
-    QCOMPARE(stoppedSpy.count(), 1);
-    QCOMPARE(stoppedSpy.first().first().value<TimeTracker::StopReason>(),
-             TimeTracker::StopReason::EditApplied);
-    QCOMPARE(transitionedSpy.count(), 1);
-    QCOMPARE(transitionedSpy.first().first().value<TimeTracker::Transition>().to,
-             TimeTracker::Mode::None);
-}
-
-// Item B: same clear-on-no-ongoing behavior when the engine is in Pause mode.
-void TimerTest::test_commitEditedTimeline_clears_anchor_when_no_ongoing_from_pause()
-{
-    // Arrange: timer running, then paused, so mode_ == Pause with a valid anchor.
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-
-    tracker.useTimerViaButton(Button::Start);
-    QTest::qWait(10);
-    tracker.useTimerViaButton(Button::Pause);
-    QVERIFY(tracker.isPaused());
-    // (!segment_id.isEmpty() is not asserted while running: beginNewSegment()
-    // unconditionally mints a fresh id (timetracker.cpp:233), so the check
-    // could not fail once isPaused() is established above.)
-
-    // Build an edited timeline with completed segments but NO ongoing segment.
-    QDateTime now = fixedNow();
-    std::deque<TimeDuration> completed;
-    auto seg = TimeDuration::create(DurationType::Activity, now.addSecs(-60), now);
-    QVERIFY(seg.has_value());
-    completed.push_back(seg.value());
-    Timeline editedTimeline(completed, std::nullopt);
-
-    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
-    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
-
-    // Act: commit a timeline with no ongoing segment while mode_ == Pause.
-    const auto commitResult = tracker.commitEditedTimeline(editedTimeline);
-
-    // Assert: commit succeeded and the anchor is fully cleared.
-    QVERIFY(commitResult.ok);
-    // (segment_id.isEmpty() / !segment_start_time.isValid() are not asserted
-    // here: this commit takes the "no ongoing, mode_ != None" branch
-    // (timetracker.cpp:1200-1207), which calls session_.clearSegment()
-    // (:1204) straight-line before assigning mode_ = Mode::None (:1206) --
-    // one of exactly two sites in production code that ever assigns
-    // Mode::None, each paired the same way (the other is stopTimer(),
-    // timetracker.cpp:853-854). So isStopped() below already implies both
-    // checks; they could not fail.)
-    QVERIFY2(tracker.isStopped(),
-             "mode_ must be None after commit with no ongoing segment");
-    QVERIFY2(!tracker.isCheckpointTimerActive_dbg(),
-             "checkpoint timer must be stopped after commit with no ongoing segment");
-    QVERIFY2(!tracker.getOngoingDuration().has_value(),
-             "getOngoingDuration() must return nullopt after anchor is cleared");
-
-    // stopped(EditApplied) was emitted exactly once; transitioned() confirms
-    // it was the ONE real transition, correctly from Pause to None.
-    QCOMPARE(stoppedSpy.count(), 1);
-    QCOMPARE(stoppedSpy.first().first().value<TimeTracker::StopReason>(),
-             TimeTracker::StopReason::EditApplied);
-    QCOMPARE(transitionedSpy.count(), 1);
-    const auto t = transitionedSpy.first().first().value<TimeTracker::Transition>();
-    QCOMPARE(t.from, TimeTracker::Mode::Pause);
-    QCOMPARE(t.to, TimeTracker::Mode::None);
-}
-
-// A14: commitEditedTimeline must not half-adopt an ongoing segment while the
-// engine is already stopped (mode_ == None). Adopting segment_id/start time
-// without also flipping mode_ would leave a state SessionState documents as
-// impossible (segment_id "Empty when the timer is stopped"). The fix refuses
-// the ongoing entirely: engine stays stopped, anchor stays clear, no signal.
-void TimerTest::test_commitEditedTimeline_ignores_ongoing_when_already_stopped()
-{
-    // Arrange: engine never started -- mode_ == None, no segment anchor.
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    const QDateTime start(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
-    FakeClock clock(start);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    QVERIFY(tracker.isStopped());
-    QVERIFY(!tracker.getOngoingDuration().has_value());
-
-    // Build an edited timeline with an ongoing segment (as if HistoryDialog
-    // still held one from before the engine stopped), but mode_ is None now.
-    TimeDuration editedOngoing = TimeDuration::fromLiveSession(
-        DurationType::Activity, start, start.addSecs(600));
-
-    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
-    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
-
-    // Act: commit while mode_ == None.
-    const auto result = tracker.commitEditedTimeline(Timeline({}, editedOngoing));
-
-    // Assert: commit still reports success; the ongoing segment is ignored.
-    QVERIFY(result.ok);
-    QVERIFY2(tracker.isStopped(), "engine must remain stopped, not half-started");
-    // This test is the one documented exception the seam-removal series does
-    // not convert: no public observable exists for the A14 impossible state.
-    // checkDurationInvariants()'s invariant 4 (timetracker.cpp:~303) asserts
-    // centrally that mode_ == Mode::None implies segment_id/segment_start_time
-    // are clear, and it is unconditionally called at the end of
-    // commitEditedTimeline() (timetracker.cpp:~1224) regardless of which
-    // branch ran -- but every production reader of the anchor (isStopped(),
-    // getOngoingDuration()) gates on mode_ first, so neither can distinguish
-    // a correctly-refused half-adopt from a corrupted one, and the
-    // invariant's only report channel is a qWarning that is NOT enforced on
-    // Windows (qtest/main.cpp's message handler gates QWARN-as-failure inside
-    // #ifndef _WIN32). If the "already stopped" branch (timetracker.cpp:
-    // ~1206-1212) were corrupted to call adoptOngoingSegment() instead of
-    // refusing, segment_id/segment_start_time would become non-empty while
-    // mode_ stayed None -- exactly the "impossible state" A14 guards against
-    // -- and nothing but these two direct reads would catch it on MSVC.
-    QVERIFY2(tracker.sessionState_dbg().segment_id.isEmpty(),
-             "segment_id must stay empty -- refused, not half-adopted");
-    QVERIFY2(!tracker.sessionState_dbg().segment_start_time.isValid(),
-             "segment_start_time must stay invalid -- refused, not half-adopted");
-    QVERIFY2(!tracker.getOngoingDuration().has_value(),
-             "getOngoingDuration() must return nullopt: mode_ == None");
-
-    // No mode-transition signal fires at all: the engine state did not change.
-    QCOMPARE(stoppedSpy.count(), 0);
-    QCOMPARE(transitionedSpy.count(), 0);
 }
 
 // Phase 2 clock-seam enabler: prove the injected now-provider fully controls the
@@ -3816,24 +3231,6 @@ void TimerTest::test_A2_repeated_failed_start_neither_starts_nor_mutates_payload
     QVERIFY(tracker.drainForShutdown().clean());
 }
 
-void TimerTest::test_F1_loadHistoryFromStore_forwards_status()
-{
-    // F1: loadHistoryFromStore() must forward the store's LoadResult (status
-    // included) instead of discarding the status and returning just the
-    // (empty-on-failure) deque — the contract violation the rest of F1 chain
-    // followed from.
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    fakeDb.loadDurationsResult.status = SessionStoreResult::TransientError;
-    TimeTracker tracker(settings, fakeDb);
-
-    const LoadResult result = tracker.loadHistoryFromStore();
-
-    QCOMPARE(result.status, SessionStoreResult::TransientError);
-}
-
 // ============================================================================
 // A3 (R11-001): drainForShutdown() retries a pending commit payload
 // independent of tracker mode. Invariant: shutdown cannot report clean while
@@ -4440,41 +3837,6 @@ void TimerTest::test_C4_transient_checkpoint_failure_is_silent_and_tracking_cont
     QVERIFY(tracker.drainForShutdown().clean());
 }
 
-// C4 finding 1: replaceAll()'s Fatal used to reach the caller (HistoryDialog)
-// directly and never latch fatal_state_latched_ at all -- the ONLY surviving
-// Fatal in the concrete store (its post-backup reopen) was therefore
-// unreachable in production. Assert it now latches and refuses Start exactly
-// like a Fatal from any other operation.
-void TimerTest::test_C4_fatal_replaceAll_latches_and_refuses_subsequent_start()
-{
-    // Arrange
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-    QSignalSpy fatalSpy(&tracker, &TimeTracker::fatalError);
-
-    // Act: replaceAll (as HistoryDialog would call it) returns Fatal.
-    fakeDb.replaceDurationsResult = SessionStoreResult::fatal("injected fatal replaceAll failure");
-    const SessionStoreResult r = tracker.replaceAll(Timeline({}, std::nullopt), Timeline({}, std::nullopt));
-
-    // Assert: the caller still sees the Fatal result (HistoryDialog needs it
-    // to know the save failed), AND it latched the tracker with exactly one
-    // modal error.
-    QCOMPARE(r.category, SessionStoreResult::FatalError);
-    QVERIFY(tracker.isFatalLatched());
-    QCOMPARE(fatalSpy.count(), 1);
-
-    // Act: Start is attempted afterward, even though the store recovers.
-    fakeDb.replaceDurationsResult = SessionStoreResult::success();
-    tracker.useTimerViaButton(Button::Start);
-
-    // Assert: refused -- the latch survives.
-    QVERIFY(!tracker.isActive());
-    QVERIFY(tracker.isStopped());
-}
-
 // C4 finding 2: enterFatalState() used to call stopTimer() re-entrantly from
 // deep inside an in-progress transition. On the Pause->Activity resume, the
 // nested stop set mode_ = None and emitted stopped() BEFORE startTimer()'s
@@ -4567,11 +3929,9 @@ void TimerTest::test_C4_fatal_pause_transition_ends_stopped_not_impossible_state
     QVERIFY(tracker.isFatalLatched());
     QVERIFY(tracker.isStopped());
     // (segment_id.isEmpty() / !segment_start_time.isValid() are not asserted
-    // here: mode_ is assigned Mode::None at exactly two sites in production
-    // code -- stopTimer() (timetracker.cpp:853), straight-line followed by
-    // session_.clearSegment() (:854), and commitEditedTimeline's no-ongoing
-    // branch (:1206), preceded by clearSegment() (:1204) -- so isStopped()
-    // above already implies both checks; they could not fail.)
+    // here: mode_ is assigned Mode::None at stopTimer() (timetracker.cpp:853),
+    // straight-line followed by session_.clearSegment() (:854) -- so
+    // isStopped() above already implies both checks; they could not fail.)
     QCOMPARE(stoppedSpy.count(), 1);
     QCOMPARE(stoppedSpy.last().first().value<TimeTracker::StopReason>(),
              TimeTracker::StopReason::FatalStoreError);

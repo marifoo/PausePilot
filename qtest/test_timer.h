@@ -43,10 +43,6 @@ private slots:
     void test_timer_retry_append_failure_then_success_preserves_segments();
     void test_timer_retry_failure_keeps_unsaved_state_and_durations();
 
-    // Issue 9: retry cache cleared after successful replaceAll
-    void test_replaceAll_success_clears_unsaved_cache();
-    void test_replaceAll_failure_keeps_unsaved_cache();
-
     // ========================================================================
     // A2 (R16-001/R09-001): PendingCommit replaces the retry flag/cache/
     // counter with one immutable-payload lifecycle. There is no retry
@@ -78,7 +74,6 @@ private slots:
     void test_session_state_start_to_pause_transition();
     void test_session_state_pause_to_activity_transition();
     void test_session_state_stop_clears_segment();
-    void test_session_state_adopted_segment_start_time_anchors_committed_row();
 
     // Boot time + hasEntriesForDate tri-state tests (T18)
     void test_boot_time_not_added_when_history_disabled();
@@ -143,33 +138,11 @@ private slots:
     // Destructor ordering: crash-absence smoke test
     void test_T8_destructor_does_not_crash_while_active();
 
-    // beginExclusiveEdit/endExclusiveEdit checkpoint guard
-    void test_T2_commitEditedTimeline_skips_checkpoint_while_dialog_open();
-    void test_C6_commitEditedTimeline_writes_checkpoint_after_endExclusiveEdit();
-
     // MarkerResult::Error skips orphan reconciliation
     void test_S12_marker_error_skips_reconciliation();
 
-    // Commit of an ongoing type edit aligns mode_
-    void test_commit_ongoing_type_edit_changes_mode();
-    // commitEditedTimeline returns success and aligns mode_ with edited ongoing type
-    void test_commitEditedTimeline_mode_aligns_with_edited_ongoing_type();
-    void test_D10_editApplied_pause_to_activity_emits_transitioned();
-
-    // M7: exclusive-edit guard
-    void test_M7_edit_to_activity_during_exclusive_edit_does_not_arm_timer();
-
     // Disabled history is a no-op, not a save/checkpoint failure
     void test_disabled_history_stop_keeps_clean_state_no_warning();
-    void test_disabled_history_commitEditedTimeline_succeeds();
-
-    // Item B: commitEditedTimeline clears anchor when edited timeline has no ongoing
-    void test_commitEditedTimeline_clears_anchor_when_no_ongoing();
-    void test_commitEditedTimeline_clears_anchor_when_no_ongoing_from_pause();
-
-    // A14: commitEditedTimeline must refuse to half-adopt an ongoing segment
-    // while mode_ == None (engine already stopped).
-    void test_commitEditedTimeline_ignores_ongoing_when_already_stopped();
 
     // QF1: signal contract — cause distinguishes button vs. lock-driven
     // transitions. Originally pinned via which of started/paused/modeChanged
@@ -211,10 +184,6 @@ private slots:
     void test_F3_pause_failure_marks_unsaved();
     void test_F3_backpause_failure_marks_unsaved();
     void test_F3_recovery_after_pause_failure_clears_unsaved();
-
-    // F1: loadHistoryFromStore() forwards the store's LoadResult status
-    // instead of discarding it (the contract violation the rest of F1 follows from).
-    void test_F1_loadHistoryFromStore_forwards_status();
 
     // ========================================================================
     // WP2 (midnight_close_plan.md): the engine revokes an open History edit
@@ -318,10 +287,6 @@ private slots:
     // the same call path and can succeed once the store recovers.
     void test_C4_transient_checkpoint_failure_is_silent_and_tracking_continues();
 
-    // C4 finding 1: a Fatal from replaceAll() must latch the tracker exactly
-    // like a Fatal from any other operation (previously it reached the
-    // caller directly and never latched).
-    void test_C4_fatal_replaceAll_latches_and_refuses_subsequent_start();
     // C4 finding 2: a Fatal commit on the Pause->Activity resume must stop
     // the tracker at a safe point AFTER the transition completes, not via a
     // nested stopTimer() mid-transition -- so no started() signal follows

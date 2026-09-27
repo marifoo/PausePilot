@@ -4478,7 +4478,7 @@ void DatabaseTest::test_C3_replaceAll_rejects_cross_day_payload()
 {
     // MUST-FIX1 (user decision, review packet C3): replaceAll() now rejects a
     // cross-day row the same uniform way as commitSession()/saveCheckpoint(),
-    // with no allowCrossDay exception. HistoryEditSession no longer calls
+    // with no allowCrossDay exception. HistoryDialog no longer calls
     // replaceAll() at all (WP5's scoped save uses saveHistoryDays() instead);
     // this test pins replaceAll()'s own guard as the final backstop for any
     // other caller.

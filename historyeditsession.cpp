@@ -1,4 +1,5 @@
 #include "historyeditsession.h"
+#include <QHash>
 #include <QSet>
 #include <algorithm>
 

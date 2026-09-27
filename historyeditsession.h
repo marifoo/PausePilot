@@ -2,7 +2,6 @@
 #define HISTORYEDITSESSION_H
 
 #include <QDate>
-#include <QHash>
 #include <optional>
 #include <vector>
 #include <deque>

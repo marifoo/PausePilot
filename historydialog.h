@@ -20,7 +20,7 @@ class QPushButton;
  * TimerExclusiveEditGuard — RAII guard for TimeTracker::beginExclusiveEdit / endExclusiveEdit.
  *
  * Calls beginExclusiveEdit() on construction and endExclusiveEdit() on destruction,
- * so resume cannot be forgotten on accept, reject, or early-return paths.
+ * so the exclusive edit cannot be left open on accept, reject, or early-return paths.
  */
 class TimerExclusiveEditGuard {
 public:

@@ -1098,7 +1098,7 @@ SessionStoreResult SqliteSessionStore::replaceAll(const Timeline& history, const
     allDurations.insert(allDurations.end(), currentSessionDurations.begin(), currentSessionDurations.end());
 
     // C3 (R13-001/R14-001): reject the entire payload before any mutation, the
-    // same uniform rule as every other write boundary. HistoryEditSession no
+    // same uniform rule as every other write boundary. HistoryDialog no
     // longer calls replaceAll() at all (WP5's scoped save uses
     // saveHistoryDays() instead), so this guard is now the final backstop for
     // any other caller only.

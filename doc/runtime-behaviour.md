@@ -31,13 +31,13 @@ itself, so the GUI can react without keeping its own state:
   every real mode change, button/lock/midnight/edit/shutdown-driven alike.
   `Transition` holds `from`, `to`, and a `TransitionCause` (`ButtonStart`,
   `ButtonPause`, `ButtonStop`, `LockAutopause`, `LockResume`,
-  `MidnightScheduled`, `MidnightWatchdog`, `Shutdown`, `EditApplied`,
+  `MidnightScheduled`, `MidnightWatchdog`, `Shutdown`,
   `FatalStoreError`). `ContentWidget::onTransitioned` reduces it to a GUI
   update; there is no separate per-cause signal for each transition kind
   the way there used to be.
 - `TimeTracker::stopped(StopReason)` — kept as a separate terminal-only
   event (`ButtonStop`, `MidnightScheduled`, `MidnightWatchdog`, `Shutdown`,
-  `EditApplied`, `FatalStoreError`), derived from the same emission point as
+  `FatalStoreError`), derived from the same emission point as
   `transitioned()`, for observers that only care "did tracking stop, and
   why" (today just `HealthMonitor::reset`).
 
@@ -73,7 +73,7 @@ worth quoting rather than restating: previously these fields were scattered
 as raw members, making it easy for code paths to mutate them as side-effects.
 Grouping them into a struct with explicit, named transition methods
 (`beginNewSegment`, `clearSegment`, `updateSegmentStartTime`,
-`resetForNewSession`, `adoptOngoingSegment`) ensures every mutation is
+`resetForNewSession`) ensures every mutation is
 logged at debug level and is therefore traceable in the log output.
 
 The struct is owned by `TimeTracker` and is not exposed to callers — `Timeline`

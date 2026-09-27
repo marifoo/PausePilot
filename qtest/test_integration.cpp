@@ -2,7 +2,6 @@
 #include "fakesessionstore.h"
 #include "fakeclock.h"
 #include "shutdowncoordinator.h"
-#include "../historyeditsession.h"
 #include <QtTest>
 #include <QSignalSpy>
 #ifdef Q_OS_UNIX

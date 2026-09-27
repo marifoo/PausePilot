@@ -12,9 +12,10 @@
  *   assumed index. A page is editable exactly when session_.pageEditable(i)
  *   is true (H5/WP2's per-date permission rule); the ongoing row (if any) is
  *   always read-only and never gets a type box.
- * - Safety: Checkpoints are paused while this dialog is open via
- *   TimerExclusiveEditGuard (beginExclusiveEdit on construction, endExclusiveEdit
- *   on destruction — guaranteed on all exit paths).
+ * - Safety: TimerExclusiveEditGuard marks the exclusive edit open and captures
+ *   its context (beginExclusiveEdit on construction, endExclusiveEdit on
+ *   destruction — guaranteed on all exit paths). Checkpoints keep running
+ *   while the dialog is open (WP6).
  * - Close blocking: accept() runs saveChanges() before closing. A failed DB
  *   save or a declined merge confirmation leaves the dialog open so the user
  *   can correct the situation or cancel explicitly.

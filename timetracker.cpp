@@ -62,14 +62,13 @@ TimeTracker::TransitionCause causeFromStopReason(TimeTracker::StopReason reason)
     case TimeTracker::StopReason::MidnightScheduled:  return TimeTracker::TransitionCause::MidnightScheduled;
     case TimeTracker::StopReason::MidnightWatchdog:   return TimeTracker::TransitionCause::MidnightWatchdog;
     case TimeTracker::StopReason::Shutdown:           return TimeTracker::TransitionCause::Shutdown;
-    case TimeTracker::StopReason::EditApplied:        return TimeTracker::TransitionCause::EditApplied;
     case TimeTracker::StopReason::FatalStoreError:    return TimeTracker::TransitionCause::FatalStoreError;
     }
     Q_UNREACHABLE();
 }
 
 // The inverse, for deriving stopped() from a transitioned() event whose
-// `to` is Mode::None. Only ever called for the six causes that can reach
+// `to` is Mode::None. Only ever called for the five causes that can reach
 // None -- every other TransitionCause never produces a to-None transition.
 // Every enumerator is listed explicitly (no `default:`) so that adding a
 // new TransitionCause without updating this function is a -Wswitch build
@@ -83,7 +82,6 @@ TimeTracker::StopReason stopReasonFromCause(TimeTracker::TransitionCause cause)
     case TimeTracker::TransitionCause::MidnightScheduled: return TimeTracker::StopReason::MidnightScheduled;
     case TimeTracker::TransitionCause::MidnightWatchdog:  return TimeTracker::StopReason::MidnightWatchdog;
     case TimeTracker::TransitionCause::Shutdown:          return TimeTracker::StopReason::Shutdown;
-    case TimeTracker::TransitionCause::EditApplied:       return TimeTracker::StopReason::EditApplied;
     case TimeTracker::TransitionCause::FatalStoreError:   return TimeTracker::StopReason::FatalStoreError;
     case TimeTracker::TransitionCause::ButtonStart:
     case TimeTracker::TransitionCause::ButtonPause:
@@ -194,17 +192,6 @@ void SessionState::resetForNewSession()
     Logger::Log(QString("[STATE] resetForNewSession: durations %1 -> 0").arg(oldSize));
 }
 
-void SessionState::adoptOngoingSegment(const TimeDuration& ongoing)
-{
-    SegmentId oldId = segment_id;
-    QDateTime oldStart = segment_start_time;
-    segment_id = ongoing.segment_id;
-    segment_start_time = ongoing.startTime;
-    Logger::Log(QString("[STATE] adoptOngoingSegment: segId '%1' -> '%2', start %3 -> %4")
-        .arg(oldId.toString(), segment_id.toString(),
-             oldStart.toString(Qt::ISODate), ongoing.startTime.toString(Qt::ISODate)));
-}
-
 // ============================================================================
 // Debug-build state invariant checking
 // ============================================================================
@@ -215,7 +202,7 @@ void SessionState::adoptOngoingSegment(const TimeDuration& ongoing)
  * Checks structural invariants on the in-memory duration segments.
  *
  * Called in debug builds after every mutator that can reorder or add
- * duration segments (button/lock transitions, commitEditedTimeline).
+ * duration segments (button/lock transitions).
  * Catches data-structure corruption early — before
  * it propagates to the DB or produces confusing UI behavior. Violations are
  * logged as warnings (not fatal) so tests surface them as QWARN output.
@@ -999,139 +986,6 @@ Timeline TimeTracker::completedTimeline() const
     return Timeline(session_.durations, std::nullopt);
 }
 
-/**
- * Attempts to write a fresh checkpoint re-anchored to the given ongoing segment.
- *
- * No-op (returns true) when checkpoints are not applicable: not in Activity
- * mode, the segment is not an Activity segment, the segment has no positive
- * duration / invalid timestamps, or a dialog is open / the session is
- * locked. Disabled history is also treated as success. Returns
- * false only on a real checkpoint write failure (caller bug or DB error).
- *
- * C4 fix round 2 (MEDIUM-4 audit): a Fatal result here calls enterFatalState()
- * directly (below) but, like every latch site, does not stop the tracker
- * itself. This function's ONLY caller is commitEditedTimeline(), which
- * already checks the latch and stops (via stopIfLatched()) right after this
- * call returns -- so no separate post-check stop is needed here. (It is NOT
- * reached from the periodic checkpoint timer -- that path is
- * saveCheckpoint_locked(), which has its own post-check stop.)
- */
-bool TimeTracker::maybeReanchorCheckpoint(const TimeDuration& seg)
-{
-    if (mode_ != Mode::Activity || seg.type != DurationType::Activity)
-        return true;
-    if (seg.duration() <= 0 || !seg.startTime.isValid() || !seg.endTime.isValid())
-        return true;
-    if (dialog_open_ || is_locked_)
-        return true;
-
-    const SessionStoreResult cpResult = db_.saveCheckpoint(seg.type,
-                                                           seg.startTime,
-                                                           seg.endTime,
-                                                           session_.segment_id);
-    if (cpResult.okOrDisabled()) {
-        // Disabled history is a no-op, not a checkpoint write failure.
-        return true;
-    } else if (cpResult.category == SessionStoreResult::CallerBug) {
-        Logger::Log("[CHECKPOINT] maybeReanchorCheckpoint: saveCheckpoint caller bug: " + cpResult.message);
-        return false;
-    } else if (cpResult.category == SessionStoreResult::FatalError) {
-        Logger::Log("[CHECKPOINT] maybeReanchorCheckpoint: Fatal DB error saving checkpoint: " + cpResult.message);
-        // C4 (R05-006): route through the one shared latch/dialog handler.
-        enterFatalState(cpResult.message);
-        return false;
-    } else {
-        Logger::Log("[CHECKPOINT] maybeReanchorCheckpoint: saveCheckpoint failed: " + cpResult.message);
-        return false;
-    }
-}
-
-/**
- * Atomically replaces the in-memory durations and re-anchors checkpoint tracking
- * from an edited Timeline.
- *
- * This is the sole external entry point for overwriting session_.durations from
- * outside TimeTracker (e.g., when HistoryDialog saves edits). It couples the two
- * operations that must always happen together:
- *   1. Replace the completed-segment deque (edited.completed()).
- *   2. Re-anchor checkpoint tracking so the next checkpoint targets the correct
- *      DB row and wall-clock range for the ongoing segment (edited.ongoing()).
- *
- * Without the coupling, a caller could replace durations but forget to reset
- * checkpoint tracking, causing stale segment IDs or start times to persist — a
- * bug that the compiler cannot catch if the operations are separate public methods.
- *
- * When edited.ongoing() is std::nullopt and the engine is running (mode_ != None),
- * the segment anchor is cleared, the checkpoint timer is stopped, mode_ is set to
- * None, and stopped(StopReason::EditApplied) is emitted.
- */
-TimeTracker::EditCommitResult TimeTracker::commitEditedTimeline(const Timeline& edited)
-{
-    QMutexLocker locker(&mutex_);
-    const std::deque<TimeDuration>& newDurations = edited.completed();
-    const std::optional<TimeDuration>& ongoing = edited.ongoing();
-
-    session_.durations = newDurations;
-    pending_commit_.clear();
-
-    bool checkpointOk = true;
-    if (ongoing.has_value() && mode_ != Mode::None) {
-        const TimeDuration& seg = ongoing.value();
-        session_.adoptOngoingSegment(seg);
-
-        // Align mode_ with the edited ongoing segment type so the live row and
-        // the next checkpoint/stop reflect the user's choice rather than the
-        // pre-edit mode. (adoptOngoingSegment intentionally ignores type.)
-        const Mode desired = (seg.type == DurationType::Activity) ? Mode::Activity : Mode::Pause;
-        if (mode_ != desired) {
-            const Mode from = mode_;
-            mode_ = desired;
-            if (desired == Mode::Activity) {
-                if (!is_locked_ && !dialog_open_) {
-                    checkpointTimer_.start();   // checkpoints run only in Activity and only while not suspended
-                }
-            } else {
-                checkpointTimer_.stop();
-            }
-            emitTransition(from, desired, TransitionCause::EditApplied);
-        }
-
-        checkpointOk = maybeReanchorCheckpoint(seg);
-        // C4 (finding 2): a Fatal checkpoint write above latches the engine
-        // but does NOT stop it (enterFatalState() only latches) -- stop here,
-        // now that this commit's own state changes are done, using a freshly
-        // captured `now` (this operation has no earlier timestamp of its own
-        // to reuse).
-        stopIfLatched(now_provider_());
-    } else if (ongoing.has_value()) {
-        // mode_ == None: the engine is stopped. Adopting the segment identity
-        // here would set segment_id/segment_start_time while mode_ == None —
-        // the state SessionState documents as impossible (segment_id is
-        // "Empty when the timer is stopped"). Refuse the half-adopt: the
-        // ongoing segment is ignored and the engine stays stopped.
-        Logger::Log("[HISTORY] commitEditedTimeline: ignoring edited ongoing segment; engine is already stopped (mode_ == None)");
-    } else if (mode_ != Mode::None) {
-        // The edited timeline has no ongoing segment: the engine must stop.
-        // Clear the anchor so no stale segment_id remains after the commit.
-        const Mode from = mode_;
-        session_.clearSegment();
-        checkpointTimer_.stop();
-        mode_ = Mode::None;
-        emitTransition(from, Mode::None, TransitionCause::EditApplied);
-    }
-
-#ifndef QT_NO_DEBUG
-    checkDurationInvariants();
-#endif
-    return checkpointOk ? EditCommitResult::success()
-                        : EditCommitResult::failure("checkpoint write failed after edit commit");
-}
-
-LoadResult TimeTracker::loadHistoryFromStore()
-{
-    QMutexLocker locker(&mutex_);
-    return db_.loadDurations();
-}
 
 std::optional<TimeDuration> TimeTracker::getOngoingDuration() const
 {
@@ -1283,7 +1137,7 @@ void TimeTracker::enterFatalState(const QString& message)
     emit fatalError("Database error: " + message);
     // C4 (finding 2): deliberately does NOT stop the tracker here. This can
     // run deep inside an in-progress transition (startTimer,
-    // finalizePauseTransition, commitEditedTimeline, ...) that keeps
+    // finalizePauseTransition, ...) that keeps
     // executing after logDbResultOrWarn()/this call returns; stopping mid-
     // transition desyncs mode_/session_ from whatever the transition does
     // next (e.g. emits started() after mode_ was already forced to None).
@@ -1381,26 +1235,6 @@ void TimeTracker::retryPendingDiscards()
     }
 }
 
-SessionStoreResult TimeTracker::replaceAll(const Timeline& history, const Timeline& session)
-{
-    QMutexLocker locker(&mutex_);
-    const SessionStoreResult result = db_.replaceAll(history, session);
-    // C4 (finding 1): route through the one shared latch/dialog handler --
-    // previously a Fatal from replaceAll reached the caller (HistoryDialog)
-    // directly and never latched fatal_state_latched_ at all.
-    logDbResultOrWarn(result, "replaceAll");
-    if (result.okOrDisabled()) {
-        // DB is now authoritative; a stale pending commit must not survive past here.
-        pending_commit_.replaceSucceeded();
-    }
-    // C4 (finding 2): a Fatal result above latches the engine but does NOT
-    // stop it (enterFatalState() only latches) -- stop here, using a freshly
-    // captured `now` (this operation has no earlier timestamp of its own).
-    // stopTimer() itself is a no-op when already in Mode::None, so the
-    // explicit mode_ check the pre-LOW-8 code had here was redundant.
-    stopIfLatched(now_provider_());
-    return result;
-}
 
 EntriesForDateResult TimeTracker::hasEntriesForDate(const QDate& date)
 {
