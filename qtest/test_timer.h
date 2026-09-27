@@ -239,15 +239,13 @@ private slots:
     // ========================================================================
     // A4 (R05-001): a failed checkpoint discard must retain a durable intent
     // (not just log-and-forget) that blocks clean marking until resolved,
-    // survives Transient/Fatal failures, retries at normal persistence
+    // survives Transient failures, retries at normal persistence
     // opportunities and at drainForShutdown(), and never mutates fake state
     // on Disabled or failure.
     // ========================================================================
 
     // A transient discard failure retains the intent and forbids clean marking.
     void test_A4_discard_transient_failure_retains_intent_and_blocks_clean_mark();
-    // Same, but Fatal -- also retained (C4 owns the latch; A4 only retains).
-    void test_A4_discard_fatal_failure_retains_intent_and_blocks_clean_mark();
     // Disabled resolves the intent as a contractual no-op and does not mutate
     // the fake's checkpoint records.
     void test_A4_discard_disabled_resolves_intent_without_mutating_checkpoints();
@@ -262,46 +260,19 @@ private slots:
     void test_A4_drain_incomplete_while_discard_unresolved();
 
     // ========================================================================
-    // C4 (R05-006): FatalError latches TimeTracker into one unavailable state.
-    // A Fatal result from ANY store operation stops the current session
-    // through the normal pending lifecycle, disables Start until restart,
-    // and shows exactly one modal error; later failures (Fatal or not) never
-    // repeat the dialog. A Transient periodic checkpoint failure, by
-    // contrast, is a logged, UI-silent missed snapshot: tracking continues
-    // and the next ordinary checkpoint interval retries through the same
-    // call path.
+    // C4 (R05-006), post-WP10: FatalError and the fatal latch are gone (their
+    // last production producer was removed in WP9). Only the CallerBug
+    // branches below remain, plus a Transient periodic checkpoint failure,
+    // which is a logged, UI-silent missed snapshot: tracking continues and
+    // the next ordinary checkpoint interval retries through the same call
+    // path.
     // ========================================================================
 
-    // A Fatal periodic checkpoint failure stops tracking immediately and
-    // shows exactly one modal error.
-    void test_C4_fatal_checkpoint_failure_latches_and_stops_tracking();
-    // Start is refused (no-op) once the fatal state is latched, even after
-    // the store recovers -- only a fresh TimeTracker (i.e. a restart) can
-    // clear it.
-    void test_C4_fatal_latch_disables_start_even_after_store_recovers();
-    // Two independent Fatal failures across different operations must show
-    // exactly one modal error in total.
-    void test_C4_fatal_error_shows_dialog_exactly_once();
     // A transient periodic checkpoint failure is silent (no dialog) and
     // tracking continues; the very next checkpoint interval retries through
     // the same call path and can succeed once the store recovers.
     void test_C4_transient_checkpoint_failure_is_silent_and_tracking_continues();
 
-    // C4 finding 2: a Fatal commit on the Pause->Activity resume must stop
-    // the tracker at a safe point AFTER the transition completes, not via a
-    // nested stopTimer() mid-transition -- so no started() signal follows
-    // the stopped() signal (the stuck-UI bug).
-    void test_C4_fatal_pauseresume_commit_stops_without_started_after_stopped();
-    // C4 finding 2: same defect on the Activity->Pause transition
-    // (finalizePauseTransition, used by pauseTimer/backpauseTimer) -- the
-    // tracker must end up cleanly stopped, never in the impossible state of
-    // segment_id/segment_start_time set while mode_ == None.
-    void test_C4_fatal_pause_transition_ends_stopped_not_impossible_state();
-    // C4 finding 2: a Fatal commit encountered while discarding a
-    // cross-midnight ongoing segment must still report
-    // StopReason::MidnightWatchdog, not FatalStoreError -- the fatal latch
-    // must not consume the transition out from under the watchdog's own stop.
-    void test_C4_fatal_during_midnight_discard_still_reports_midnightwatchdog();
     // C4 fix round 2 (HIGH-2): a CallerBug on stop-commit is NOT dropped --
     // it retains the payload for retry like any other failure (normal
     // okOrDisabled() path), does not reset the session, and must not write
@@ -315,17 +286,6 @@ private slots:
     // discard retry is retained (not resolved) exactly like any other
     // failure -- it must keep blocking clean-shutdown marking.
     void test_C4_callerBug_discard_retry_is_retained_not_resolved();
-
-    // C4 fix round 2 (HIGH-1): enterFatalState() emits fatalError (a single
-    // modal dialog) instead of userWarning (a tray balloon/status message)
-    // for the fatal transition itself.
-    void test_C4_fatalError_emitted_once_userWarning_not_emitted_for_fatal();
-
-    // C4 fix round 3 (F1): a Fatal discard-retry latch with no pending
-    // commit payload must still refuse Start -- retryUnsavedDurations()
-    // returning true (no pending commit) must not let startTimer()'s None
-    // branch fall through to Mode::Activity while latched.
-    void test_C4_start_refused_when_discard_retry_latches_with_no_pending_commit();
 
     // D2 (R11-003): a backward wall-clock step (NTP/manual/DST) makes `now`
     // precede the live segment's captured start. Stop drops only the
@@ -470,12 +430,6 @@ private slots:
     // mis-mapped to ButtonStop by either the cause or the legacy stopped()
     // StopReason translation.
     void test_D10_shutdown_emits_transitioned();
-    // A Fatal commit failure during a Button::Stop press must NOT relabel
-    // the transition's cause as FatalStoreError -- stopTimer() never nests
-    // through stopIfLatched(); the button's own reason (ButtonStop) is what
-    // actually happened, while the latch still takes effect for the next Start.
-    void test_D10_fatal_commit_on_stop_keeps_buttonstop_cause();
-
     // Round-2 review (finding 1, M8b): the delegation test must also cover
     // the cross-midnight-discard guard, not only the three ordinary modes --
     // a hand-rolled toggle body that dropped the guard would still pass the
@@ -484,6 +438,7 @@ private slots:
 
     // WP6: shutdown revokes History first.
     void test_shutdown_with_history_open_revokes_before_stopping();
+    void test_drainForShutdown_with_history_open_revokes_before_stopping();
 
     // ====================================================================
     // WP3 (step6_plan_revised.md): beginExclusiveEdit() context, per-date
@@ -520,7 +475,6 @@ private slots:
     void test_WP7c_onStartPausePressed_revokes_once();
     void test_WP7c_onStopPressed_revokes_once();
     void test_WP7c_stop_with_failed_commit_still_revokes();
-    void test_WP7c_fatal_latch_stop_revokes_history();
     void test_WP7c_start_while_active_does_not_revoke();
     void test_WP7c_stop_while_stopped_does_not_revoke();
     void test_WP7c_backward_clock_pause_refusal_does_not_revoke();

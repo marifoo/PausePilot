@@ -1254,7 +1254,7 @@ void AppShellTest::test_D10_lock_resume_updates_button_exactly_once()
     // Round-2 review (finding 1, M7b): ContentWidget's reducer must also
     // handle Mode::None -- an untested branch would leave the button
     // reading PAUSE forever after any stop, midnight cutoff, watchdog
-    // discard, shutdown, or fatal latch.
+    // discard, or shutdown.
     tracker.useTimerViaButton(Button::Stop);
     QCOMPARE(startPauseButton->text(), QString("START"));
 }

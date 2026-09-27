@@ -10,7 +10,7 @@ class TimeTracker;
  *
  * Calls TimeTracker::initializeFromStore() once. On Success/Disabled,
  * returns true immediately so the caller can proceed to construct the main
- * window. On TransientError/FatalError, shows a modal Retry/Quit choice:
+ * window. On TransientError, shows a modal Retry/Quit choice:
  * each Retry repeats the whole atomic recovery via another
  * initializeFromStore() call; Quit returns false without asking again,
  * leaving existing rows/marker untouched for a later launch to retry.

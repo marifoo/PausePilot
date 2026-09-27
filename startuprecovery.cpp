@@ -19,8 +19,8 @@ bool runStartupRecovery(TimeTracker& tracker)
         box.exec();
         if (box.clickedButton() != retryButton) {
             // Quit: existing rows/marker are left exactly as they are: no
-            // recovery transaction committed on a TransientError/FatalError
-            // path, so there is nothing to undo.
+            // recovery transaction committed on a TransientError path, so
+            // there is nothing to undo.
             return false;
         }
         result = tracker.initializeFromStore();

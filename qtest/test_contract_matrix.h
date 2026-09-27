@@ -8,7 +8,7 @@
  * ContractMatrixTest — per-method contract matrix for every public SessionStore method.
  *
  * For each method the matrix covers: success, disabled-history, transient failure,
- * fatal failure, and caller-bug where applicable.  Non-applicable cells are documented
+ * caller-bug, and conflict where applicable.  Non-applicable cells are documented
  * with a comment explaining why (rather than silently omitted).
  *
  * Most tests use SqliteSessionStore directly (not the fake) so the behavior being

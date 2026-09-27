@@ -1308,10 +1308,9 @@ void TimerTest::test_E_boot_time_inmemory_start_date_skips_boot_time()
     // safe only because Start's None branch reaches
     // session_.resetForNewSession() (timetracker.cpp:644) below and wipes
     // the pre-seed before completedTimeline() reads it; if Start ever
-    // returns earlier -- fatal_state_latched_ (:604), !retryUnsavedDurations()
-    // (:612), or the second latch check (:621) -- the pre-seed survives and
-    // the read below aborts the whole qtest binary instead of failing one
-    // test.
+    // returns earlier -- !retryUnsavedDurations() -- the pre-seed survives
+    // and the read below aborts the whole qtest binary instead of failing
+    // one test.
     tracker.seedCompletedDuration_dbg(
         TimeDuration::fromPersistedRow(DurationType::Activity, startToday, endTomorrow));
 
@@ -1813,8 +1812,8 @@ void TimerTest::test_T8_destructor_does_not_crash_while_active()
 
 void TimerTest::test_S12_marker_error_skips_reconciliation()
 {
-    // When recoverStartupCheckpoints() returns a TransientError/FatalError
-    // status (e.g. marker read error), TimeTracker must treat recovered_msec
+    // When recoverStartupCheckpoints() returns a TransientError status
+    // (e.g. marker read error), TimeTracker must treat recovered_msec
     // as 0 and must NOT show a notification. The store is responsible for
     // skipping reconciliation on error; TimeTracker only acts on the domain
     // facts returned when the status is Success/Disabled (okOrDisabled()).
@@ -2392,6 +2391,8 @@ void TimerTest::test_N3_watchdog_tick_revokes_edit_and_discards_segment()
     fakeDb.callLog.clear();
 
     QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
 
     // Act: the real 100ms heartbeat slot.
     tracker.onTick(postMidnight);
@@ -2405,6 +2406,10 @@ void TimerTest::test_N3_watchdog_tick_revokes_edit_and_discards_segment()
     QVERIFY(fakeDb.callLog.contains("discardCheckpoint"));
     QVERIFY(!fakeDb.callLog.contains("commitSession"));
     QVERIFY(fakeDb.storedDurations.empty());
+    // Exactly one revoke and one revoke notice -- the midnight watchdog's own
+    // revoke must not double-fire alongside the WP7c emitTransition() backstop.
+    QCOMPARE(revokedSpy.count(), 1);
+    QCOMPARE(warnSpy.count(), 1);
 }
 
 // N4 (*HEAD-red*): a Lock event at 00:05 with the dialog open revokes the
@@ -3015,7 +3020,6 @@ void TimerTest::test_A2_first_submit_outcome_data()
     QTest::newRow("Success")        << static_cast<int>(SessionStoreResult::Success)        << false << true;
     QTest::newRow("Disabled")       << static_cast<int>(SessionStoreResult::Disabled)        << false << true;
     QTest::newRow("TransientError") << static_cast<int>(SessionStoreResult::TransientError)  << true  << false;
-    QTest::newRow("FatalError")     << static_cast<int>(SessionStoreResult::FatalError)      << true  << false;
 }
 
 // Table-driven (A2 packet table, "first submit"/"operation" rows): the
@@ -3044,7 +3048,7 @@ void TimerTest::test_A2_first_submit_outcome()
     clock.advance(60ll * 1000ll);
 
     const auto cat = static_cast<SessionStoreResult::Category>(category);
-    const bool isFailure = (cat == SessionStoreResult::TransientError || cat == SessionStoreResult::FatalError);
+    const bool isFailure = (cat == SessionStoreResult::TransientError);
     fakeDb.commitSessionResult = {cat, isFailure ? QStringLiteral("injected failure") : QString()};
     tracker.useTimerViaButton(Button::Stop);
 
@@ -3531,36 +3535,6 @@ void TimerTest::test_A4_discard_transient_failure_retains_intent_and_blocks_clea
     QVERIFY(tracker.drainForShutdown().clean());
 }
 
-void TimerTest::test_A4_discard_fatal_failure_retains_intent_and_blocks_clean_mark()
-{
-    // Arrange: same setup, but the store fails Fatal instead of Transient.
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
-    FakeClock clock(preMidnight);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-    tracker.useTimerViaButton(Button::Start);
-
-    fakeDb.discardCheckpointResult = SessionStoreResult::fatal("injected fatal discard failure");
-    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime));
-
-    // Act
-    QVERIFY(tracker.discardCrossMidnightOngoingAndStop_dbg(clock.now()));
-
-    // Assert: retained exactly like Transient (C4 owns latching a fatal
-    // tracker-unavailable state; A4 only guarantees retention here).
-    QVERIFY(tracker.hasPendingDiscards_dbg());
-    QVERIFY(!tracker.drainForShutdown().clean());
-
-    // Cleanup.
-    fakeDb.discardCheckpointResult = SessionStoreResult::success();
-    QVERIFY(tracker.drainForShutdown().clean());
-}
-
 void TimerTest::test_A4_discard_disabled_resolves_intent_without_mutating_checkpoints()
 {
     // Arrange: a failed discard leaves an intent pending and a checkpoint
@@ -3685,113 +3659,12 @@ void TimerTest::test_A4_drain_incomplete_while_discard_unresolved()
 }
 
 // ============================================================================
-// C4 (R05-006): FatalError latches TimeTracker into one unavailable state.
+// C4 (R05-006), post-WP10: FatalError and the fatal latch are gone. Only the
+// CallerBug branches below remain, plus a Transient periodic checkpoint
+// failure, which is a logged, UI-silent missed snapshot: tracking continues
+// and the next ordinary checkpoint interval retries through the same call
+// path.
 // ============================================================================
-
-// A Fatal periodic checkpoint failure stops tracking immediately (through the
-// normal stopTimer()/pending-commit lifecycle) and shows exactly one modal
-// error.
-void TimerTest::test_C4_fatal_checkpoint_failure_latches_and_stops_tracking()
-{
-    // Arrange
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    QSignalSpy fatalSpy(&tracker, &TimeTracker::fatalError);
-    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    QVERIFY(tracker.isActive());
-    clock.advance(60ll * 1000ll);
-    fakeDb.saveCheckpointResult = SessionStoreResult::fatal("injected fatal checkpoint failure");
-
-    // Act
-    tracker.triggerCheckpoint_dbg();
-
-    // Assert: tracking stopped, latch set, exactly one modal error (C4 fix
-    // round 2 / HIGH-1: fatalError, not the tray-routed userWarning).
-    QVERIFY(tracker.isStopped());
-    QVERIFY(tracker.isFatalLatched());
-    QCOMPARE(fatalSpy.count(), 1);
-    QCOMPARE(warnSpy.count(), 0);
-}
-
-// Once latched, Start is refused even after the store recovers -- only a
-// fresh TimeTracker instance (a restart) can clear the latch.
-void TimerTest::test_C4_fatal_latch_disables_start_even_after_store_recovers()
-{
-    // Arrange
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    clock.advance(60ll * 1000ll);
-    fakeDb.saveCheckpointResult = SessionStoreResult::fatal("injected fatal checkpoint failure");
-    tracker.triggerCheckpoint_dbg();
-    QVERIFY(tracker.isStopped());
-    QVERIFY(tracker.isFatalLatched());
-
-    // Act: the store recovers, but Start is attempted on the SAME instance.
-    fakeDb.saveCheckpointResult = SessionStoreResult::success();
-    fakeDb.commitSessionResult = SessionStoreResult::success();
-    tracker.useTimerViaButton(Button::Start);
-
-    // Assert: still refused -- the latch survives store recovery.
-    QVERIFY(tracker.isStopped());
-    QVERIFY(!tracker.isActive());
-    QVERIFY(tracker.isFatalLatched());
-}
-
-// Two independent Fatal failures across different operations must show
-// exactly one modal error in total, not one per failure.
-void TimerTest::test_C4_fatal_error_shows_dialog_exactly_once()
-{
-    // Arrange
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    QSignalSpy fatalSpy(&tracker, &TimeTracker::fatalError);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    clock.advance(60ll * 1000ll);
-    fakeDb.saveCheckpointResult = SessionStoreResult::fatal("first fatal failure");
-    tracker.triggerCheckpoint_dbg();
-    QVERIFY(tracker.isFatalLatched());
-    QCOMPARE(fatalSpy.count(), 1);
-
-    // Act: a second, independent Fatal failure from a DIFFERENT operation
-    // (a discard retry during drainForShutdown -- not blocked by the
-    // Start-latch check, since tracking is already stopped).
-    tracker.injectPendingDiscard_dbg(SegmentId::mint());
-    fakeDb.discardCheckpointResult = SessionStoreResult::fatal("second fatal failure");
-    tracker.drainForShutdown();
-
-    // Assert: still exactly one modal error in total.
-    QCOMPARE(fatalSpy.count(), 1);
-
-    // Cleanup so destruction does not find an unresolved intent.
-    fakeDb.discardCheckpointResult = SessionStoreResult::success();
-    QVERIFY(tracker.drainForShutdown().clean());
-}
 
 // A transient periodic checkpoint failure is silent (no dialog) and tracking
 // continues; the very next checkpoint interval retries through the same
@@ -3817,9 +3690,8 @@ void TimerTest::test_C4_transient_checkpoint_failure_is_silent_and_tracking_cont
     // Act: the periodic checkpoint fails transiently.
     tracker.triggerCheckpoint_dbg();
 
-    // Assert: tracking continues, no dialog, no latch.
+    // Assert: tracking continues, no dialog.
     QVERIFY(tracker.isActive());
-    QVERIFY(!tracker.isFatalLatched());
     QCOMPARE(warnSpy.count(), 0);
 
     // Act: the store recovers; the next ordinary checkpoint interval retries
@@ -3835,169 +3707,6 @@ void TimerTest::test_C4_transient_checkpoint_failure_is_silent_and_tracking_cont
     // Cleanup.
     tracker.useTimerViaButton(Button::Stop);
     QVERIFY(tracker.drainForShutdown().clean());
-}
-
-// C4 finding 2: enterFatalState() used to call stopTimer() re-entrantly from
-// deep inside an in-progress transition. On the Pause->Activity resume, the
-// nested stop set mode_ = None and emitted stopped() BEFORE startTimer()'s
-// own code continued on to `emit started(true)` -- leaving observers with
-// started() AFTER stopped(), the stuck-running-UI bug. The fix stops at a
-// safe point after the transition completes instead.
-void TimerTest::test_C4_fatal_pauseresume_commit_stops_without_started_after_stopped()
-{
-    // Arrange: get into Pause mode.
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    clock.advance(60ll * 1000ll);
-    tracker.useTimerViaButton(Button::Pause);
-    QVERIFY(tracker.isPaused());
-
-    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
-    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
-
-    // Act: resume from Pause; committing the just-completed Pause segment fails Fatal.
-    fakeDb.commitSessionResult = SessionStoreResult::fatal("injected fatal commit on resume");
-    clock.advance(10ll * 1000ll);
-    tracker.useTimerViaButton(Button::Start);
-
-    // Assert: latched and cleanly stopped, not stuck showing Activity.
-    QVERIFY(tracker.isFatalLatched());
-    QVERIFY(tracker.isStopped());
-    QCOMPARE(stoppedSpy.count(), 1);
-    QCOMPARE(stoppedSpy.last().first().value<TimeTracker::StopReason>(),
-             TimeTracker::StopReason::FatalStoreError);
-    // The stuck-UI bug: no second (started-like) transition must follow the
-    // stop -- exactly one transitioned() event for this whole operation.
-    QCOMPARE(transitionedSpy.count(), 1);
-    // D10 finding 3: mode_ was internally mutated to Activity before the
-    // nested fatal stop fired, but observers never saw that Activity
-    // transition announced -- the emitted `from` must be the mode they
-    // actually last saw (Pause), not the impossible Activity->None.
-    const auto t = transitionedSpy.first().first().value<TimeTracker::Transition>();
-    QCOMPARE(t.from, TimeTracker::Mode::Pause);
-    QCOMPARE(t.to, TimeTracker::Mode::None);
-    QCOMPARE(t.cause, TimeTracker::TransitionCause::FatalStoreError);
-
-    // Cleanup: latched, so no further Start; resolve the retained payload
-    // so the destructor doesn't find an unresolved commit.
-    fakeDb.commitSessionResult = SessionStoreResult::success();
-    tracker.drainForShutdown();
-}
-
-// C4 finding 2: same defect on the Activity->Pause transition
-// (finalizePauseTransition, shared by pauseTimer/backpauseTimer). The nested
-// stop used to fire BEFORE session_.beginNewSegment(now), leaving
-// segment_id/segment_start_time set while mode_ == None -- the state
-// SessionState documents as impossible. The fix stops only after the pause
-// transition has reached a fully consistent state.
-void TimerTest::test_C4_fatal_pause_transition_ends_stopped_not_impossible_state()
-{
-    // Arrange
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    QVERIFY(tracker.isActive());
-
-    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
-    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
-
-    // Act: pause; committing the just-completed Activity segment fails Fatal.
-    fakeDb.commitSessionResult = SessionStoreResult::fatal("injected fatal commit on pause");
-    clock.advance(60ll * 1000ll);
-    tracker.useTimerViaButton(Button::Pause);
-
-    // Assert: latched and cleanly stopped -- never the impossible state of
-    // segment_id/segment_start_time set while mode_ == None -- and no
-    // separate pause-like transition for a mode that never actually landed.
-    QVERIFY(tracker.isFatalLatched());
-    QVERIFY(tracker.isStopped());
-    // (segment_id.isEmpty() / !segment_start_time.isValid() are not asserted
-    // here: mode_ is assigned Mode::None at stopTimer() (timetracker.cpp:853),
-    // straight-line followed by session_.clearSegment() (:854) -- so
-    // isStopped() above already implies both checks; they could not fail.)
-    QCOMPARE(stoppedSpy.count(), 1);
-    QCOMPARE(stoppedSpy.last().first().value<TimeTracker::StopReason>(),
-             TimeTracker::StopReason::FatalStoreError);
-    QCOMPARE(transitionedSpy.count(), 1);
-    // D10 finding 3: mode_ was internally mutated to Pause before the nested
-    // fatal stop fired, but that Pause was never announced -- `from` must be
-    // Activity (what observers actually last saw), not the impossible Pause->None.
-    const auto t = transitionedSpy.first().first().value<TimeTracker::Transition>();
-    QCOMPARE(t.from, TimeTracker::Mode::Activity);
-    QCOMPARE(t.to, TimeTracker::Mode::None);
-    QCOMPARE(t.cause, TimeTracker::TransitionCause::FatalStoreError);
-
-    // Cleanup: latched, so no further Start; resolve the retained payload
-    // so the destructor doesn't find an unresolved commit.
-    fakeDb.commitSessionResult = SessionStoreResult::success();
-    tracker.drainForShutdown();
-}
-
-// C4 finding 2: enterFatalState()'s old nested stopTimer() consumed the
-// cross-midnight transition out from under discardCrossMidnightOngoingAndStop()'s
-// own unconditional stopTimer(now, MidnightWatchdog) call, which then became a
-// no-op (mode_ already None) -- so observers saw StopReason::FatalStoreError
-// instead of MidnightWatchdog. The fix (enterFatalState() no longer stops at
-// all) restores the watchdog's own stop as the one that actually fires.
-void TimerTest::test_C4_fatal_during_midnight_discard_still_reports_midnightwatchdog()
-{
-    // Arrange: Start, Pause, Resume before midnight so session_.durations has
-    // completed segments to persist when the watchdog fires.
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    const QDateTime preMidnight(QDate(2025, 6, 1), QTime(23, 0, 0), Qt::LocalTime);
-    FakeClock clock(preMidnight);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(23, 10, 0), Qt::LocalTime));
-    tracker.useTimerViaButton(Button::Pause);
-    clock.setNow(QDateTime(QDate(2025, 6, 1), QTime(23, 20, 0), Qt::LocalTime));
-    tracker.useTimerViaButton(Button::Start);
-    QVERIFY(tracker.isActive());
-    QVERIFY(!tracker.completedTimeline().completed().empty());
-
-    QSignalSpy stoppedSpy(&tracker, &TimeTracker::stopped);
-
-    // Act: the watchdog fires after midnight; the completed-segment commit
-    // it attempts along the way fails Fatal.
-    fakeDb.commitSessionResult = SessionStoreResult::fatal("injected fatal commit during midnight discard");
-    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime));
-    QVERIFY(tracker.discardCrossMidnightOngoingAndStop_dbg(clock.now()));
-
-    // Assert: latched (Fatal was handled), but the watchdog's OWN stop still
-    // wins the reported reason.
-    QVERIFY(tracker.isFatalLatched());
-    QVERIFY(tracker.isStopped());
-    QCOMPARE(stoppedSpy.count(), 1);
-    QCOMPARE(stoppedSpy.last().first().value<TimeTracker::StopReason>(),
-             TimeTracker::StopReason::MidnightWatchdog);
-
-    // Cleanup: latched, so no further Start; resolve the retained payload
-    // so the destructor doesn't find an unresolved commit.
-    fakeDb.commitSessionResult = SessionStoreResult::success();
-    tracker.drainForShutdown();
 }
 
 // C4 fix round 2 (HIGH-2): a CallerBug on stop-commit must NOT be dropped.
@@ -4116,85 +3825,6 @@ void TimerTest::test_C4_callerBug_discard_retry_is_retained_not_resolved()
     fakeDb.discardCheckpointResult = SessionStoreResult::success();
     QVERIFY(tracker.drainForShutdown().clean());
 }
-
-// C4 fix round 2 (HIGH-1): enterFatalState() must emit exactly one
-// fatalError (routed to a modal QMessageBox::critical by MainWin) and must
-// NOT emit userWarning for the fatal transition itself -- userWarning is a
-// tray balloon/status-bar message, not the "one modal error" C4/R05-006
-// requires. Repeated fatal failures must not repeat either signal.
-void TimerTest::test_C4_fatalError_emitted_once_userWarning_not_emitted_for_fatal()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-
-    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    QSignalSpy fatalSpy(&tracker, &TimeTracker::fatalError);
-    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    clock.advance(60ll * 1000ll);
-    fakeDb.saveCheckpointResult = SessionStoreResult::fatal("first fatal failure");
-    tracker.triggerCheckpoint_dbg();
-
-    QCOMPARE(fatalSpy.count(), 1);
-    QCOMPARE(warnSpy.count(), 0);
-
-    // A second, independent Fatal failure must not repeat either signal.
-    tracker.injectPendingDiscard_dbg(SegmentId::mint());
-    fakeDb.discardCheckpointResult = SessionStoreResult::fatal("second fatal failure");
-    tracker.drainForShutdown();
-
-    QCOMPARE(fatalSpy.count(), 1);
-    QCOMPARE(warnSpy.count(), 0);
-
-    // Cleanup.
-    fakeDb.discardCheckpointResult = SessionStoreResult::success();
-    tracker.drainForShutdown();
-}
-
-// C4 fix round 3 (F1): retryUnsavedDurations() opens with
-// retryPendingDiscards(), which can latch fatal_state_latched_ via a Fatal
-// discardCheckpoint() -- with no pending commit payload, retryUnsavedDurations()
-// then returns true and startTimer()'s None branch would fall through to
-// `mode_ = Mode::Activity` unless the latch is re-checked right after. Assert
-// Start does NOT begin tracking when this happens.
-void TimerTest::test_C4_start_refused_when_discard_retry_latches_with_no_pending_commit()
-{
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    TimeTracker tracker(settings, fakeDb);
-    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
-
-    // Arrange: a pending discard intent, no pending commit payload, and the
-    // tracker not latched yet.
-    tracker.injectPendingDiscard_dbg(SegmentId::mint());
-    QVERIFY(!tracker.hasPendingCommit_dbg());
-    QVERIFY(!tracker.isFatalLatched());
-    fakeDb.discardCheckpointResult = SessionStoreResult::fatal("injected fatal discard failure");
-
-    // Act
-    tracker.useTimerViaButton(Button::Start);
-
-    // Assert: latch is now set, but tracking must NOT have started -- mode_
-    // stayed None throughout (the latch happens before any mode mutation),
-    // so no transition of any kind was ever emitted.
-    QVERIFY(tracker.isFatalLatched());
-    QVERIFY(tracker.isStopped());
-    QVERIFY(!tracker.isActive());
-    QCOMPARE(transitionedSpy.count(), 0);
-
-    // Cleanup so destruction does not find an unresolved intent.
-    fakeDb.discardCheckpointResult = SessionStoreResult::success();
-    tracker.drainForShutdown();
-}
-
 
 // D2 (R11-003): a backward wall-clock step (NTP/manual/DST) makes `now`
 // precede the live segment's captured start. Stopping must still discard
@@ -5475,47 +5105,6 @@ void TimerTest::test_D10_shutdown_emits_transitioned()
              TimeTracker::StopReason::Shutdown);
 }
 
-// Round-2 review (finding 1): a Fatal commit failure during a Button::Stop
-// press must NOT relabel the transition's cause as FatalStoreError --
-// stopTimer() never nests through stopIfLatched() (unlike startTimer's Pause
-// branch and finalizePauseTransition); the button's own reason is what
-// actually happened, while the latch still takes effect for the NEXT Start.
-void TimerTest::test_D10_fatal_commit_on_stop_keeps_buttonstop_cause()
-{
-    // Arrange
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    const QDateTime t0(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime);
-    FakeClock clock(t0);
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-    tracker.useTimerViaButton(Button::Start);
-    QVERIFY(tracker.isActive());
-    clock.advance(60ll * 1000ll); // non-zero duration so commitSession is actually called
-
-    fakeDb.commitSessionResult = SessionStoreResult::fatal("injected fatal commit on stop");
-    QSignalSpy transitionedSpy(&tracker, &TimeTracker::transitioned);
-
-    // Act
-    tracker.useTimerViaButton(Button::Stop);
-
-    // Assert: latched for the future, but THIS transition truthfully
-    // reports what the user actually did.
-    QVERIFY(tracker.isFatalLatched());
-    QVERIFY(tracker.isStopped());
-    QCOMPARE(transitionedSpy.count(), 1);
-    const auto t = transitionedSpy.first().first().value<TimeTracker::Transition>();
-    QCOMPARE(t.from, TimeTracker::Mode::Activity);
-    QCOMPARE(t.to, TimeTracker::Mode::None);
-    QCOMPARE(t.cause, TimeTracker::TransitionCause::ButtonStop);
-
-    // Cleanup: latched, so no further Start; resolve the retained payload.
-    fakeDb.commitSessionResult = SessionStoreResult::success();
-    tracker.drainForShutdown();
-}
-
 // Round-2 review (finding 1, M8b): the delegation test above only exercises
 // the three ordinary mode rows -- a hand-rolled toggle body that dropped
 // useTimerViaButton()'s cross-midnight-discard guard would still pass all
@@ -5619,6 +5208,39 @@ void TimerTest::test_shutdown_with_history_open_revokes_before_stopping()
     // Assert: no additional revoke.
     QCOMPARE(events.count(), 0);
     QCOMPARE(userWarningSpy.count(), 0);
+}
+
+// Same contract as above, but through drainForShutdown() (ShutdownCoordinator's
+// terminal-shutdown entry point, which calls shutdown() internally) rather
+// than shutdown() directly -- the revoke must still fire exactly once before
+// the segment is closed, not twice via some double path through shutdown().
+void TimerTest::test_drainForShutdown_with_history_open_revokes_before_stopping()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore db;
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Start and begin exclusive edit.
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+    QSignalSpy userWarningSpy(&tracker, &TimeTracker::userWarning);
+
+    // Act
+    QVERIFY(tracker.drainForShutdown().clean());
+
+    // Assert: exactly one revoke and one revoke notice, dialog closed.
+    QCOMPARE(revokedSpy.count(), 1);
+    QCOMPARE(userWarningSpy.count(), 1);
+    QVERIFY(!tracker.isDialogOpen_dbg());
+    QVERIFY(tracker.isStopped());
 }
 
 // ============================================================================
@@ -6431,41 +6053,6 @@ void TimerTest::test_WP7c_stop_with_failed_commit_still_revokes()
     // Cleanup: resolve the payload so destruction finds no unresolved commit.
     fakeDb.commitSessionResult = SessionStoreResult::success();
     QVERIFY(tracker.drainForShutdown().clean());
-}
-
-void TimerTest::test_WP7c_fatal_latch_stop_revokes_history()
-{
-    // Arrange: until WP10, a fatal-latch stop is still a mode change (it
-    // reaches emitTransition() via stopTimer()), so it revokes History like
-    // any other Stop under U1 -- this is not the skipped fatal-latch "WP8":
-    // the revoke comes from the resulting stop, not from the FatalError
-    // itself. Trigger it via a fatal checkpoint write while running.
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    FakeSessionStore fakeDb;
-    FakeClock clock(fixedNow());
-    TimeTracker tracker(settings, fakeDb);
-    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
-
-    tracker.useTimerViaButton(Button::Start);
-    clock.advance(60ll * 1000ll);
-    QVERIFY(tracker.isActive());
-
-    tracker.beginExclusiveEdit();
-    QVERIFY(tracker.isDialogOpen_dbg());
-
-    fakeDb.saveCheckpointResult = SessionStoreResult::fatal("injected fatal checkpoint failure");
-    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
-
-    // Act: a checkpoint save fails Fatal, latching and stopping the engine.
-    tracker.triggerCheckpoint_dbg();
-
-    // Assert
-    QVERIFY(tracker.isFatalLatched());
-    QVERIFY(tracker.isStopped());
-    QCOMPARE(revokedSpy.count(), 1);
-    QVERIFY(!tracker.isDialogOpen_dbg());
 }
 
 void TimerTest::test_WP7c_start_while_active_does_not_revoke()

@@ -2442,10 +2442,11 @@ void HistoryDialogTest::test_H5_today_while_running_is_read_only()
 // exclusiveEditRevoked() signal.
 // ============================================================================
 
-// A queued programmatic Start (e.g. a lock/session-restore path calling
-// straight into TimeTracker while the modal dialog is up) revokes History
-// via emitTransition(); the dialog's own queued close still lands Rejected
-// and saveHistoryDays() is never called for the pending edits.
+// A programmatic Start called directly on TimeTracker while the modal
+// dialog is up (any lock path revokes earlier, so this exercises the
+// emitTransition() backstop itself, not a lock-driven route) revokes History
+// synchronously; the dialog's own queued close still lands Rejected and
+// saveHistoryDays() is never called for the pending edits.
 void HistoryDialogTest::test_WP7c_queued_start_with_pending_edits_ends_rejected_no_save()
 {
     QTemporaryDir tempDir;

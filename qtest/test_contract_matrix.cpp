@@ -1,7 +1,7 @@
 /**
  * ContractMatrixTest — per-method contract matrix for every public SessionStore method.
  *
- * Matrix columns: success | disabled-history | transient | fatal | caller-bug.
+ * Matrix columns: success | disabled-history | transient | caller-bug | conflict.
  * Rows: one per public SessionStore method.
  *
  * Non-applicable cells are documented with comments in the .h file rather than
@@ -33,6 +33,18 @@ static_assert(static_cast<int>(Operation::Count) == 11,
     "SessionStore::Operation changed size -- add a matrix section to "
     "test_contract_matrix.cpp for the new/removed operation, then update "
     "this static_assert's count.");
+
+// WP10 (C2): FatalError is gone. The vocabulary is exactly these five
+// categories -- a change here (an addition or removal) is a reminder to
+// re-audit every per-method matrix section above, not just this count.
+static_assert(SessionStoreResult::Success == 0 &&
+              SessionStoreResult::Disabled == 1 &&
+              SessionStoreResult::TransientError == 2 &&
+              SessionStoreResult::CallerBug == 3 &&
+              SessionStoreResult::Conflict == 4,
+    "SessionStoreResult::Category changed -- update the matrix and this "
+    "assertion; the vocabulary must stay exactly {Success, Disabled, "
+    "TransientError, CallerBug, Conflict}.");
 
 void ContractMatrixTest::initTestCase()
 {

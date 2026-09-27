@@ -163,12 +163,6 @@ int main(int argc, char *argv[])
 	QObject::connect(&timer, SIGNAL(timeout()), &lockstate_watcher, SLOT(update()));
 	QObject::connect(&lockstate_watcher, SIGNAL(desktopLockEvent(LockEvent,QDateTime)),	&time_tracker, SLOT(useTimerViaLockEvent(LockEvent,QDateTime)));
 	QObject::connect(&time_tracker, &TimeTracker::userWarning, &main_win, &MainWin::showUserWarning);
-	// C4 (round-3 F2): must stay QueuedConnection. A direct connection would run
-	// QMessageBox::critical()'s nested event loop synchronously inside the
-	// still-in-progress TimeTracker transition that emitted fatalError (the
-	// mutex is recursive, so it would not block), letting onTick()/lock events
-	// re-enter and mutate mode_/session_ underneath the half-finished caller.
-	QObject::connect(&time_tracker, &TimeTracker::fatalError, &main_win, &MainWin::showFatalError, Qt::QueuedConnection);
 
 	QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, &main_win, &MainWin::onAboutToQuit);
 

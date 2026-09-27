@@ -32,9 +32,6 @@
  *                   transaction could not start).  The caller may retry;
  *                   data was not mutated.
  *
- *   FatalError    — unrecoverable failure (e.g. DB connection lost).
- *                   Callers should emit a user warning and refuse new sessions.
- *
  *   CallerBug     — invalid input supplied by the caller (e.g. empty
  *                   segment_id, or a segment_id that already belongs to
  *                   finalized history).  Retrying with the same arguments
@@ -46,10 +43,11 @@
  *                   the caller must re-read fresh data before retrying, not
  *                   simply resubmit the same payload.
  *
- * After WP9 (C11) removed replaceAll() and its backup, no production path
- * returns FatalError; every write boundary's ensureOpen()/open-failure path
- * is consolidated onto TransientError (see the ensureOpen()-consistency
- * table in test_contract_matrix.cpp).
+ * Every write boundary's ensureOpen()/open-failure path returns
+ * TransientError (see the ensureOpen()-consistency table in
+ * test_contract_matrix.cpp). WP9 (C11) removed replaceAll() and its backup,
+ * the last production producer of an unrecoverable failure, and WP10 (C2)
+ * removed the now-unused FatalError category itself.
  *
  * Precedence (C4/R05-003): where both a CallerBug and a Disabled outcome
  * would apply to the same call (e.g. a duplicate/empty id submitted while
@@ -103,7 +101,7 @@
  * Category semantics — see unified vocabulary in file-level comment above.
  */
 struct SessionStoreResult {
-    enum Category { Success, Disabled, TransientError, FatalError, CallerBug, Conflict };
+    enum Category { Success, Disabled, TransientError, CallerBug, Conflict };
     Category category;
     QString message;
     bool ok() const { return category == Success; }
@@ -116,7 +114,6 @@ struct SessionStoreResult {
     static SessionStoreResult disabled() { return {Disabled, {}}; }
     static SessionStoreResult transient(QString msg) { return {TransientError, std::move(msg)}; }
     static SessionStoreResult callerBug(QString msg) { return {CallerBug, std::move(msg)}; }
-    static SessionStoreResult fatal(QString msg) { return {FatalError, std::move(msg)}; }
     static SessionStoreResult conflict(QString msg) { return {Conflict, std::move(msg)}; }
 };
 
@@ -199,8 +196,8 @@ struct DrainResult {
  *   TransientError — DB could not be opened or the query failed; durations
  *                   is empty.  Surface an error to the user.
  *
- * CallerBug and FatalError are not applicable to loadDurations post-C4: its
- * ensureOpen() failure path was consolidated onto TransientError.
+ * CallerBug is not applicable to loadDurations: its ensureOpen() failure
+ * path is consolidated onto TransientError.
  */
 struct LoadResult {
     std::deque<TimeDuration> durations;
@@ -241,8 +238,8 @@ struct StoredHistoryRow {
  *   TransientError — DB could not be opened or the query failed; rows is empty.
  *
  * Unlike loadDurations(), this is a pure read: it never deletes malformed
- * rows and never filters by is_finalized. CallerBug and FatalError are not
- * applicable (no parameters, no write).
+ * rows and never filters by is_finalized. CallerBug is not applicable (no
+ * parameters, no write).
  */
 struct HistoryRowsResult {
     SessionStoreResult::Category status = SessionStoreResult::Success;
@@ -295,8 +292,8 @@ struct HistoryDayChange {
  *                               failure.  Caller must treat all counts as 0
  *                               and must NOT show a recovery notification.
  *
- * CallerBug and FatalError are not applicable post-C4: every ensureOpen()/
- * open-failure path this method can take was consolidated onto TransientError.
+ * CallerBug is not applicable: every ensureOpen()/open-failure path this
+ * method can take is consolidated onto TransientError.
  *
  * policy_dropped_count counts rows deleted for a recovery POLICY reason
  * (too-short, stale, future-dated, cross-day, overlap-rejected, or a durable
@@ -382,7 +379,7 @@ public:
 
     /// Returns all finalized rows sorted chronologically.
     /// result.status is Disabled when history is off, or TransientError on DB
-    /// failure (FatalError is not applicable post-C4). On any non-Success
+    /// failure. On any non-Success
     /// status, result.durations is empty.
     virtual LoadResult loadDurations() = 0;
 
@@ -486,7 +483,7 @@ public:
     /// call this again -- both the tombstone write and the row delete are
     /// idempotent, so repeated calls are safe.
     /// Returns Disabled when history storage is off (no-op, not an error).
-    /// Returns TransientError on DB failure (FatalError is not applicable post-C4).
+    /// Returns TransientError on DB failure.
     /// @pre segmentId must be non-empty
     virtual SessionStoreResult discardCheckpoint(const SegmentId& segmentId) = 0;
 

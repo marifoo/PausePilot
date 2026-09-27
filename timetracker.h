@@ -81,7 +81,6 @@ public:
         MidnightScheduled,  ///< DayBoundaryWatcher's heartbeat check reached the 23:59:59.500 cutoff.
         MidnightWatchdog,   ///< Watchdog detected a cross-midnight ongoing segment.
         Shutdown,           ///< Application shutdown (destructor or ShutdownCoordinator).
-        FatalStoreError,    ///< C4: a store operation returned FatalError; tracking latched unavailable.
     };
 
 public:
@@ -102,7 +101,6 @@ public:
         MidnightScheduled,  ///< -> None: scheduled 23:59:59.500 cutoff.
         MidnightWatchdog,   ///< -> None: watchdog cross-midnight discard.
         Shutdown,           ///< -> None: application shutdown.
-        FatalStoreError,    ///< -> None: a store operation returned FatalError.
     };
 
     /// One transition: the mode it left, the mode it entered, and why.
@@ -236,25 +234,6 @@ private:
     /// segment while the dialog stayed open across it, which a cancellation
     /// afterward must not unprotect (unlike the global shutdown_called_ flag).
     qint64 shutdown_epoch_ = 0;
-    /// C4 (R05-006): latched once ANY store operation returns FatalError.
-    /// Stays true for the lifetime of this TimeTracker (cleared only by
-    /// restart, i.e. constructing a new instance) -- there is no in-memory-
-    /// only tracking mode and no unlatch path. See enterFatalState().
-    ///
-    /// C4 fix round 3 (F4): post-C4, no production path in SqliteSessionStore
-    /// produces a FatalError any more -- commitSession, saveCheckpoint,
-    /// discardCheckpoint, loadDurations, flushToDisc,
-    /// setLastCleanShutdownMarker, and recoverStartupCheckpoints have all
-    /// been consolidated onto TransientError/CallerBug (see sessionstore.h).
-    /// The stopIfLatched()/latch-check call sites in this class
-    /// (saveCheckpoint_locked, startTimer's Pause and None branches,
-    /// finalizePauseTransition) are therefore defence-in-depth against a
-    /// future SessionStore implementation, not currently reachable from
-    /// SqliteSessionStore, and are exercised in tests only via
-    /// FakeSessionStore injecting FatalError from those operations. (WP9
-    /// removed replaceAll(), the last production FatalError producer; WP10
-    /// removes the latch entirely.)
-    bool fatal_state_latched_ = false;
     SessionStore& db_;
     mutable QRecursiveMutex mutex_;  // Protects state transitions from concurrent access
     QTimer checkpointTimer_;  // TimeTracker for periodic checkpoint saving
@@ -268,17 +247,7 @@ private:
     // handling) passes TransitionCause::LockResume so the
     // one transitioned() emission this method performs carries the right cause.
     void startTimer(const QDateTime& now, TransitionCause cause = TransitionCause::ButtonStart);
-    // observedFromOverride: the mode observers last saw via transitioned()/
-    // stopped(), when it differs from the live mode_ at the moment this is
-    // called. Needed only for the nested fatal-latch stop (via
-    // stopIfLatched()) fired from inside startTimer()'s Pause branch and
-    // finalizePauseTransition(): both mutate mode_ to the NEW mode before
-    // persisting and checking the latch, so by the time the nested stop
-    // runs, mode_ is already the not-yet-announced new mode, not the mode
-    // observers actually last saw. Every other caller leaves it unset and
-    // gets the (correct, unmutated) live mode_.
-    void stopTimer(const QDateTime& now, StopReason reason,
-                    std::optional<Mode> observedFromOverride = std::nullopt);
+    void stopTimer(const QDateTime& now, StopReason reason);
     /// True when `now` precedes `referenceStart` -- a backward wall-clock
     /// step (NTP/manual/DST) after `referenceStart` was captured. The one
     /// owner of this rule, used by stopTimer/pauseTimer/backpauseTimer,
@@ -290,12 +259,6 @@ private:
     /// checks the boundary-equal (zero-elapsed) case alongside it. This
     /// function only detects strict reversal.
     static bool isClockReversed(const QDateTime& now, const QDateTime& referenceStart);
-    /// C4 fix round 2 (LOW-8): the ~6-times-repeated post-latch stop,
-    /// factored out. enterFatalState() only latches; each transition owner
-    /// must check the latch after its own state changes are done and stop
-    /// itself here. Returns true iff it stopped (fatal_state_latched_ was
-    /// set) so callers that need to short-circuit (e.g. return early) can.
-    bool stopIfLatched(const QDateTime& now, std::optional<Mode> observedFromOverride = std::nullopt);
     void pauseTimer(const QDateTime& now);
     void backpauseTimer(const QDateTime& now, const QDateTime& lockTime);
     void finalizePauseTransition(const QDateTime& now);
@@ -326,19 +289,6 @@ private:
     /// named context.  Does NOT affect control flow — callers decide what to do
     /// after calling this.
     void logDbResultOrWarn(const SessionStoreResult& result, const QString& context);
-    /// C4 (R05-006): the ONE place FatalError is handled, regardless of which
-    /// store operation (checkpoint, commit, replace, discard) returned it.
-    /// First call: latches fatal_state_latched_, logs, and emits exactly one
-    /// fatalError (a modal dialog, C4 fix round 2 / HIGH-1) -- not
-    /// userWarning. Later calls (already latched) only log. Does NOT stop the
-    /// tracker itself -- this can run deep inside an in-progress transition
-    /// (e.g. startTimer, finalizePauseTransition), and stopping here would
-    /// desync mode_/session_ state from whatever the transition does next.
-    /// Each transition owner is responsible for checking fatal_state_latched_
-    /// after its own persistence call and stopping (via stopTimer()) itself,
-    /// at a point where the transition has already reached a consistent
-    /// state. mutex_ must already be held by the caller.
-    void enterFatalState(const QString& message);
     // Retries the pending commit payload at the start of a new session
     // (None -> Activity only). Performs exactly one retry attempt.
     // Returns true if startTimer should continue, false if it should abort.
@@ -441,8 +391,8 @@ public:
     /// Returns the store's typed recovery result so startup composition (see
     /// runStartupRecovery()) can decide whether to proceed, retry, or quit
     /// before the main UI is created. On Success/Disabled, the recovered-time
-    /// and notification facts below reflect the result; on TransientError/
-    /// FatalError they are left at their prior (default zero/false) value.
+    /// and notification facts below reflect the result; on TransientError
+    /// they are left at their prior (default zero/false) value.
     StartupRecoveryResult initializeFromStore();
 
     qint64 getActiveTime() const;
@@ -478,13 +428,6 @@ public:
     /// snapshot in `opened` is the only input besides `days`.
     SessionStoreResult saveHistoryEdit(const HistoryEditContext& opened,
                                        const std::vector<HistoryDayChange>& days);
-    /// True once a FatalError result has latched TimeTracker into the
-    /// unavailable state (C4/R05-006). Start refuses to run while this is
-    /// true; nothing but a fresh TimeTracker instance clears it. Public (C4
-    /// fix round 2 / MEDIUM-5) so a caller like HistoryDialog can capture
-    /// the latch state before its own store call, to tell "this call raised
-    /// the modal" apart from "it was already latched".
-    bool isFatalLatched() const;
 
     struct ShutdownResult {
         bool stopped;     ///< true iff timer is now in Mode::None
@@ -534,17 +477,14 @@ signals:
     /// then queues closeRevoked() to run on the next event-loop turn so nested
     /// modals (QMessageBox::question, QMenu::exec) can unwind first. If the
     /// dialog is destroyed before that turn, the queued call is dropped with it.
-    /// Contract: a slot on this signal must not call back into TimeTracker.
-    /// The WP7c mode-change revoke fires mid-transition, inside
-    /// emitTransition(), before transitioned() and stopped() are emitted, so
-    /// the engine's own state for this transition is not yet fully published.
+    /// Contract: a slot on this signal, and on userWarning() when it carries
+    /// the revoke notice, must not call back into TimeTracker. The WP7c
+    /// mode-change revoke fires mid-transition, inside emitTransition(),
+    /// before transitioned() and stopped() are emitted, so the engine's own
+    /// state for this transition is not yet fully published -- and
+    /// revokeExclusiveEdit() emits both exclusiveEditRevoked() and the
+    /// userWarning() revoke notice from that same mid-transition point.
     void exclusiveEditRevoked();
-    /// C4 fix round 2 (HIGH-1): the ONE modal error C4/R05-006 requires.
-    /// Emitted by enterFatalState() on the first latch only, in place of
-    /// (not in addition to) userWarning -- a tray balloon/status-bar message
-    /// is trivially missed and is not a modal dialog. Connected in MainWin
-    /// to QMessageBox::critical().
-    void fatalError(const QString& text);
     /// D10 (R10-001/R10-002): the one cause-carrying transition event, emitted
     /// once per real mode change regardless of input source (button, lock,
     /// midnight, History edit, shutdown). Sufficient on its own for a UI

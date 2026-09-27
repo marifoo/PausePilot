@@ -89,10 +89,6 @@ public slots:
 	void minToTray();
 	void toggleAlwaysOnTop();
 	void showUserWarning(const QString& text);
-	/// C4 fix round 2 (HIGH-1): the one modal error C4/R05-006 requires --
-	/// shown via QMessageBox::critical(), not the tray/status-bar routing
-	/// showUserWarning() uses.
-	void showFatalError(const QString& text);
 	void showHistoryLoadReconciliation(const QString& text);
 	void onAboutToQuit();
 };

@@ -64,7 +64,7 @@ Each box in one or two lines:
   `persistence.md` for the storage model.
 - **`TimeTracker`** — the timing engine and state machine. Owns the session in
   memory, drives checkpoints, talks to `SessionStore` for persistence, and
-  emits `transitioned`, `stopped`, `userWarning`, `fatalError` for the GUI to
+  emits `transitioned`, `stopped`, `userWarning` for the GUI to
   follow.
 - **`ShutdownCoordinator`** — runs the shutdown sequence (see
   `runtime-behaviour.md`). Holds references to `TimeTracker` and `SessionStore`;
@@ -186,7 +186,6 @@ sequenceDiagram
     CW->>TT: startPausePressed()<br/>→ onStartPausePressed
     CW->>TT: stopPressed()<br/>→ onStopPressed
     TT-->>MW: userWarning(QString)<br/>→ showUserWarning
-    TT-->>MW: fatalError(QString)<br/>→ showFatalError (queued)
     TT-->>MW: stopped(StopReason)<br/>→ health_monitor_.reset
     TT-->>CW: transitioned(Transition)<br/>→ onTransitioned
     TT-->>HD: exclusiveEditRevoked()<br/>→ onExclusiveEditRevoked

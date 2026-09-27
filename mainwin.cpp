@@ -108,19 +108,6 @@ void MainWin::showUserWarning(const QString& text)
 	statusBar()->showMessage(text, 10000);
 }
 
-void MainWin::showFatalError(const QString& text)
-{
-	// C4 (round-3 F9): only restore visibility when the window is not
-	// already shown (e.g. minimized to tray). Calling showMainWin()
-	// unconditionally raises/activates the main window even when it is
-	// already visible behind an open modal dialog (HistoryDialog is the
-	// one production path that reaches this), stealing focus from it.
-	if (!isVisible()) {
-		showMainWin();
-	}
-	QMessageBox::critical(this, "Database Error", text);
-}
-
 void MainWin::showHistoryLoadReconciliation(const QString& text)
 {
 	statusBar()->showMessage(text, 10000);

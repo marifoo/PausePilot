@@ -31,13 +31,13 @@ itself, so the GUI can react without keeping its own state:
   every real mode change, button/lock/midnight/shutdown-driven alike.
   `Transition` holds `from`, `to`, and a `TransitionCause` (`ButtonStart`,
   `ButtonPause`, `ButtonStop`, `LockAutopause`, `LockResume`,
-  `MidnightScheduled`, `MidnightWatchdog`, `Shutdown`,
-  `FatalStoreError`). `ContentWidget::onTransitioned` reduces it to a GUI
+  `MidnightScheduled`, `MidnightWatchdog`, `Shutdown`).
+  `ContentWidget::onTransitioned` reduces it to a GUI
   update; there is no separate per-cause signal for each transition kind
   the way there used to be.
 - `TimeTracker::stopped(StopReason)` — kept as a separate terminal-only
-  event (`ButtonStop`, `MidnightScheduled`, `MidnightWatchdog`, `Shutdown`,
-  `FatalStoreError`), derived from the same emission point as
+  event (`ButtonStop`, `MidnightScheduled`, `MidnightWatchdog`, `Shutdown`),
+  derived from the same emission point as
   `transitioned()`, for observers that only care "did tracking stop, and
   why" (today just `HealthMonitor::reset`).
 
@@ -155,7 +155,7 @@ live checkpoint keeps advancing on its normal 5-minute cadence for the whole
 time History is open, since a past-day save never touches the dates the live
 row and Today occupy. Only `is_locked_` suspends checkpoints.
 
-### History force-close at midnight, lock, sleep, and shutdown
+### History force-close at midnight, lock, sleep, shutdown, and mode changes
 
 When `HistoryDialog` is open and any of the following events occurs, the engine
 revokes History's edit, closes the dialog, and discards any unsaved changes:
@@ -170,10 +170,11 @@ revokes History's edit, closes the dialog, and discards any unsaved changes:
 - **Shutdown/logout/SIGTERM/end-session:** the shutdown sequence revokes
   History before stopping the live segment.
 - **Any other real mode change (H5/WP7c):** Start, Pause, unpause, or Stop --
-  whether via button, toggle, or the fatal-latch stop -- revokes History as
+  whether via button or toggle -- revokes History as
   the first statement of `TimeTracker::emitTransition()`, the one place every
-  real mode change passes through. This is a backstop: production only
-  reaches it when none of the paths above has already revoked first. A
+  real mode change passes through. This is a backstop: `HistoryDialog` is
+  application-modal (`exec()`), so production only reaches this path when
+  none of the paths above has already revoked first. A
   refused or no-op request (Start while already active, Stop while stopped,
   a backward-clock Pause refusal, a failed pending-commit retry, Start
   refused after shutdown) never reaches `emitTransition()` and never revokes.
@@ -181,9 +182,10 @@ revokes History's edit, closes the dialog, and discards any unsaved changes:
 For the lock/midnight/shutdown paths, the revoke runs **before** the engine
 makes any other state change for the event. For the `emitTransition()`
 backstop, the revoke runs after the transition's own state change and
-persistence, but always before `transitioned()` is emitted -- so a slot on
-`exclusiveEditRevoked()` must not call back into `TimeTracker`. Either way,
-`TimeTracker::revokeExclusiveEdit()` emits `exclusiveEditRevoked()`,
+persistence, but always before `transitioned()`/`stopped()` are emitted --
+so a slot on `exclusiveEditRevoked()`, and on `userWarning()` when it
+carries the revoke notice, must not call back into `TimeTracker`. Either
+way, `TimeTracker::revokeExclusiveEdit()` emits `exclusiveEditRevoked()`,
 which synchronously sets a flag on `HistoryDialog`, then queues `closeRevoked()`
 to close any open child dialogs and menus, then closes History itself with
 `reject()`. `HistoryDialog::saveChanges()` checks the flag and refuses all
