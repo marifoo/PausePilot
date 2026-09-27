@@ -96,11 +96,11 @@ void setDataDirOverride(const QString& dirPath);
 void clearDataDirOverride();
 
 /// WP4b: seeds `rows` directly into the durations table via rawDb_dbg(),
-/// bypassing commitSession/replaceAll, in canonical toUtcIso text
+/// bypassing commitSession, in canonical toUtcIso text
 /// (UTC, ISODateWithMs). Does not normalize or merge -- each row is
 /// inserted exactly as given. `finalized` sets is_finalized for every row.
-/// Tests use this instead of SqliteSessionStore::replaceAll to seed store
-/// rows (see B7/WP4b in the H5 plan).
+/// Tests use this to seed store rows without a production write path
+/// (see B7/WP4b in the H5 plan; WP9 removed replaceAll entirely).
 void seedStoredRows(SqliteSessionStore& db, const std::deque<TimeDuration>& rows, bool finalized);
 
 /// Fake counterpart of seedStoredRows(): appends to loadDurationsResult.durations

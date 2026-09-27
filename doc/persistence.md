@@ -78,10 +78,8 @@ entry — no second row is created, no orphan is left behind.
 
 Checkpoints exist for crash recovery: if the process dies between
 checkpoint-and-finalize, the next startup can recover most of the
-in-progress segment from the unfinalized row. They are deliberately cheap —
-`saveCheckpoint` does not create the `.backup` / `.durations.txt` snapshot
-that `replaceAll` produces, because at a 5-minute cadence
-that would generate hundreds of files per day.
+in-progress segment from the unfinalized row. They are deliberately cheap:
+`saveCheckpoint` writes only the one row, at a 5-minute cadence.
 
 An open `HistoryDialog` no longer suspends checkpoints (H5/WP6): only
 `is_locked_` does. The periodic write keeps updating the live row's
@@ -220,10 +218,6 @@ store's own contract. Any non-`Success` result keeps the user's edits in the
 dialog (nothing is written) and shows a critical dialog; the user can retry
 or cancel.
 
-`SessionStore::replaceAll()` and its safety-backup step still exist in
-production code (removed only in a later package, C11), but nothing in
-`HistoryDialog`'s save path calls them any more.
-
 ### Scoped History save (H5/WP2)
 
 `SqliteSessionStore::saveHistoryDays(openSnapshot, days)` is the write path
@@ -242,7 +236,7 @@ Everything below runs inside **one transaction covering every day** in
 `days`:
 
 1. **CallerBug** input-shape checks run first, before any mutation and before
-   the Disabled check (the same precedence `commitSession`/`replaceAll`/
+   the Disabled check (the same precedence `commitSession`/
    `saveCheckpoint`/`discardCheckpoint` already use): unique dates, valid
    non-empty spans, ids unique across every day's deletes and upserts
    combined (which also catches an id both deleted and upserted), every
@@ -279,6 +273,9 @@ Everything below runs inside **one transaction covering every day** in
    `checkSegmentIdUniqueness()`.
 
 No backup and no `*.durations.txt` export -- this path never creates either.
+(C11/WP9 removed the automatic backup/export mechanism entirely; any
+`*.backup`/`*.durations.txt` files a previous version left behind are user
+files now, untouched and no longer pruned by this app.)
 
 ### Revoked edits
 
@@ -298,10 +295,10 @@ before it commits.
 ## What is inside the `SessionStore` seam — and what is not
 
 Everything in this document — the SQL, the transactions, the
-`is_finalized` flag, the orphan-id bookkeeping, the backup files, retention
+`is_finalized` flag, the orphan-id bookkeeping, retention
 cleanup, schema migrations — lives **inside** `SqliteSessionStore`. None of
 it crosses the interface defined in `sessionstore.h`. `TimeTracker` calls
-`commitSession`, `replaceAll`, `loadDurations`, `hasEntriesForDate`,
+`commitSession`, `loadDurations`, `hasEntriesForDate`,
 `saveCheckpoint`, `discardCheckpoint`, `recoverStartupCheckpoints`, and
 `checkSchemaOnStartup`; `flushToDisc` and `markCleanShutdown` (the sole
 owner of writing the clean-shutdown marker) are called only by

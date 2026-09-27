@@ -24,9 +24,8 @@ private slots:
     void cleanupTestCase();
     
     // Core database tests
-    void test_database_replaceAll_persists_durations_when_retention_enabled();
     void test_database_disabled_history_ignores_writes_and_returns_no_durations();
-    void test_database_transaction_rollback_on_replace_failure();
+    void test_database_write_refused_on_unwritable_file_then_recovers();
     void test_database_checkpoint_single_row_per_segment();
     void test_database_checkpoint_missing_segment_reinserts_same_segment_id();
     void test_database_checkpoint_preserves_start_time();
@@ -44,12 +43,6 @@ private slots:
     void test_database_millisecond_precision();
     void test_database_schema_validation_fresh_database();
     void test_database_schema_creates_idx_finalized_start();
-    void test_database_backup_file_creation();
-    void test_M2_low_disk_skip_reports_missing_backup();
-    void test_M2_backup_copy_failure_reports_missing_backup();
-    void test_M2_successful_backup_reports_backup_present();
-    void test_database_backup_preserves_contents();
-    void test_database_backup_filenames_collision_free();
 
     // Schema/validation tests
     void test_exactMatching_upsertReplacesById();
@@ -84,11 +77,9 @@ private slots:
     void test_connection_open_after_construction();
     void test_pragma_synchronous_normal_set_after_construction();
 
-    // commitSession and replaceAll contract tests
+    // commitSession contract tests
     void test_T_commitSession_upserts_by_segment_id();
     void test_U_commitSession_orphan_cleanup_is_internal();
-    void test_V_replaceAll_wipes_and_rewrites();
-    void test_W_backup_created_before_replaceAll_not_commitSession();
 
     // flushToDisc durable heartbeat (Issue 2)
     void test_flushToDisc_writes_heartbeat_row();
@@ -189,16 +180,15 @@ private slots:
 
     // C2 (R07-001): a failed COMMIT must roll back, leaving the connection
     // outside the transaction so later autocommit operations behave normally.
-    void test_C2_replaceAll_rolls_back_on_commit_failure();
     void test_C2_saveCheckpoint_insert_rolls_back_on_commit_failure();
     void test_C2_saveCheckpoint_update_rolls_back_on_commit_failure();
-    void test_C2_replaceAll_preserves_commit_error_when_rollback_also_fails();
+    void test_C2_commitSession_preserves_commit_error_when_rollback_also_fails();
     void test_C2_saveCheckpoint_insert_rolls_back_on_genuine_commit_lock_failure();
     // C2 round-2 fix (R07-001): a commit failure with an EMPTY error text
     // must still surface as a failure to the caller -- not be misread as
     // success because the old contract inferred success from message
     // emptiness.
-    void test_C2_replaceAll_fails_on_commit_failure_with_empty_error_text();
+    void test_C2_commitSession_fails_on_commit_failure_with_empty_error_text();
     // D13e: updateDurationsById() (commitSession's commit site, the
     // dominant production write path) did not call commitOrRollback(), so a
     // failed COMMIT there could leave the connection inside an open
@@ -215,8 +205,6 @@ private slots:
     void test_C3_loadDurations_rolls_back_malformed_delete_on_commit_failure_and_retries();
     void test_C3_commitSession_rejects_cross_day_payload();
     void test_C3_saveCheckpoint_rejects_cross_day_interval();
-    void test_C3_replaceAll_rejects_cross_type_overlap();
-    void test_C3_replaceAll_rejects_cross_day_payload();
     // Review packet C3 MUST-FIX3: pin the previously-unpinned NonPositive,
     // DuplicateId, and InvalidTimestamp violation branches at the store
     // write boundary (mutation testing showed disabling any of these
@@ -253,7 +241,6 @@ private slots:
     // D8 (R06-004): centralized connection PRAGMA configuration must be
     // re-applied on every reconnect, not only at construction.
     void test_D8_ensureOpen_reconnect_restores_synchronous_normal();
-    void test_D8_createBackup_reopen_restores_synchronous_normal();
 
     // WP1b (H2): loadHistoryRows acceptance tests -- raw text and parsing
     void test_H2_loadHistoryRows_unsorted_seeding_returns_sorted_by_start_then_id();
@@ -307,6 +294,12 @@ private slots:
     // M1: a failed db.rollback() on an early-exit path (not a commit failure)
     // must also close the connection.
     void test_H5_WP2_saveHistoryDays_rollbackFailure_on_staleConflict_closes_connection();
+
+    // WP9 (C11): the automatic backup/export mechanism is gone entirely --
+    // pre-existing *.backup/*.durations.txt sidecars left by an older build
+    // must be untouched (same size and mtime) and no new one may appear,
+    // across both checkSchemaOnStartup() and a successful saveHistoryDays().
+    void test_H5_WP9_old_sidecars_untouched_by_startup_and_saveHistoryDays();
 };
 
 #endif // TEST_DATABASE_H

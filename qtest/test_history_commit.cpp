@@ -302,12 +302,11 @@ void HistoryCommitTest::test_raii_guard_resumes_on_destruction()
 
 // ---------------------------------------------------------------------------
 // WP5 acceptance: a date-scoped save never touches backup/export sidecars.
-// saveHistoryDays() never calls createBackup() (unlike replaceAll()), so a
-// save through the dialog must leave the DB directory's file listing --
-// including any pre-existing *.backup / *.durations.txt sidecars -- exactly
-// as it was: same files, same sizes, same mtimes. This guards against a
-// later change that adds a backup/export to the scoped path, or routes a
-// save back through replaceAll.
+// saveHistoryDays() never creates a backup or export file, so a save through
+// the dialog must leave the DB directory's file listing -- including any
+// pre-existing *.backup / *.durations.txt sidecars -- exactly as it was:
+// same files, same sizes, same mtimes. This guards against a later change
+// that adds a backup/export to the scoped path.
 // ---------------------------------------------------------------------------
 
 void HistoryCommitTest::test_save_leaves_sidecars_unchanged()

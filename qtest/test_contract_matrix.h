@@ -17,8 +17,8 @@
  *
  * C4 (R05-003/R05-005/R05-006/R02-003/R07-003) adds: a discardCheckpoint row and a
  * checkSchemaOnStartup row (both previously missing from this matrix despite its
- * "every public method" header), executable CallerBug cells for commitSession/
- * replaceAll's duplicate-segment_id guard, a same-root-cause consistency check for
+ * "every public method" header), executable CallerBug cells for commitSession's
+ * duplicate-segment_id guard, a same-root-cause consistency check for
  * ensureOpen() failure classification across the methods that used to disagree
  * (R07-003), and a dedicated section that runs the identity/no-mutation cells that
  * matter for caller behavior against FakeSessionStore too, so fake/concrete drift
@@ -51,17 +51,6 @@ private slots:
     void test_commitSession_callerBug_duplicate_segmentId();
     // transient/fatal: ensureOpen failure now consistently returns TransientError
     // (C4/R07-003, see test_C4_ensureOpen_failure_classified_consistently).
-
-    // ── replaceAll ──────────────────────────────────────────────────
-    void test_replaceAll_success();
-    void test_replaceAll_disabled_returns_Disabled();
-    // CallerBug: duplicate segment_id across the COMBINED history+session
-    // payload (C4/R05-003) -- uniqueness is checked across both buckets, not
-    // each one separately. Data rows cover history enabled AND disabled --
-    // CallerBug wins over Disabled (precedence rule in sessionstore.h).
-    void test_replaceAll_callerBug_duplicate_segmentId_across_history_and_session_data();
-    void test_replaceAll_callerBug_duplicate_segmentId_across_history_and_session();
-    // transient/fatal: covered implicitly by ensureOpen and transaction failures
 
     // ── loadDurations ────────────────────────────────────────────────
     void test_loadDurations_success_returns_rows();
@@ -106,7 +95,7 @@ private slots:
     void test_saveCheckpoint_callerBug_empty_segmentId();
     void test_saveCheckpoint_callerBug_finalized_segmentId();
     // C4 fix round 2 (MEDIUM-6): an invalid interval must win over Disabled
-    // too, matching commitSession/replaceAll -- saveCheckpoint's DayValidity
+    // too, matching commitSession -- saveCheckpoint's DayValidity
     // guard was checked AFTER the Disabled guard, so a Disabled-history
     // caller bug was misreported as Disabled instead of CallerBug.
     void test_saveCheckpoint_callerBug_invalid_interval_data();
@@ -175,9 +164,9 @@ private slots:
     // ── C4/R07-003: ensureOpen() failure classification consistency ──
     // The SAME root cause (connection cannot be (re)opened, e.g. a read-only
     // DB file) used to be reported as FatalError by some write boundaries
-    // (replaceAll/saveCheckpoint/discardCheckpoint/loadDurations/
+    // (saveCheckpoint/discardCheckpoint/loadDurations/
     // recoverStartupCheckpoints) and TransientError by others (commitSession/
-    // updateDurationsById, flushToDisc, setLastCleanShutdownMarker). All seven now agree:
+    // updateDurationsById, flushToDisc, setLastCleanShutdownMarker). All six now agree:
     // TransientError -- ensureOpen() is explicitly designed to transparently
     // reopen a lost connection, and this exact failure mode (e.g. a
     // temporarily read-only file) is recovered by an ordinary retry once the
@@ -193,8 +182,6 @@ private slots:
     // sessionstore.h), so only the identity (empty/duplicate id) and
     // Disabled-is-a-no-op facts are checked here against FakeSessionStore. ──
     void test_C4_fake_commitSession_callerBug_duplicate_segmentId();
-    void test_C4_fake_replaceAll_callerBug_duplicate_segmentId();
-    void test_C4_fake_replaceAll_disabled_does_not_mutate_storedDurations();
     // C4 fix round 3 (F7): the fake must classify a segment_id that already
     // belongs to a finalized (commitSession'd) row as CallerBug, exactly
     // like SqliteSessionStore::saveCheckpoint
@@ -210,7 +197,6 @@ private slots:
     void test_H2_fake_preset_unfinalized_row_removed_by_discard();
     void test_H2_fake_duplicate_unfinalized_preset_id_dropped();
     void test_H2_fake_loadHistoryRows_output_sorted_and_parsed_local();
-    void test_H2_fake_replaceAll_reports_session_rows_as_unfinalized();
 };
 
 #endif // TEST_CONTRACT_MATRIX_H

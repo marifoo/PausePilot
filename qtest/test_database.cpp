@@ -23,38 +23,6 @@ void DatabaseTest::cleanupTestCase()
     TestCommon::clearDataDirOverride();
 }
 
-void DatabaseTest::test_database_replaceAll_persists_durations_when_retention_enabled()
-{
-    // Arrange: history_days_to_keep>0 => ensureOpen/ensureSchema create DB
-    resetDatabaseFile();
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 2));
-    SqliteSessionStore manager(settings);
-    QVERIFY(manager.ensureOpen_dbg()); // no-op but should succeed
-
-    std::deque<TimeDuration> durations;
-    QDateTime now = fixedNowUtc();
-    durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addDays(-3), now.addDays(-3).addSecs(60)));
-    durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addDays(-1), now.addDays(-1).addSecs(60)));
-    durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now, now.addSecs(60)));
-
-    // Act
-    auto result = manager.replaceAll(Timeline(durations, std::nullopt), Timeline());
-
-    // Assert
-    QVERIFY(result.ok());
-    // performRetentionCleanup() only runs from checkSchemaOnStartup()
-    // (sqlitesessionstore.cpp), which this test never calls -- ensureOpen()
-    // and the constructor do not invoke it. So no pruning happens here at
-    // all, and this >= 2 does not exercise retention; that exact boundary is
-    // what test_retention_cleanup_runs_once_across_multiple_opens and
-    // test_D2_retentionCutoff_uses_injected_clock_exact_boundary pin.
-    // Kept as-is: it is the original assertion, restated verbatim.
-    auto loaded = manager.loadDurations();
-    QVERIFY(static_cast<int>(loaded.size()) >= 2);
-}
-
 void DatabaseTest::test_database_disabled_history_ignores_writes_and_returns_no_durations()
 {
     // Arrange: history_days_to_keep=0 disables db
@@ -341,7 +309,7 @@ void DatabaseTest::test_loadDurations_skipsNegativeDurationRows()
     QCOMPARE(static_cast<int>(loaded.size()), 1); // reversed row skipped
 }
 
-void DatabaseTest::test_database_transaction_rollback_on_replace_failure()
+void DatabaseTest::test_database_write_refused_on_unwritable_file_then_recovers()
 {
     resetDatabaseFile();
     QTemporaryDir tempDir;
@@ -355,26 +323,29 @@ void DatabaseTest::test_database_transaction_rollback_on_replace_failure()
     originalData.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-190)));
     originalData.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-180), now.addSecs(-170)));
     QVERIFY(manager.commitSession(Timeline(originalData, std::nullopt)).ok());
-    
+
     auto loaded = manager.loadDurations();
     QCOMPARE(loaded.size(), (size_t)2);
-    
-    // Make database read-only before entering replaceAll (R07-004): this
-    // fails the first write inside the transaction (the Replace-mode DELETE),
-    // not a boundary between DELETE and INSERT -- nothing changes permissions
-    // mid-transaction here.
+
+    // An already-open fd stays writable on Linux regardless of a later
+    // chmod (the permission check happens at open(), not at each write()),
+    // so close the connection first: this forces ensureOpen()'s next call to
+    // genuinely re-open the file, which is where the real OS-level denial
+    // below actually bites.
+    manager.closeConnection_dbg();
     QFile dbFile(db_path_);
     QVERIFY(dbFile.setPermissions(QFile::ReadOwner | QFile::ReadUser));
-    
-    // Try Replace mode - should fail and rollback
-    std::deque<TimeDuration> replacementData;
-    replacementData.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-50), now.addSecs(-40)));
-    QVERIFY(!manager.replaceAll(Timeline(replacementData, std::nullopt), Timeline()).ok());
-    
+
+    // The write should fail (ensureOpen()'s reopen sees the unwritable file)
+    // without mutating anything.
+    std::deque<TimeDuration> additionalData;
+    additionalData.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-50), now.addSecs(-40)));
+    QVERIFY(!manager.commitSession(Timeline(additionalData, std::nullopt)).ok());
+
     // Restore permissions
     QVERIFY(dbFile.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ReadUser));
-    
-    // Original data should be preserved (rollback after DELETE)
+
+    // Original data should be preserved -- the store transparently reconnects.
     loaded = manager.loadDurations();
     QCOMPARE(loaded.size(), (size_t)2);
 }
@@ -1004,185 +975,6 @@ void DatabaseTest::test_database_schema_creates_idx_finalized_start()
     QCOMPARE(query.value(0).toString(), QString("idx_start_utc"));
 }
 
-void DatabaseTest::test_database_backup_file_creation()
-{
-    resetDatabaseFile();
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    SqliteSessionStore manager(settings);
-
-    // Snapshot existing artifacts so stale files from prior runs don't mask failures
-    QDir testDir(data_dir_.path());
-    const int backupsBefore = testDir.entryList(QStringList() << "*.backup", QDir::Files).size();
-    const int txtBefore     = testDir.entryList(QStringList() << "*.durations.txt", QDir::Files).size();
-
-    // replaceAll() is the only public write path that creates a backup
-    // (D11: commitSession() never backs up -- see
-    // test_W_backup_created_before_replaceAll_not_commitSession).
-    QDateTime now = fixedNow();
-    std::deque<TimeDuration> durations;
-    durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-90)));
-
-    QVERIFY(manager.replaceAll(Timeline(durations, std::nullopt), Timeline()).ok());
-
-    // Assert this run produced new backup artifacts (delta from snapshot)
-    QVERIFY(testDir.entryList(QStringList() << "*.backup", QDir::Files).size() > backupsBefore);
-    QVERIFY(testDir.entryList(QStringList() << "*.durations.txt", QDir::Files).size() > txtBefore);
-}
-
-void DatabaseTest::test_M2_low_disk_skip_reports_missing_backup()
-{
-    resetDatabaseFile();
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    SqliteSessionStore manager(settings);
-
-    QDateTime now = fixedNow();
-    std::deque<TimeDuration> seed;
-    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-190)));
-    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-180), now.addSecs(-170)));
-    QVERIFY(manager.commitSession(Timeline(seed, std::nullopt)).ok());
-
-    QDir testDir(data_dir_.path());
-    const int backupsBefore = testDir.entryList(QStringList() << "*.backup", QDir::Files).size();
-
-    manager.setForceBackupLowDisk_dbg(true);
-
-    std::deque<TimeDuration> replacement;
-    replacement.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-90)));
-    const SessionStoreResult r = manager.replaceAll(Timeline(replacement, std::nullopt), Timeline());
-
-    QVERIFY(r.ok());
-    QVERIFY(r.backupMissing);
-    QCOMPARE(testDir.entryList(QStringList() << "*.backup", QDir::Files).size(), backupsBefore);
-    QVERIFY(manager.lastBackupPath_dbg().isEmpty());
-
-    const auto loaded = manager.loadDurations();
-    QCOMPARE(loaded.size(), (size_t)1);
-}
-
-void DatabaseTest::test_M2_backup_copy_failure_reports_missing_backup()
-{
-    resetDatabaseFile();
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    SqliteSessionStore manager(settings);
-
-    QDateTime now = fixedNow();
-    std::deque<TimeDuration> seed;
-    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-190)));
-    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-180), now.addSecs(-170)));
-    QVERIFY(manager.commitSession(Timeline(seed, std::nullopt)).ok());
-
-    manager.setForceBackupCopyFailure_dbg(true);
-
-    std::deque<TimeDuration> replacement;
-    replacement.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-90)));
-    const SessionStoreResult r = manager.replaceAll(Timeline(replacement, std::nullopt), Timeline());
-
-    QVERIFY(r.ok());
-    QVERIFY(r.backupMissing);
-    QVERIFY(manager.lastBackupPath_dbg().isEmpty());
-
-    const auto loaded = manager.loadDurations();
-    QCOMPARE(loaded.size(), (size_t)1);
-}
-
-void DatabaseTest::test_M2_successful_backup_reports_backup_present()
-{
-    resetDatabaseFile();
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    SqliteSessionStore manager(settings);
-
-    QDateTime now = fixedNow();
-    std::deque<TimeDuration> seed;
-    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-190)));
-    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-180), now.addSecs(-170)));
-    QVERIFY(manager.commitSession(Timeline(seed, std::nullopt)).ok());
-
-    QDir testDir(data_dir_.path());
-    const int backupsBefore = testDir.entryList(QStringList() << "*.backup", QDir::Files).size();
-
-    std::deque<TimeDuration> replacement;
-    replacement.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-90)));
-    const SessionStoreResult r = manager.replaceAll(Timeline(replacement, std::nullopt), Timeline());
-
-    QVERIFY(r.ok());
-    QVERIFY(!r.backupMissing);
-    QCOMPARE(testDir.entryList(QStringList() << "*.backup", QDir::Files).size(), backupsBefore + 1);
-    QVERIFY(!manager.lastBackupPath_dbg().isEmpty());
-    QVERIFY(QFile::exists(manager.lastBackupPath_dbg()));
-}
-
-void DatabaseTest::test_database_backup_preserves_contents()
-{
-    resetDatabaseFile();
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    SqliteSessionStore manager(settings);
-
-    // Create data
-    QDateTime now = fixedNow();
-    std::deque<TimeDuration> original;
-    original.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-90)));
-    original.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-80), now.addSecs(-70)));
-    
-    QVERIFY(manager.commitSession(Timeline(original, std::nullopt)).ok());
-
-    // Trigger backup via replaceAll — creates a backup of the 2-row DB, then writes 1 row
-    std::deque<TimeDuration> replacement;
-    replacement.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-50), now.addSecs(-40)));
-    QVERIFY(manager.replaceAll(Timeline(replacement, std::nullopt), Timeline()).ok());
-
-    // Identify the exact backup replaceAll() wrote instead of scanning the
-    // data directory (mtime-ordered scans tie at millisecond granularity).
-    QString backupPath = manager.lastBackupPath_dbg();
-    QVERIFY2(!backupPath.isEmpty(), "No new backup file was created by this test");
-
-    // Restore from backup and verify it has original data
-    QFile::remove(db_path_);
-    QVERIFY(QFile::copy(backupPath, db_path_));
-
-    // Open a fresh connection so we read the restored file, not the old cached connection.
-    SqliteSessionStore restored(settings);
-    auto loaded = restored.loadDurations();
-    QCOMPARE(loaded.size(), (size_t)2); // Original had 2 entries
-}
-
-void DatabaseTest::test_database_backup_filenames_collision_free()
-{
-    // Regression: two back-to-back saves must produce two DISTINCT .backup files
-    // even if both calls happen within the same millisecond.  The old second-
-    // resolution names would collide and QFile::copy() would silently skip the
-    // second backup, leaving only 1 distinct file.
-    resetDatabaseFile();
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    SqliteSessionStore manager(settings);
-
-    QDir testDir(data_dir_.path());
-    const int backupsBefore = testDir.entryList(QStringList() << "*.backup", QDir::Files).size();
-
-    QDateTime now = fixedNow();
-    std::deque<TimeDuration> durations;
-    durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-90)));
-
-    // Two writes back-to-back via replaceAll (the backup-creating public
-    // path) -- no qWait, may land in the same millisecond.
-    QVERIFY(manager.replaceAll(Timeline(durations, std::nullopt), Timeline()).ok());
-    QVERIFY(manager.replaceAll(Timeline(durations, std::nullopt), Timeline()).ok());
-
-    const int backupsAfter = testDir.entryList(QStringList() << "*.backup", QDir::Files).size();
-    QCOMPARE(backupsAfter - backupsBefore, 2); // both saves must produce distinct files
-}
-
 // ============================================================================
 // hasEntriesForDate tri-state result tests (T18)
 // ============================================================================
@@ -1627,7 +1419,7 @@ void DatabaseTest::test_retention_cleanup_retries_after_failure()
         std::deque<TimeDuration> durations;
         durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addDays(-10), now.addDays(-10).addSecs(60)));
         durations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-60), now));
-        QVERIFY(seed.replaceAll(Timeline(durations, std::nullopt), Timeline()).ok());
+        TestCommon::seedStoredRows(seed, durations, true);
     }
 
     // Make the DB read-only.
@@ -1727,7 +1519,7 @@ void DatabaseTest::test_pragma_synchronous_normal_set_after_construction()
 }
 
 // ============================================================================
-// commitSession and replaceAll contract tests
+// commitSession contract tests
 // ============================================================================
 
 /**
@@ -1816,85 +1608,6 @@ void DatabaseTest::test_U_commitSession_orphan_cleanup_is_internal()
     }
     QVERIFY(segAFound || !segBFound); // exactly one segment, segB is gone
     QVERIFY(!segBFound);
-}
-
-/**
- * V: replaceAll wipes and rewrites.
- * Pre-populate with X rows, call replaceAll with Y rows, assert exactly Y remain.
- */
-void DatabaseTest::test_V_replaceAll_wipes_and_rewrites()
-{
-    resetDatabaseFile();
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    SqliteSessionStore manager(settings);
-
-    QDateTime now = fixedNow();
-
-    // Seed 3 rows
-    std::deque<TimeDuration> initial;
-    initial.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-300), now.addSecs(-200)));
-    initial.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-200), now.addSecs(-100)));
-    initial.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
-    QVERIFY(manager.commitSession(Timeline(initial, std::nullopt)).ok());
-    QCOMPARE(static_cast<int>(manager.loadDurations().size()), 3);
-
-    // replaceAll with 2 different rows
-    std::deque<TimeDuration> replacement;
-    replacement.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-80), now.addSecs(-40)));
-    replacement.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-40), now.addSecs(-10)));
-
-    QVERIFY(manager.replaceAll(Timeline(replacement, std::nullopt),
-                                Timeline({}, std::nullopt)).ok());
-
-    auto loaded = manager.loadDurations();
-    QCOMPARE(static_cast<int>(loaded.size()), 2);
-}
-
-/**
- * W: Backup is created before replaceAll but NOT before commitSession.
- * commitSession should NOT create a .backup file; replaceAll should.
- */
-void DatabaseTest::test_W_backup_created_before_replaceAll_not_commitSession()
-{
-    resetDatabaseFile();
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    SqliteSessionStore manager(settings);
-
-    QDir appDir(data_dir_.path());
-    QStringList before = appDir.entryList(QStringList() << "*.backup", QDir::Files);
-
-    QDateTime now = fixedNow();
-    std::deque<TimeDuration> segs;
-    segs.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-60), now));
-
-    // Seed via commitSession, which itself creates no backup (that is the
-    // fact under test below), so the .sqlite file exists for later steps.
-    QVERIFY(manager.commitSession(Timeline(segs, std::nullopt)).ok());
-
-    QStringList afterSeed = appDir.entryList(QStringList() << "*.backup", QDir::Files);
-    int countAfterSeed = afterSeed.size();
-
-    // commitSession should NOT create new backup files
-    QVERIFY(manager.commitSession(Timeline(segs, std::nullopt)).ok());
-    QStringList afterCommit = appDir.entryList(QStringList() << "*.backup", QDir::Files);
-    QCOMPARE(afterCommit.size(), countAfterSeed); // no new backup
-
-    // Wait >1 s so the timestamp in the backup filename differs from the seed backup.
-    // createBackup uses second-level timestamps; QFile::copy silently fails if the
-    // destination already exists.
-    QTest::qWait(1100);
-
-    // replaceAll SHOULD create a new backup file
-    QVERIFY(manager.replaceAll(Timeline(segs, std::nullopt),
-                                Timeline({}, std::nullopt)).ok());
-    QStringList afterReplace = appDir.entryList(QStringList() << "*.backup", QDir::Files);
-    QVERIFY(afterReplace.size() > countAfterSeed); // new backup created
-
-    (void)before; // silence unused variable warning
 }
 
 // ============================================================================
@@ -3991,50 +3704,6 @@ void DatabaseTest::test_A4_recovery_never_deletes_finalized_row_matching_intent(
 // fault (e.g. a locked file) to trigger a real one.
 // ============================================================================
 
-void DatabaseTest::test_C2_replaceAll_rolls_back_on_commit_failure()
-{
-    // Arrange: two committed rows.
-    resetDatabaseFile();
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    SqliteSessionStore manager(settings);
-
-    QDateTime now = fixedNow();
-    std::deque<TimeDuration> original;
-    original.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-300), now.addSecs(-200)));
-    original.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-200), now.addSecs(-100)));
-    QVERIFY(manager.commitSession(Timeline(original, std::nullopt)).ok());
-
-    // Act: inject a COMMIT failure for the replace.
-    manager.setForceCommitFailure_dbg(true);
-    std::deque<TimeDuration> replacement;
-    replacement.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-80), now.addSecs(-40)));
-    QVERIFY(!manager.replaceAll(Timeline(replacement, std::nullopt), Timeline({}, std::nullopt)).ok());
-
-    // Assert: raw state is still the ORIGINAL two rows -- the DELETE+INSERT
-    // was rolled back, not left with the durations table emptied.
-    QVERIFY(manager.ensureOpen_dbg());
-    QSqlQuery countAfterFailure(manager.rawDb_dbg());
-    QVERIFY(countAfterFailure.exec("SELECT COUNT(*) FROM durations"));
-    QVERIFY(countAfterFailure.next());
-    QCOMPARE(countAfterFailure.value(0).toInt(), 2);
-
-    // Assert: the connection recovers -- a second (non-injected) replace commits normally.
-    QVERIFY(manager.replaceAll(Timeline(replacement, std::nullopt), Timeline({}, std::nullopt)).ok());
-    QSqlQuery countAfterSecondWrite(manager.rawDb_dbg());
-    QVERIFY(countAfterSecondWrite.exec("SELECT COUNT(*) FROM durations"));
-    QVERIFY(countAfterSecondWrite.next());
-    QCOMPARE(countAfterSecondWrite.value(0).toInt(), 1);
-
-    // Assert: checkpoint discard also still works.
-    const SegmentId segId = SegmentId::mint();
-    QVERIFY(manager.saveCheckpoint(DurationType::Activity, now, now.addSecs(10), segId).ok());
-    QVERIFY(manager.discardCheckpoint(segId).ok());
-
-    manager.closeConnection_dbg();
-}
-
 void DatabaseTest::test_C2_saveCheckpoint_insert_rolls_back_on_commit_failure()
 {
     resetDatabaseFile();
@@ -4133,7 +3802,7 @@ void DatabaseTest::test_C2_saveCheckpoint_update_rolls_back_on_commit_failure()
  * before commitOrRollback()'s real db.commit() call -- so this exercises the
  * genuine driver behavior, not a fabricated message.
  */
-void DatabaseTest::test_C2_replaceAll_fails_on_commit_failure_with_empty_error_text()
+void DatabaseTest::test_C2_commitSession_fails_on_commit_failure_with_empty_error_text()
 {
     // Arrange: two committed baseline rows.
     resetDatabaseFile();
@@ -4148,19 +3817,18 @@ void DatabaseTest::test_C2_replaceAll_fails_on_commit_failure_with_empty_error_t
     original.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-200), now.addSecs(-100)));
     QVERIFY(manager.commitSession(Timeline(original, std::nullopt)).ok());
 
-    // Act: the replace's COMMIT genuinely fails with an EMPTY error text.
+    // Act: the update's COMMIT genuinely fails with an EMPTY error text.
     manager.setForceCommitCloseBefore_dbg(true);
-    std::deque<TimeDuration> replacement;
-    replacement.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-80), now.addSecs(-40)));
-    const SessionStoreResult result =
-        manager.replaceAll(Timeline(replacement, std::nullopt), Timeline({}, std::nullopt));
+    std::deque<TimeDuration> addition;
+    addition.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-80), now.addSecs(-40)));
+    const SessionStoreResult result = manager.commitSession(Timeline(addition, std::nullopt));
 
     // Assert: a commit failure is a commit failure, even with no message to
     // report -- callers must never read "no error text" as "success".
     QVERIFY(!result.ok());
-    QCOMPARE(result.message, QStringLiteral("Failed to commit replace transaction: "));
+    QCOMPARE(result.message, QStringLiteral("Failed to commit update transaction: "));
 
-    // Assert: raw state is still the ORIGINAL two rows -- the replace never
+    // Assert: raw state is still the ORIGINAL two rows -- the update never
     // durably committed.
     QVERIFY(manager.ensureOpen_dbg());
     QSqlQuery count(manager.rawDb_dbg());
@@ -4169,11 +3837,11 @@ void DatabaseTest::test_C2_replaceAll_fails_on_commit_failure_with_empty_error_t
     QCOMPARE(count.value(0).toInt(), 2);
 
     // Assert: the connection recovers for a subsequent write.
-    QVERIFY(manager.replaceAll(Timeline(replacement, std::nullopt), Timeline({}, std::nullopt)).ok());
+    QVERIFY(manager.commitSession(Timeline(addition, std::nullopt)).ok());
     QSqlQuery count2(manager.rawDb_dbg());
     QVERIFY(count2.exec("SELECT COUNT(*) FROM durations"));
     QVERIFY(count2.next());
-    QCOMPARE(count2.value(0).toInt(), 1);
+    QCOMPARE(count2.value(0).toInt(), 3);
 
     manager.closeConnection_dbg();
 }
@@ -4187,7 +3855,7 @@ void DatabaseTest::test_C2_replaceAll_fails_on_commit_failure_with_empty_error_t
  * rollback also failed (C2/R07-001), and force_commit_failure_dbg_ (which
  * only fires on the NEXT commitOrRollback() call) could never reach this
  * path at all -- so this exact scenario had zero coverage. Same C2 standard
- * as the replaceAll/saveCheckpoint tests above, exercised via
+ * as the saveCheckpoint tests above, exercised via
  * commitSession() since that is updateDurationsById()'s only caller.
  */
 void DatabaseTest::test_C2_updateDurationsById_rolls_back_on_commit_failure()
@@ -4235,7 +3903,7 @@ void DatabaseTest::test_C2_updateDurationsById_rolls_back_on_commit_failure()
  * Rollback-failure diagnostic (R07-001's proposed direction): if the
  * rollback that follows a failed COMMIT ALSO fails, the primary commit
  * error must still be what the caller sees -- not silently overwritten or
- * replaced by the rollback failure. Uses replaceAll(), which returns a
+ * replaced by the rollback failure. Uses commitSession(), which returns a
  * SessionStoreResult carrying a message, so the message can be asserted
  * directly.
  *
@@ -4247,7 +3915,7 @@ void DatabaseTest::test_C2_updateDurationsById_rolls_back_on_commit_failure()
  * close-on-failed-rollback cleanup (F3/R07-001), not an artifact of the
  * injection already having closed the connection.
  */
-void DatabaseTest::test_C2_replaceAll_preserves_commit_error_when_rollback_also_fails()
+void DatabaseTest::test_C2_commitSession_preserves_commit_error_when_rollback_also_fails()
 {
     // Arrange: two committed baseline rows.
     resetDatabaseFile();
@@ -4265,10 +3933,9 @@ void DatabaseTest::test_C2_replaceAll_preserves_commit_error_when_rollback_also_
     // Act: inject a COMMIT failure AND make the follow-up rollback also fail.
     manager.setForceCommitFailure_dbg(true);
     manager.setForceRollbackFailure_dbg(true);
-    std::deque<TimeDuration> replacement;
-    replacement.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-80), now.addSecs(-40)));
-    const SessionStoreResult result =
-        manager.replaceAll(Timeline(replacement, std::nullopt), Timeline({}, std::nullopt));
+    std::deque<TimeDuration> addition;
+    addition.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-80), now.addSecs(-40)));
+    const SessionStoreResult result = manager.commitSession(Timeline(addition, std::nullopt));
 
     // Assert: the primary commit error is what the caller sees -- not
     // silently overwritten by the rollback failure.
@@ -4283,11 +3950,11 @@ void DatabaseTest::test_C2_replaceAll_preserves_commit_error_when_rollback_also_
     QCOMPARE(count.value(0).toInt(), 2);
 
     // Assert: the connection still recovers for a subsequent write.
-    QVERIFY(manager.replaceAll(Timeline(replacement, std::nullopt), Timeline({}, std::nullopt)).ok());
+    QVERIFY(manager.commitSession(Timeline(addition, std::nullopt)).ok());
     QSqlQuery count2(manager.rawDb_dbg());
     QVERIFY(count2.exec("SELECT COUNT(*) FROM durations"));
     QVERIFY(count2.next());
-    QCOMPARE(count2.value(0).toInt(), 1);
+    QCOMPARE(count2.value(0).toInt(), 3);
 
     manager.closeConnection_dbg();
 }
@@ -4436,79 +4103,6 @@ void DatabaseTest::test_C3_saveCheckpoint_rejects_cross_day_interval()
     QVERIFY(manager.ensureOpen_dbg());
     QCOMPARE(countDurationsForSegment(manager, segId), 0);
     manager.closeConnection_dbg();
-}
-
-void DatabaseTest::test_C3_replaceAll_rejects_cross_type_overlap()
-{
-    resetDatabaseFile();
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    SqliteSessionStore manager(settings);
-
-    // Seed one pre-existing row that must survive untouched if replaceAll()
-    // correctly rejects the whole payload before any mutation.
-    const QDateTime seedStart = QDateTime(QDate(2025, 6, 1), QTime(8, 0, 0), Qt::UTC);
-    const QDateTime seedEnd   = QDateTime(QDate(2025, 6, 1), QTime(8, 30, 0), Qt::UTC);
-    std::deque<TimeDuration> seed;
-    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, seedStart, seedEnd));
-    QVERIFY(manager.commitSession(Timeline(seed, std::nullopt)).ok());
-
-    // Activity 10:00-10:30 overlapping Pause 10:15-10:45 -- same day, no
-    // reversed/empty/duplicate id, but an Activity/Pause overlap.
-    const QDateTime aStart = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
-    const QDateTime aEnd   = QDateTime(QDate(2025, 6, 1), QTime(10, 30, 0), Qt::UTC);
-    const QDateTime pStart = QDateTime(QDate(2025, 6, 1), QTime(10, 15, 0), Qt::UTC);
-    const QDateTime pEnd   = QDateTime(QDate(2025, 6, 1), QTime(10, 45, 0), Qt::UTC);
-    std::deque<TimeDuration> overlapping;
-    overlapping.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, aStart, aEnd));
-    overlapping.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, pStart, pEnd));
-
-    const SessionStoreResult result = manager.replaceAll(Timeline(overlapping, std::nullopt),
-                                                          Timeline({}, std::nullopt));
-
-    QCOMPARE(result.category, SessionStoreResult::CallerBug);
-    // Nothing mutated: the pre-existing seeded row is still exactly there.
-    auto loaded = manager.loadDurations();
-    QCOMPARE(loaded.size(), static_cast<size_t>(1));
-    QCOMPARE(loaded[0].startTime, seedStart.toLocalTime());
-}
-
-void DatabaseTest::test_C3_replaceAll_rejects_cross_day_payload()
-{
-    // MUST-FIX1 (user decision, review packet C3): replaceAll() now rejects a
-    // cross-day row the same uniform way as commitSession()/saveCheckpoint(),
-    // with no allowCrossDay exception. HistoryDialog no longer calls
-    // replaceAll() at all (WP5's scoped save uses saveHistoryDays() instead);
-    // this test pins replaceAll()'s own guard as the final backstop for any
-    // other caller.
-    resetDatabaseFile();
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    SqliteSessionStore manager(settings);
-
-    // Seed one pre-existing row that must survive untouched if replaceAll()
-    // correctly rejects the whole payload before any mutation.
-    const QDateTime seedStart = QDateTime(QDate(2025, 6, 1), QTime(8, 0, 0), Qt::LocalTime);
-    const QDateTime seedEnd   = QDateTime(QDate(2025, 6, 1), QTime(8, 30, 0), Qt::LocalTime);
-    std::deque<TimeDuration> seed;
-    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, seedStart, seedEnd));
-    QVERIFY(manager.commitSession(Timeline(seed, std::nullopt)).ok());
-
-    const QDateTime cmStart(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
-    const QDateTime cmEnd(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime);
-    std::deque<TimeDuration> history;
-    history.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, cmStart, cmEnd));
-
-    const SessionStoreResult result = manager.replaceAll(Timeline::fromPersistedRows(history),
-                                                          Timeline({}, std::nullopt));
-
-    QCOMPARE(result.category, SessionStoreResult::CallerBug);
-    // Nothing mutated: the pre-existing seeded row is still exactly there.
-    auto loaded = manager.loadDurations();
-    QCOMPARE(loaded.size(), static_cast<size_t>(1));
-    QCOMPARE(loaded[0].startTime, seedStart.toLocalTime());
 }
 
 void DatabaseTest::test_C3_saveCheckpoint_rejects_nonpositive_interval()
@@ -5061,26 +4655,6 @@ void DatabaseTest::test_D8_ensureOpen_reconnect_restores_synchronous_normal()
     QVERIFY(q.exec("PRAGMA synchronous"));
     QVERIFY(q.next());
     QCOMPARE(q.value(0).toInt(), 1); // 1 == NORMAL
-}
-
-void DatabaseTest::test_D8_createBackup_reopen_restores_synchronous_normal()
-{
-    // R06-004: createBackup()'s close-copy-reopen cycle must also leave the
-    // connection at synchronous=NORMAL via the same centralized helper.
-    resetDatabaseFile();
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    Settings settings(createSettingsFile(tempDir.path(), 7));
-    SqliteSessionStore manager(settings);
-    QVERIFY(manager.ensureOpen_dbg());
-
-    // replaceAll() triggers createBackup()'s close-copy-reopen cycle.
-    QVERIFY(manager.replaceAll(Timeline(), Timeline()).ok());
-
-    QSqlQuery q(manager.rawDb_dbg());
-    QVERIFY(q.exec("PRAGMA synchronous"));
-    QVERIFY(q.next());
-    QCOMPARE(q.value(0).toInt(), 1);
 }
 
 // ── WP1b (H2): loadHistoryRows acceptance tests ──
@@ -6364,4 +5938,92 @@ void DatabaseTest::test_H5_WP2_saveHistoryDays_rollbackFailure_on_staleConflict_
         QDateTime(dateA, QTime(11, 0, 0), Qt::LocalTime), idA);
     std::deque<TimeDuration> upserts{updated};
     QVERIFY(db.saveHistoryDays(snapshot2.rows, {wp2DayChange(dateA, {}, upserts)}).ok());
+}
+
+// WP9 (C11): the automatic backup/export mechanism (createBackup(),
+// pruneOldBackups(), the .backup/.durations.txt sidecars) is removed
+// entirely. Old sidecar files a previous build left behind are user files
+// now: checkSchemaOnStartup() must not prune them, and a successful
+// saveHistoryDays() must not touch them either -- no backup, no export, on
+// any path.
+void DatabaseTest::test_H5_WP9_old_sidecars_untouched_by_startup_and_saveHistoryDays()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore db(settings);
+
+    const QDate dateA = QDate::currentDate();
+    const SegmentId idA = SegmentId::mint();
+    std::deque<TimeDuration> seed;
+    seed.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(10, 30, 0), Qt::LocalTime), idA));
+    QVERIFY(db.commitSession(Timeline(seed, std::nullopt)).ok());
+
+    // Seed 7 of each suffix (14 files total), named the way createBackup()
+    // used to name them (base + ".<timestamp>.backup" / "...durations.txt"),
+    // in the DB's own directory. 7 per suffix is deliberate: the removed
+    // pruneOldBackups(keepCount = 5) only deleted files once a single
+    // suffix's matches exceeded 5, so seeding at least 6 of each is what
+    // makes this test actually catch a regression that restores it.
+    const QDir dbDir(QFileInfo(db_path_).absoluteDir());
+    QStringList sidecarPaths;
+    for (int i = 0; i < 14; ++i) {
+        const QString suffix = (i < 7) ? ".backup" : ".durations.txt";
+        const QString path = QString("%1.2020-01-%2T00-00-00-%3%4")
+            .arg(db_path_).arg(QString::number((i % 7) + 1).rightJustified(2, '0'))
+            .arg(QString::number(i).rightJustified(3, '0')).arg(suffix);
+        QFile f(path);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(QString("old sidecar %1").arg(i).toUtf8());
+        f.close();
+        sidecarPaths << path;
+    }
+
+    QVector<qint64> sizesBefore;
+    QVector<QDateTime> mtimesBefore;
+    for (const QString& p : sidecarPaths) {
+        sizesBefore << QFileInfo(p).size();
+        mtimesBefore << QFileInfo(p).lastModified();
+    }
+    const int fileCountBefore = dbDir.entryList(QDir::Files).size();
+
+    // Act 1: checkSchemaOnStartup() -- used to prune old backups; must not
+    // touch these files at all any more. (This store was just constructed on
+    // a fresh file, so the first call reports Created, not Ready -- both
+    // mean the DB is usable.)
+    QCOMPARE(db.checkSchemaOnStartup(), SchemaStatus::Created);
+
+    // Act 2: a successful saveHistoryDays() -- must not create a backup or
+    // export either.
+    const HistoryRowsResult snapshot = db.loadHistoryRows();
+    TimeDuration updated = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(dateA, QTime(10, 0, 0), Qt::LocalTime),
+        QDateTime(dateA, QTime(11, 0, 0), Qt::LocalTime), idA);
+    std::deque<TimeDuration> upserts{updated};
+    QVERIFY(db.saveHistoryDays(snapshot.rows, {wp2DayChange(dateA, {}, upserts)}).ok());
+
+    // Assert: all 14 sidecars survive, byte-for-byte, mtime-for-mtime.
+    for (int i = 0; i < sidecarPaths.size(); ++i) {
+        QVERIFY(QFile::exists(sidecarPaths[i]));
+        QCOMPARE(QFileInfo(sidecarPaths[i]).size(), sizesBefore[i]);
+        QCOMPARE(QFileInfo(sidecarPaths[i]).lastModified(), mtimesBefore[i]);
+    }
+    // Assert: no new sidecar (or any other new file) appeared.
+    QCOMPARE(dbDir.entryList(QDir::Files).size(), fileCountBefore);
+
+    // Act 3: checkSchemaOnStartup() again, from a new store on the same
+    // file -- this time it reports Ready (schema already exists), covering
+    // the other call site that used to run pruning. Must still not touch
+    // the sidecars.
+    SqliteSessionStore db2(settings);
+    QCOMPARE(db2.checkSchemaOnStartup(), SchemaStatus::Ready);
+    for (int i = 0; i < sidecarPaths.size(); ++i) {
+        QVERIFY(QFile::exists(sidecarPaths[i]));
+        QCOMPARE(QFileInfo(sidecarPaths[i]).size(), sizesBefore[i]);
+        QCOMPARE(QFileInfo(sidecarPaths[i]).lastModified(), mtimesBefore[i]);
+    }
+    QCOMPARE(dbDir.entryList(QDir::Files).size(), fileCountBefore);
 }

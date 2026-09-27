@@ -251,8 +251,9 @@ private:
     /// finalizePauseTransition) are therefore defence-in-depth against a
     /// future SessionStore implementation, not currently reachable from
     /// SqliteSessionStore, and are exercised in tests only via
-    /// FakeSessionStore injecting FatalError from those operations. (The
-    /// engine no longer calls replaceAll; WP10 removes the latch entirely.)
+    /// FakeSessionStore injecting FatalError from those operations. (WP9
+    /// removed replaceAll(), the last production FatalError producer; WP10
+    /// removes the latch entirely.)
     bool fatal_state_latched_ = false;
     SessionStore& db_;
     mutable QRecursiveMutex mutex_;  // Protects state transitions from concurrent access

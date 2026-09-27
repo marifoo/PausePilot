@@ -4,25 +4,19 @@
  * Connection pattern:
  * - Long-lived: Database opened in the constructor, closed in the destructor.
  * - ensureOpen() is called at the start of every public method as a health
- *   check; if the connection was closed (e.g. by createBackup's copy window),
- *   it will be reopened transparently.
+ *   check; if the connection is unexpectedly lost, it will be reopened
+ *   transparently.
  *
  * Thread safety:
  * - A QRecursiveMutex (db_mutex_) guards every public entry point, preventing
- *   concurrent operations from interleaving.  This is essential because
- *   createBackup() temporarily closes and reopens the database connection;
- *   without the mutex, a concurrent call could hit a closed connection.
- *   QRecursiveMutex (rather than QMutex) is used because public methods
- *   call private helpers that are also called from other public methods.
+ *   concurrent operations from interleaving.  QRecursiveMutex (rather than
+ *   QMutex) is used because public methods call private helpers that are
+ *   also called from other public methods.
  *
  * Save methods:
- * - saveCheckpoint(): Lightweight update without backup, used for periodic checkpoints
+ * - saveCheckpoint(): Lightweight update, used for periodic checkpoints
  * - updateDurationsById(): Smart upsert matching entries by stable segment_id, used
  *   via commitSession() for stopTimer/HistoryDialog
- *
- * Backup strategy:
- * - replaceAll() creates timestamped .backup file + .durations.txt log before writes
- * - saveCheckpoint() skips backup for performance (called every 5 minutes)
  *
  * Configuration:
  * - history_days_to_keep_ = 0 disables database entirely (all methods return early)
@@ -40,8 +34,6 @@
 #include <QVariant>
 #include <QFile>
 #include <QFileInfo>
-#include <QStorageInfo>
-#include <QTextStream>
 #include <algorithm>
 #include <atomic>
 #include "logger.h"
@@ -132,7 +124,7 @@ bool rowEditableInSpan(const StoredHistoryRow& row, const QDateTime& dayStartUtc
 
 // Every CallerBug fact saveHistoryDays() must reject before any mutation and
 // before the Disabled guard (see sessionstore.h's CallerBug/Disabled
-// precedence rule, shared with commitSession/replaceAll/saveCheckpoint/
+// precedence rule, shared with commitSession/saveCheckpoint/
 // discardCheckpoint). Returns nullopt when the payload is acceptable.
 std::optional<QString> validateHistoryDaysCallerFacts(const std::vector<StoredHistoryRow>& openSnapshot,
                                                        const std::vector<HistoryDayChange>& days)
@@ -322,10 +314,10 @@ bool SqliteSessionStore::ensureOpen()
 /**
  * D8 (R06-004): centralizes the connection-local PRAGMAs required for the
  * lifetime of any native SQLite connection this store opens. Called from
- * construction, ensureOpen()'s transparent reconnect, and createBackup()'s
- * reopen, so all three apply (and verify) the same policy instead of each
- * keeping its own copy -- which is how the reconnect path came to silently
- * omit synchronous=NORMAL in the first place.
+ * construction and ensureOpen()'s transparent reconnect, so both apply
+ * (and verify) the same policy instead of each keeping its own copy --
+ * which is how the reconnect path came to silently omit synchronous=NORMAL
+ * in the first place.
  */
 bool SqliteSessionStore::applyConnectionPragmas()
 {
@@ -384,7 +376,7 @@ bool SqliteSessionStore::verifyWriteCapability()
  * Journal mode note: this app uses SQLite's default rollback journal mode, NOT
  * WAL.  WAL's concurrent-readers advantage is irrelevant for a single-process
  * app.  Rollback journal keeps the database as a single file (no -wal/-shm
- * sidecars), which simplifies close-copy-reopen backups and portability.
+ * sidecars), which simplifies portability.
  *
  * Returns false on DDL failures (caller closes the connection).
  * Non-fatal failures (index creation, PRAGMA) are logged and allowed through —
@@ -526,13 +518,12 @@ SchemaStatus SqliteSessionStore::checkSchemaOnStartup()
     if (db_was_fresh_) {
         // Fresh DB: ensureSchema() already ran in the constructor.
         performRetentionCleanup();
-        pruneOldBackups();
         // D8 (R06-002): prove the directory can actually host a rollback
         // journal, not just that ensureSchema()'s CREATE TABLE succeeded.
         // Not literally the first write on this path -- performRetentionCleanup()
-        // and pruneOldBackups() above already wrote -- but those failures are
-        // non-fatal by design, so this is the first write whose failure is
-        // gating: the point where an unwritable directory gets reported.
+        // above already wrote -- but that failure is non-fatal by design, so
+        // this is the first write whose failure is gating: the point where
+        // an unwritable directory gets reported.
         if (!verifyWriteCapability()) {
             Logger::Log("[DB] checkSchemaOnStartup: write-capability probe failed on fresh DB");
             return SchemaStatus::Inaccessible;
@@ -662,16 +653,15 @@ SchemaStatus SqliteSessionStore::checkSchemaOnStartup()
         }
     }
 
-    // Retention cleanup and backup pruning run once per startup, after schema is
+    // Retention cleanup runs once per startup, after schema is
     // confirmed valid.  Failures are non-fatal (logged, but do not abort startup).
     performRetentionCleanup();
-    pruneOldBackups();
 
     // D8 (R06-002): prove the directory can actually host a rollback
     // journal before declaring the DB Ready for use. Not literally the
-    // first write here either -- performRetentionCleanup()/pruneOldBackups()
-    // just above already wrote -- but the first one whose failure gates
-    // startup instead of being logged and ignored.
+    // first write here either -- performRetentionCleanup() just above
+    // already wrote -- but the first one whose failure gates startup
+    // instead of being logged and ignored.
     if (!verifyWriteCapability()) {
         Logger::Log("[DB] checkSchemaOnStartup: write-capability probe failed");
         return SchemaStatus::Inaccessible;
@@ -703,29 +693,6 @@ void SqliteSessionStore::performRetentionCleanup()
     if (!db.commit()) {
         Logger::Log("[DB] Error committing retention cleanup: " + db.lastError().text());
         db.rollback();
-    }
-}
-
-/**
- * Prunes old backup files in the database directory, keeping only the
- * `keepCount` most recent of each file type (.backup and .durations.txt).
- * Files are named with ISO timestamps so alphabetical sort = chronological.
- * Called once per startup from checkSchemaOnStartup(). Non-fatal.
- */
-void SqliteSessionStore::pruneOldBackups(int keepCount)
-{
-    QDir dir(QFileInfo(db.databaseName()).absoluteDir());
-    const QString base = QFileInfo(db.databaseName()).fileName();
-
-    for (const QString& pattern : {base + ".*.backup", base + ".*.durations.txt"}) {
-        QStringList files = dir.entryList(
-            QStringList() << pattern, QDir::Files, QDir::Name);
-        while (files.size() > keepCount) {
-            const QString name = files.takeFirst(); // oldest (alphabetical = chronological)
-            if (!QFile::remove(dir.filePath(name))) {
-                Logger::Log("[DB] Warning: Failed to remove old backup file: " + name);
-            }
-        }
     }
 }
 
@@ -851,131 +818,6 @@ bool SqliteSessionStore::ensureDiscardIntentsTable()
 }
 
 /**
- * Creates a safety copy of the database before critical write operations.
- *
- * Why:
- * SQLite databases can occasionally become corrupted during write operations,
- * especially if the system crashes (power loss) during a transaction.
- * Since this app tracks user history, data loss is unacceptable.
- *
- * Strategy:
- * - Copies the .sqlite file to a timestamped .backup file.
- * - Writes a human-readable text dump (.durations.txt) for verification.
- * - This runs before 'replaceAll' (major save) but not 'saveCheckpoint' (frequent).
- *
- * Concurrency:
- * - This method closes and reopens the database to ensure a clean file copy.
- *   The caller (a public method) must already hold db_mutex_, which prevents
- *   any other SqliteSessionStore operation from seeing the closed connection.
- *   QRecursiveMutex allows re-entrant calls within the same thread.
- *
- * The current close-copy-reopen approach is correct for rollback-journal mode
- * (no -wal/-shm sidecars).  If WAL mode is ever enabled, switch to SQLite's
- * online backup API (sqlite3_backup_*) so the source DB stays open during the copy.
- */
-BackupResult SqliteSessionStore::createBackup(const std::deque<TimeDuration>& durations, TransactionMode mode)
-{
-    if (!QFile::exists(db.databaseName())) {
-        return BackupResult::Success;
-    }
-
-    // Skip backup if disk space is low (< 100 MB).  Proceeding with a full-table
-    // write on a nearly-full volume risks leaving both the DB and the backup in a
-    // corrupted state; report it as a missing backup and let the caller decide.
-    {
-        QStorageInfo storage(QFileInfo(db.databaseName()).absoluteDir().absolutePath());
-        const qint64 available = storage.bytesAvailable();
-#ifndef QT_NO_DEBUG
-        const bool lowDisk = force_backup_low_disk_dbg_ || (available >= 0 && available < 100LL * 1024 * 1024);
-        force_backup_low_disk_dbg_ = false;
-#else
-        const bool lowDisk = (available >= 0 && available < 100LL * 1024 * 1024);
-#endif
-        if (lowDisk) {
-            Logger::Log(QString("[DB] Warning: Low disk space (%1 MB). Skipping backup.")
-                .arg(available / (1024 * 1024)));
-            return BackupResult::BackupFailed;
-        }
-    }
-
-    // Close database before copying
-    bool wasOpen = db.isOpen();
-    if (wasOpen) {
-        db.close();
-    }
-
-    // Generate backup filename with millisecond-resolution timestamp.
-    // Add a numeric suffix if the target already exists (guards against two saves
-    // within the same millisecond producing the same name).
-    QString timestamp = QDateTime::currentDateTime().toString("yyyy-MM-ddTHH-mm-ss-zzz");
-    QString base = QString("%1.%2").arg(db.databaseName()).arg(timestamp);
-    QString backupName = base + ".backup";
-    for (int n = 1; QFile::exists(backupName); ++n)
-        backupName = QString("%1-%2.backup").arg(base).arg(n);
-    QString durationsFileName = backupName;
-    durationsFileName.chop(static_cast<int>(qstrlen(".backup")));
-    durationsFileName += ".durations.txt";
-
-    // Copy the database file
-#ifndef QT_NO_DEBUG
-    bool success;
-    if (force_backup_copy_failure_dbg_) {
-        success = false;
-        force_backup_copy_failure_dbg_ = false;
-    } else {
-        success = QFile::copy(db.databaseName(), backupName);
-    }
-#else
-    bool success = QFile::copy(db.databaseName(), backupName);
-#endif
-
-    if (!success) {
-        Logger::Log("[DB] Error: Failed to create backup of database");
-    } else {
-        Logger::Log("[DB] Created database backup: " + backupName);
-        lastBackupPath_ = backupName;
-    }
-
-    // Write durations to text file
-    QFile durationsFile(durationsFileName);
-    if (durationsFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QTextStream out(&durationsFile);
-        out << "Transaction Mode: " << (mode == TransactionMode::Replace ? "Replace" : "Append") << "\n";
-        out << "Total Durations: " << durations.size() << "\n";
-        out << "Timestamp: " << QDateTime::currentDateTime().toString(Qt::ISODate) << "\n";
-        out << "----------------------------------------\n";
-
-        for (const auto& d : durations) {
-            out << "Type: " << (d.type == DurationType::Activity ? "Activity" : "Pause") << " | ";
-            out << "Duration: " << d.duration() << "ms | ";
-            out << "Start Date: " << d.startTime.toUTC().date().toString(Qt::ISODate) << " | ";
-            out << "Start Time: " << d.startTime.toUTC().time().toString("HH:mm:ss.zzz") << " | ";
-            out << "End Date: " << d.endTime.toUTC().date().toString(Qt::ISODate) << " | ";
-            out << "End Time: " << d.endTime.toUTC().time().toString("HH:mm:ss.zzz") << "\n";
-        }
-
-        durationsFile.close();
-        Logger::Log("[DB] Created durations log: " + durationsFileName);
-    } else {
-        Logger::Log("[DB] Warning: Could not create durations log file");
-    }
-
-    // Reopen database if it was open before.
-    // D8 (R06-004): re-apply the centralized connection PRAGMAs since
-    // reopening creates a fresh connection that loses all session-level
-    // PRAGMAs set earlier.
-    if (wasOpen) {
-        if (!db.open()) {
-            Logger::Log("[DB] CRITICAL: Failed to reopen database after backup: " + db.lastError().text());
-            return BackupResult::ReopenFailed;
-        }
-        applyConnectionPragmas();
-    }
-
-    return success ? BackupResult::Success : BackupResult::BackupFailed;
-}
-
-/**
  * Persists the completed segments of a session to the database.
  *
  * Normalizes the timeline internally (merging adjacent same-type segments),
@@ -1007,23 +849,6 @@ SessionStoreResult SqliteSessionStore::commitSession(const Timeline& session)
     }
     const auto [normed, orphanIds] = session.normalizedWithRemovedIds();
     return updateDurationsById(normed.completed(), orphanIds);
-}
-
-bool SqliteSessionStore::insertRows(QSqlQuery& query, const std::deque<TimeDuration>& rows)
-{
-    for (const auto& d : rows) {
-        query.bindValue(":segment_id", d.segment_id.toString());
-        query.bindValue(":type", static_cast<int>(d.type));
-        query.bindValue(":start_utc", toUtcIso(d.startTime));
-        query.bindValue(":end_utc", toUtcIso(d.endTime));
-
-        if (!query.exec()) {
-            db.rollback();
-            Logger::Log("[DB] Error inserting duration: " + query.lastError().text());
-            return false;
-        }
-    }
-    return true;
 }
 
 // C2 (R07-001): see header for the invariant this enforces. Assumes the
@@ -1084,98 +909,6 @@ SqliteSessionStore::CommitOutcome SqliteSessionStore::commitOrRollback(const QSt
         closeConnection();
     }
     return CommitOutcome{false, err};
-}
-
-SessionStoreResult SqliteSessionStore::replaceAll(const Timeline& history, const Timeline& session)
-{
-    QMutexLocker locker(&db_mutex_);
-
-    const std::deque<TimeDuration>& historyDurations = history.completed();
-    const std::deque<TimeDuration>& currentSessionDurations = session.completed();
-
-    std::deque<TimeDuration> allDurations;
-    allDurations.insert(allDurations.end(), historyDurations.begin(), historyDurations.end());
-    allDurations.insert(allDurations.end(), currentSessionDurations.begin(), currentSessionDurations.end());
-
-    // C3 (R13-001/R14-001): reject the entire payload before any mutation, the
-    // same uniform rule as every other write boundary. HistoryDialog no
-    // longer calls replaceAll() at all (WP5's scoped save uses
-    // saveHistoryDays() instead), so this guard is now the final backstop for
-    // any other caller only.
-    // C4 (R05-003): checked before the Disabled guard below -- see the
-    // precedence rule in sessionstore.h.
-    const DayValidity::Violation violation = DayValidity::validatePayload(allDurations);
-    if (violation != DayValidity::Violation::None) {
-        Logger::Log("[DB] replaceAll: rejecting invalid payload (" + DayValidity::describe(violation) + ")");
-        return SessionStoreResult::callerBug("replaceAll: invalid payload (" + DayValidity::describe(violation) + ")");
-    }
-
-    if (history_days_to_keep_ == 0) {
-        return SessionStoreResult::disabled();
-    }
-
-    if (!ensureOpen()) {
-        // C4 (R07-003): ensureOpen() failure is TransientError consistently
-        // everywhere it is checked -- see updateDurationsById for the rationale.
-        Logger::Log("[DB] Could not open DB to replace durations");
-        return SessionStoreResult::transient("DB connection could not be opened");
-    }
-
-    const BackupResult backup = createBackup(allDurations, TransactionMode::Replace);
-    if (backup == BackupResult::ReopenFailed) {
-        // Not part of the C4/R07-003 ensureOpen() consistency table: this is
-        // db.open() failing to reopen a connection createBackup() itself just
-        // closed for the copy window, not the initial ensureOpen() health
-        // check above -- a mid-operation loss right after a working
-        // connection, which stays FatalError.
-        Logger::Log("[DB] CRITICAL: DB connection lost after backup - aborting replace");
-        return SessionStoreResult::fatal("DB connection lost after backup");
-    }
-    const bool backupMissing = (backup != BackupResult::Success);
-    if (backupMissing) {
-        Logger::Log("[DB] Warning: Backup failed before REPLACE operation - proceeding without backup");
-    }
-
-    if (!db.transaction()) {
-        Logger::Log("[DB] Error starting transaction for replace: " + db.lastError().text());
-        return SessionStoreResult::transient("Failed to start replace transaction: " + db.lastError().text());
-    }
-
-    QSqlQuery clearQuery(db);
-    if (!clearQuery.exec("DELETE FROM durations")) {
-        db.rollback();
-        Logger::Log("[DB] Error clearing durations table: " + clearQuery.lastError().text());
-        return SessionStoreResult::transient("Failed to clear durations: " + clearQuery.lastError().text());
-    }
-
-    QSqlQuery finalizedInsert(db);
-    finalizedInsert.prepare(
-        "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
-        "VALUES (:segment_id, :type, :start_utc, :end_utc, 1)"
-    );
-    if (!insertRows(finalizedInsert, historyDurations))
-        return SessionStoreResult::transient("Failed to insert history rows");
-
-    QSqlQuery unfinalizedInsert(db);
-    unfinalizedInsert.prepare(
-        "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
-        "VALUES (:segment_id, :type, :start_utc, :end_utc, 0)"
-    );
-    if (!insertRows(unfinalizedInsert, currentSessionDurations))
-        return SessionStoreResult::transient("Failed to insert session rows");
-
-    const CommitOutcome commitResult = commitOrRollback("Error committing replace transaction");
-    if (!commitResult.committed) {
-        return SessionStoreResult::transient("Failed to commit replace transaction: " + commitResult.errorMessage);
-    }
-
-#ifndef QT_NO_DEBUG
-    checkSegmentIdUniqueness();
-#endif
-
-    SessionStoreResult result = SessionStoreResult::success();
-    result.backupMissing = backupMissing;
-    return result;
 }
 
 /**
@@ -1683,8 +1416,7 @@ EntriesForDateResult SqliteSessionStore::hasEntriesForDate(const QDate& date)
 /**
  * Saves or updates a checkpoint entry for crash recovery.
  *
- * Unlike replaceAll(), this method:
- * - Does NOT create backups (for performance - called every 5 minutes)
+ * This method:
  * - Uses segment_id to update existing row instead of inserting new one
  * - Stores the actual segment_start_time_ (preserves original start, only updates end/duration)
  *
@@ -1702,7 +1434,7 @@ SessionStoreResult SqliteSessionStore::saveCheckpoint(DurationType type, const Q
 
     // C4 fix round 2 (MEDIUM-6): checked before the Disabled guard below --
     // see the precedence rule in sessionstore.h (CallerBug wins over
-    // Disabled), matching commitSession/replaceAll. A checkpoint is always
+    // Disabled), matching commitSession. A checkpoint is always
     // uTimer's own live segment, so it must be strictly same-day like every
     // other write boundary (C3/R13-001/R14-001).
     const std::deque<TimeDuration> checkpointRow{
@@ -1903,7 +1635,7 @@ SessionStoreResult SqliteSessionStore::updateDurationsById(const std::deque<Time
 
     if (!ensureOpen()) {
         // C4 (R07-003): ensureOpen() failure is TransientError everywhere it
-        // is checked (see saveCheckpoint/discardCheckpoint/replaceAll/
+        // is checked (see saveCheckpoint/discardCheckpoint/
         // loadDurations) -- ensureOpen() itself is designed to transparently
         // reopen a lost connection, and this exact scenario (e.g. a
         // temporarily read-only file) is retried successfully by TimeTracker

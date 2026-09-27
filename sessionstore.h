@@ -11,7 +11,7 @@
  *
  * Every public method that TimeTracker calls on SqliteSessionStore is
  * represented here as a pure virtual.  Internal helpers (ensureOpen,
- * ensureSchema, createBackup, etc.) remain private implementation details
+ * ensureSchema, etc.) remain private implementation details
  * of the concrete class.
  *
  * ── Unified result vocabulary ──────────────────────────────────────────
@@ -46,36 +46,36 @@
  *                   the caller must re-read fresh data before retrying, not
  *                   simply resubmit the same payload.
  *
- * After C4, only replaceAll's post-backup reopen can still return FatalError;
- * every other write boundary's ensureOpen()/open-failure path was
- * consolidated onto TransientError (see the ensureOpen()-consistency table
- * in test_contract_matrix.cpp).
+ * After WP9 (C11) removed replaceAll() and its backup, no production path
+ * returns FatalError; every write boundary's ensureOpen()/open-failure path
+ * is consolidated onto TransientError (see the ensureOpen()-consistency
+ * table in test_contract_matrix.cpp).
  *
  * Precedence (C4/R05-003): where both a CallerBug and a Disabled outcome
  * would apply to the same call (e.g. a duplicate/empty id submitted while
  * history is disabled), CallerBug wins. A caller bug is a programming error
  * that must surface regardless of whether history persistence happens to be
  * switched off -- checking Disabled first would mask it. commitSession,
- * replaceAll, saveCheckpoint, and discardCheckpoint all check their
- * identity/validity guard before the Disabled guard.
+ * saveCheckpoint, and discardCheckpoint all check their identity/validity
+ * guard before the Disabled guard.
  *
  * Methods that carry additional payload (loadDurations, hasEntriesForDate)
  * embed a status field that uses the same categories.  The per-method
  * contract matrices in test_contract_matrix.cpp document which categories
  * apply to each method.
  *
- * ── Input facts for commit/replace/checkpoint (C4) ─────────────────────
+ * ── Input facts for commit/checkpoint (C4) ─────────────────────
  *
- * commitSession/replaceAll take Timeline-wrapped rows: segment_id emptiness
+ * commitSession takes Timeline-wrapped rows: segment_id emptiness
  * is structurally impossible (TimeDuration always mints one), so the only
- * caller-identity fact these two validate at runtime is uniqueness -- no two
- * rows in the (combined, for replaceAll) payload may share a segment_id.
+ * caller-identity fact it validates at runtime is uniqueness -- no two
+ * rows in the payload may share a segment_id.
  * saveCheckpoint/discardCheckpoint take a bare SegmentId parameter instead,
  * so both explicitly reject an empty one as CallerBug.
  *
  * Every write boundary additionally validates timestamp validity, a
  * positive `[start, end)` interval, and same-local-day shape (see
- * dayvalidity.h); commitSession/replaceAll also reject an Activity/Pause
+ * dayvalidity.h); commitSession also rejects an Activity/Pause
  * overlap across the payload. Callers may submit rows in any order: the
  * store rejects an Activity/Pause overlap and merges same-type overlaps via
  * normalization, rather than requiring the caller to pre-sort or
@@ -106,12 +106,6 @@ struct SessionStoreResult {
     enum Category { Success, Disabled, TransientError, FatalError, CallerBug, Conflict };
     Category category;
     QString message;
-    /// True when a successful replaceAll() ran its destructive whole-table
-    /// replace without its pre-write safety copy (the backup was skipped or
-    /// failed). Set only by replaceAll(); every other result leaves it at
-    /// the default false, including Disabled, which attempts no backup or
-    /// replace.
-    bool backupMissing = false;
     bool ok() const { return category == Success; }
     /// True when the call did its job OR was a no-op because history storage
     /// is disabled.  Control-flow seams that treat "history off" the same as
@@ -362,7 +356,7 @@ enum class SchemaStatus { Ready, Created, Outdated, Inaccessible };
 /// addition or removal), not an added virtual whose count happens to match;
 /// it is a reminder tripwire, not a structural guarantee.
 enum class Operation {
-    CommitSession, ReplaceAll, LoadDurations, HasEntriesForDate, SaveCheckpoint,
+    CommitSession, LoadDurations, HasEntriesForDate, SaveCheckpoint,
     DiscardCheckpoint, CheckSchemaOnStartup, FlushToDisc,
     RecoverStartupCheckpoints, MarkCleanShutdown, LoadHistoryRows, SaveHistoryDays, Count
 };
@@ -385,23 +379,6 @@ public:
     /// as CallerBug before any mutation, so an invalid identity can never be
     /// silently written by either implementation.
     virtual SessionStoreResult commitSession(const Timeline& session) = 0;
-
-    /// Atomically replaces all rows (history finalized + session unfinalized).
-    /// Returns Disabled when history storage is off (no-op, not an error).
-    /// Returns TransientError or FatalError on DB failure.
-    /// Returns CallerBug (C3/C4) if the payload fails the day-validity/overlap
-    /// guard: invalid timestamp, non-positive interval, cross-day interval,
-    /// duplicate segment_id, or an Activity/Pause overlap -- rejected before
-    /// any mutation, the same uniform rule as every other write boundary.
-    /// Uniqueness is checked across BOTH timelines combined (a history row and
-    /// a session row sharing one id is also a CallerBug), not each bucket
-    /// separately. As with commitSession, empty ids are structurally
-    /// impossible (see above) so only the duplicate case is a runtime check.
-    /// HistoryEditSession drops a legacy cross-midnight row and a
-    /// pre-existing cross-type overlap from the save payload before calling
-    /// this, so this guard should never actually trigger from the History
-    /// path.
-    virtual SessionStoreResult replaceAll(const Timeline& history, const Timeline& session) = 0;
 
     /// Returns all finalized rows sorted chronologically.
     /// result.status is Disabled when history is off, or TransientError on DB
@@ -488,7 +465,7 @@ public:
     /// Returns Disabled when history storage is off (no-op, not an error).
     /// Returns CallerBug (C3) if [startTime, endTime) is invalid, non-positive,
     /// or crosses local midnight -- rejected before any mutation.
-    /// @pre segmentId must be non-empty -- unlike commitSession/replaceAll,
+    /// @pre segmentId must be non-empty -- unlike commitSession,
     /// segmentId here is a bare SegmentId, not wrapped in a TimeDuration, so
     /// emptiness is not structurally impossible; both implementations check
     /// it explicitly and return CallerBug (not Disabled or a store failure).

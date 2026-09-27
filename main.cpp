@@ -65,8 +65,7 @@ int main(int argc, char *argv[])
 	application.setStyle(QStyleFactory::create("Fusion"));
 
 	// Refuse a second instance: two instances racing recoverStartupCheckpoints()
-	// against each other's live checkpoint row (and createBackup()'s close-copy-
-	// reopen against a concurrently-written file) can corrupt the database.
+	// against each other's live checkpoint row can corrupt the database.
 	// QLockFile also detects and clears a stale lock left by a crashed process,
 	// so a crash does not lock the user out permanently.
 	//

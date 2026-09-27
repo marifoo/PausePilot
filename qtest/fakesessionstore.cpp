@@ -2,7 +2,7 @@
  * FakeSessionStore -- spy test double for SessionStore.
  *
  * Records every call made to it (callLog) and stores segments passed to
- * commitSession/replaceAll so tests can inspect what was written. No
+ * commitSession so tests can inspect what was written. No
  * overlap or reconcile POLICY is duplicated here; that behavior is verified
  * against the real SqliteSessionStore in test_persistence_contract.cpp.
  * D13e: commitSession() DOES mirror the real store's identity mechanics --
@@ -78,47 +78,10 @@ SessionStoreResult FakeSessionStore::commitSession(const Timeline& session)
     return commitSessionResult;
 }
 
-SessionStoreResult FakeSessionStore::replaceAll(const Timeline& history, const Timeline& session)
-{
-    callLog.append("replaceAll");
-    // Uniqueness is checked across the COMBINED payload (C4/R05-003): a
-    // history row and a session row sharing an id is also a CallerBug, not
-    // just a duplicate within one bucket.
-    std::deque<TimeDuration> combined = history.completed();
-    combined.insert(combined.end(), session.completed().begin(), session.completed().end());
-    if (hasDuplicateSegmentId(combined)) {
-        return SessionStoreResult::callerBug("replaceAll: duplicate segment_id in payload");
-    }
-    // Disabled is a contractual no-op, exactly like every other failure
-    // category -- only Success may mutate fake state (R05-005/R02-003).
-    if (replaceDurationsResult.ok()) {
-        storedDurations.clear();
-        committedSegmentIds.clear();
-        // WP1b: also clear the unfinalized rows and checkpoint projection (loadHistoryRows fidelity)
-        historyUnfinalizedRows.clear();
-        savedCheckpoints.clear();
-        sessionUnfinalizedRows.clear();
-        // WP1b: the real store writes history rows with is_finalized = 1 and
-        // session rows with is_finalized = 0 (sqlitesessionstore.cpp), and
-        // loadDurations() there only selects is_finalized = 1 rows. Mirror
-        // this: store history rows as finalized and session rows separately
-        // so loadHistoryRows() can project them as unfinalized.
-        for (const auto& d : history.completed()) {
-            storedDurations.push_back(d);
-            committedSegmentIds.insert(d.segment_id.toString());
-        }
-        for (const auto& d : session.completed()) {
-            sessionUnfinalizedRows.push_back(d);
-            committedSegmentIds.insert(d.segment_id.toString());
-        }
-    }
-    return replaceDurationsResult;
-}
-
 LoadResult FakeSessionStore::loadDurations()
 {
     callLog.append("loadDurations");
-    // D13e: project storedDurations (what commitSession/replaceAll actually
+    // D13e: project storedDurations (what commitSession actually
     // committed) so the double mirrors real persisted state instead of only
     // ever returning what a test manually preset. A non-Success status is a
     // test simulating a failed/disabled load: durations is cleared here,
@@ -131,12 +94,7 @@ LoadResult FakeSessionStore::loadDurations()
     }
     // D13e (M2, review): loadDurationsResult.durations models pre-existing
     // rows a read-only fixture seeds before constructing TimeTracker (e.g.
-    // HistoryDialog/HistoryEditSession tests) -- replaceAll()'s
-    // storedDurations.clear() above deliberately does not touch this preset.
-    // Some of those fixtures DO go on to call replaceAll() on the same
-    // fakeDb, so a preset row that replaceAll() would have deleted can
-    // linger here uncleared; that is safe only because those fixtures never
-    // call loadDurations() again after the replaceAll() to observe it.
+    // HistoryDialog/HistoryEditSession tests).
     // Dedupe on segment_id with storedDurations winning: a preset row
     // sharing an id with a later-committed row must not appear twice here --
     // the real store upserts such a row to one, so two rows would be an
@@ -160,9 +118,8 @@ LoadResult FakeSessionStore::loadDurations()
 
 namespace {
 // H5 (WP1): formats a TimeDuration exactly as SqliteSessionStore's raw
-// columns would read back (see toUtcIso()/insertRows() in
-// sqlitesessionstore.cpp), so loadHistoryRows() is a truthful fake of the
-// real store's raw-text contract.
+// columns would read back (see toUtcIso() in sqlitesessionstore.cpp), so
+// loadHistoryRows() is a truthful fake of the real store's raw-text contract.
 StoredHistoryRow toStoredHistoryRow(const TimeDuration& d, bool finalized)
 {
     StoredHistoryRow row;
@@ -241,15 +198,6 @@ HistoryRowsResult FakeSessionStore::loadHistoryRows()
 
     // Collect unfinalized rows from historyUnfinalizedRows
     for (const auto& d : historyUnfinalizedRows) {
-        const QString id = d.segment_id.toString();
-        if (!usedIds.contains(id)) {
-            allRows.push_back(toStoredHistoryRow(d, false));
-            usedIds.insert(id);
-        }
-    }
-
-    // WP1b: Collect unfinalized session rows from replaceAll()
-    for (const auto& d : sessionUnfinalizedRows) {
         const QString id = d.segment_id.toString();
         if (!usedIds.contains(id)) {
             allRows.push_back(toStoredHistoryRow(d, false));

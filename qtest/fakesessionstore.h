@@ -3,7 +3,7 @@
  *
  * Records every call made to it (callLog) so tests can assert which
  * operations were performed and in what order.  Stores raw segments passed
- * to commitSession/replaceAll for inspection.  Return values are
+ * to commitSession for inspection.  Return values are
  * configurable per-method to simulate failures.
  *
  * Intentionally contains NO normalization, upsert, overlap, or reconcile
@@ -37,7 +37,6 @@ public:
     // ---- SessionStore interface ----
 
     SessionStoreResult commitSession(const Timeline& session) override;
-    SessionStoreResult replaceAll(const Timeline& history, const Timeline& session) override;
     LoadResult loadDurations() override;
     HistoryRowsResult loadHistoryRows() override;
     SessionStoreResult saveHistoryDays(const std::vector<StoredHistoryRow>& openSnapshot,
@@ -61,7 +60,7 @@ public:
 
     // ---- In-memory data store ----
 
-    /// All stored durations (populated by commitSession/replaceAll).
+    /// All stored durations (populated by commitSession).
     std::deque<TimeDuration> storedDurations;
 
     /// Last checkpoint saved (for inspection).
@@ -76,7 +75,6 @@ public:
     // ---- Configurable return values ----
 
     SessionStoreResult commitSessionResult = SessionStoreResult::success();
-    SessionStoreResult replaceDurationsResult = SessionStoreResult::success();
     SessionStoreResult saveCheckpointResult = SessionStoreResult::success();
     /// Result returned by discardCheckpoint(). On anything other than
     /// Success (including Disabled) savedCheckpoints is left untouched --
@@ -99,7 +97,7 @@ public:
     QSet<QString> committedSegmentIds;
 
     /// Pre-existing durations to seed loadDurations() with, on top of
-    /// whatever storedDurations already holds from commitSession/replaceAll
+    /// whatever storedDurations already holds from commitSession
     /// (D13e: loadDurations() merges the two). Set .status to a non-Success
     /// category to simulate a failed/disabled load instead (durations is
     /// then ignored and the result is always empty).
@@ -111,13 +109,6 @@ public:
     /// checkpoint rows a real DB might hold; not visible to loadDurations()
     /// or merged into storedDurations.
     std::deque<TimeDuration> historyUnfinalizedRows;
-
-    /// WP1b: session rows from replaceAll(), stored unfinalized (is_finalized=0).
-    /// The real store writes history rows with is_finalized=1 and session rows
-    /// with is_finalized=0. loadDurations() only returns is_finalized=1 rows,
-    /// but loadHistoryRows() returns both. These are distinguished here so
-    /// loadHistoryRows() can project them correctly as raw "0".
-    std::deque<TimeDuration> sessionUnfinalizedRows;
 
     /// Result returned by hasEntriesForDate(). Default: No entries.
     EntriesForDateResult entriesForDateResult = EntriesForDateResult::No;

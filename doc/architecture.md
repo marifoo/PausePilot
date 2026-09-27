@@ -98,10 +98,11 @@ holds a `SessionStore&` reference, not a `SqliteSessionStore&`. The seam exists
 for one reason: **testability**. In `qtest/` the engine runs against an
 in-memory `FakeSessionStore` that records calls and lets tests inject failure
 modes without touching disk or SQLite. The interface is small and chosen to
-expose *intent* rather than SQL: `commitSession`, `replaceAll`,
+expose *intent* rather than SQL: `commitSession`,
 `loadDurations`, `hasEntriesForDate`, `saveCheckpoint`, `discardCheckpoint`,
-`checkSchemaOnStartup`, `flushToDisc`, `markCleanShutdown`, and
-`recoverStartupCheckpoints`. The last one is the sole recovery entry point:
+`checkSchemaOnStartup`, `flushToDisc`, `markCleanShutdown`,
+`loadHistoryRows`, `saveHistoryDays`, and `recoverStartupCheckpoints`.
+The last one is the sole recovery entry point:
 it decides and applies orphan disposition and clean-marker consumption
 entirely inside `SqliteSessionStore` (see `persistence.md`); `TimeTracker`
 only consumes the `StartupRecoveryResult` it returns.
@@ -111,7 +112,7 @@ only consumes the `StartupRecoveryResult` it returns.
 | Module             | Hides from its callers                                                                              |
 | ------------------ | --------------------------------------------------------------------------------------------------- |
 | `TimeTracker`      | The Activity/Pause/None FSM, the midnight policy, the checkpoint cadence, and `SessionState` mutations |
-| `SessionStore`     | SQLite, transactions, the `is_finalized` flag, segment-id/orphan bookkeeping, backups, retention   |
+| `SessionStore`     | SQLite, transactions, the `is_finalized` flag, segment-id/orphan bookkeeping, retention             |
 | `Timeline`         | Segment normalization, ordering, and the ongoing-segment splice in `activeMsec`/`pauseMsec`         |
 | `LockStateWatcher` | The OS API (polled `WTSQuerySessionInformation` on Windows, several D-Bus backends on Linux) and the debounce buffer |
 | `HealthMonitor`    | The "show each warning at most once per session" thresholds                                        |

@@ -37,9 +37,6 @@ private slots:
 
     // commitSession removes a segment_id from the DB when normalization merges it away.
     void test_commitSession_removes_merged_away_segment_id();
-
-    // replaceAll atomically replaces all rows (history + session) in a single transaction.
-    void test_replaceAll_atomically_replaces_all_rows();
 };
 
 #endif // TEST_PERSISTENCE_CONTRACT_H

@@ -25,11 +25,11 @@ using TestCommon::createSettingsFile;
 using TestCommon::fixedNowUtc;
 
 // C4 (R02-003/"done when"): this file has one section below per
-// SessionStore::Operation. If SessionStore grows a 12th virtual, add its
+// SessionStore::Operation. If SessionStore grows an 11th virtual, add its
 // Operation enumerator AND a matching section here, then update this count --
 // otherwise this fails to compile as a reminder instead of silently shipping
 // an unverified operation.
-static_assert(static_cast<int>(Operation::Count) == 12,
+static_assert(static_cast<int>(Operation::Count) == 11,
     "SessionStore::Operation changed size -- add a matrix section to "
     "test_contract_matrix.cpp for the new/removed operation, then update "
     "this static_assert's count.");
@@ -155,91 +155,6 @@ void ContractMatrixTest::test_commitSession_callerBug_duplicate_segmentId()
     const SessionStoreResult r = db.commitSession(Timeline(rows, std::nullopt));
     QCOMPARE(r.category, SessionStoreResult::CallerBug);
     QVERIFY(db.loadDurations().empty());
-}
-
-// ── replaceAll ───────────────────────────────────────────────────────────────
-
-// Success: returns Success, pre-existing rows are cleared, new rows written.
-void ContractMatrixTest::test_replaceAll_success()
-{
-    resetDatabaseFile();
-    QTemporaryDir dir; QVERIFY(dir.isValid());
-    SqliteSessionStore db(Settings(enabledSettings(dir)));
-    db.checkSchemaOnStartup();
-
-    // Seed one row, then replaceAll with different rows.
-    QVERIFY(db.commitSession(Timeline(oneRow(), std::nullopt)).ok());
-    QCOMPARE(db.loadDurations().size(), static_cast<size_t>(1));
-
-    std::deque<TimeDuration> newRows;
-    const QDate today = QDate::currentDate();
-    newRows.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, QDateTime(today, QTime(11,0,0), Qt::UTC),
-                                                    QDateTime(today, QTime(11,30,0), Qt::UTC)));
-    newRows.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, QDateTime(today, QTime(12,0,0), Qt::UTC),
-                                                    QDateTime(today, QTime(12,30,0), Qt::UTC)));
-
-    const SessionStoreResult r = db.replaceAll(Timeline(newRows, std::nullopt), Timeline({}, std::nullopt));
-    QCOMPARE(r.category, SessionStoreResult::Success);
-    QVERIFY(r.ok());
-    QCOMPARE(db.loadDurations().size(), static_cast<size_t>(2));
-    // CallerBug: covered by C3's dayvalidity.h payload guard (see test_database.cpp)
-    // transient/fatal: tested implicitly by ensureOpen/transaction failure paths
-}
-
-// Disabled: returns Disabled, nothing is written.
-void ContractMatrixTest::test_replaceAll_disabled_returns_Disabled()
-{
-    resetDatabaseFile();
-    QTemporaryDir dir; QVERIFY(dir.isValid());
-    SqliteSessionStore db(Settings(disabledSettings(dir)));
-
-    const SessionStoreResult r = db.replaceAll(Timeline(oneRow(), std::nullopt), Timeline({}, std::nullopt));
-    QCOMPARE(r.category, SessionStoreResult::Disabled);
-    QVERIFY(!r.ok());
-}
-
-void ContractMatrixTest::test_replaceAll_callerBug_duplicate_segmentId_across_history_and_session_data()
-{
-    QTest::addColumn<bool>("historyEnabled");
-    QTest::newRow("history-enabled")  << true;
-    QTest::newRow("history-disabled") << false;
-}
-
-// CallerBug: a history row and a session row share a segment_id (C4/R05-003).
-// Uniqueness is checked across the COMBINED payload, not each bucket alone.
-// Rejected before any mutation -- the pre-existing row is left untouched. Run
-// with history both enabled and disabled: CallerBug must win over Disabled
-// (precedence rule in sessionstore.h), not just happen to be checked first
-// when history is on.
-void ContractMatrixTest::test_replaceAll_callerBug_duplicate_segmentId_across_history_and_session()
-{
-    QFETCH(bool, historyEnabled);
-
-    resetDatabaseFile();
-    QTemporaryDir dir; QVERIFY(dir.isValid());
-    SqliteSessionStore db(Settings(historyEnabled ? enabledSettings(dir) : disabledSettings(dir)));
-    db.checkSchemaOnStartup();
-
-    if (historyEnabled) {
-        QVERIFY(db.commitSession(Timeline(oneRow(), std::nullopt)).ok());
-        QCOMPARE(db.loadDurations().size(), static_cast<size_t>(1));
-    }
-
-    const QDate today(2025, 6, 15);
-    const SegmentId sharedId = SegmentId::mint();
-    std::deque<TimeDuration> history;
-    history.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
-        QDateTime(today, QTime(8, 0, 0), Qt::UTC), QDateTime(today, QTime(8, 30, 0), Qt::UTC), sharedId));
-    std::deque<TimeDuration> session;
-    session.push_back(TimeDuration::fromPersistedRow(DurationType::Pause,
-        QDateTime(today, QTime(9, 0, 0), Qt::UTC), QDateTime(today, QTime(9, 30, 0), Qt::UTC), sharedId));
-
-    const SessionStoreResult r = db.replaceAll(Timeline(history, std::nullopt), Timeline(session, std::nullopt));
-    QCOMPARE(r.category, SessionStoreResult::CallerBug);
-    if (historyEnabled) {
-        // The pre-existing row (from the earlier commitSession) is untouched.
-        QCOMPARE(db.loadDurations().size(), static_cast<size_t>(1));
-    }
 }
 
 // ── loadDurations ────────────────────────────────────────────────────────────
@@ -771,7 +686,7 @@ void ContractMatrixTest::test_saveCheckpoint_callerBug_empty_segmentId()
 }
 
 // C4 fix round 2 (MEDIUM-6): CallerBug wins over Disabled for an invalid
-// interval too, matching commitSession/replaceAll's precedence -- run with
+// interval too, matching commitSession's precedence -- run with
 // history both enabled and disabled so the ordering is actually asserted.
 void ContractMatrixTest::test_saveCheckpoint_callerBug_invalid_interval_data()
 {
@@ -1041,7 +956,7 @@ void ContractMatrixTest::test_recoverStartupCheckpoints_disabled_returns_Disable
 // (see test_retention_cleanup_retries_after_failure): making the DB file
 // read-only BEFORE construction leaves the connection closed, so ensureOpen()
 // fails deterministically and repeatedly for as long as the file stays
-// read-only -- the same root cause replaceAll/saveCheckpoint/discardCheckpoint/
+// read-only -- the same root cause saveCheckpoint/discardCheckpoint/
 // loadDurations/recoverStartupCheckpoints used to report FatalError while
 // commitSession/updateDurationsById, flushToDisc, and setLastCleanShutdownMarker
 // reported TransientError. All are now TransientError: ensureOpen() is explicitly
@@ -1057,7 +972,6 @@ void ContractMatrixTest::test_C4_ensureOpen_failure_classified_consistently_data
     QTest::newRow("commitSession")               << QString("commitSession");
     QTest::newRow("flushToDisc")                << QString("flushToDisc");
     QTest::newRow("setLastCleanShutdownMarker") << QString("setLastCleanShutdownMarker");
-    QTest::newRow("replaceAll")                 << QString("replaceAll");
     QTest::newRow("loadDurations")              << QString("loadDurations");
     QTest::newRow("saveCheckpoint")             << QString("saveCheckpoint");
     QTest::newRow("discardCheckpoint")          << QString("discardCheckpoint");
@@ -1099,8 +1013,6 @@ void ContractMatrixTest::test_C4_ensureOpen_failure_classified_consistently()
         category = db.flushToDisc().category;
     } else if (method == "setLastCleanShutdownMarker") {
         category = db.setLastCleanShutdownMarker_dbg(QDateTime::currentDateTime()).category;
-    } else if (method == "replaceAll") {
-        category = db.replaceAll(Timeline(oneRow(), std::nullopt), Timeline({}, std::nullopt)).category;
     } else if (method == "loadDurations") {
         category = db.loadDurations().status;
     } else if (method == "saveCheckpoint") {
@@ -1147,42 +1059,6 @@ void ContractMatrixTest::test_C4_fake_commitSession_callerBug_duplicate_segmentI
     const SessionStoreResult r = fakeDb.commitSession(Timeline(rows, std::nullopt));
     QCOMPARE(r.category, SessionStoreResult::CallerBug);
     QVERIFY(fakeDb.storedDurations.empty());
-}
-
-void ContractMatrixTest::test_C4_fake_replaceAll_callerBug_duplicate_segmentId()
-{
-    FakeSessionStore fakeDb;
-    const QDate today = QDate::currentDate();
-    const SegmentId sharedId = SegmentId::mint();
-    std::deque<TimeDuration> history;
-    history.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
-        QDateTime(today, QTime(8, 0, 0), Qt::UTC), QDateTime(today, QTime(8, 30, 0), Qt::UTC), sharedId));
-    std::deque<TimeDuration> session;
-    session.push_back(TimeDuration::fromPersistedRow(DurationType::Pause,
-        QDateTime(today, QTime(9, 0, 0), Qt::UTC), QDateTime(today, QTime(9, 30, 0), Qt::UTC), sharedId));
-
-    const SessionStoreResult r = fakeDb.replaceAll(Timeline(history, std::nullopt), Timeline(session, std::nullopt));
-    QCOMPARE(r.category, SessionStoreResult::CallerBug);
-    QVERIFY(fakeDb.storedDurations.empty());
-}
-
-// Disabled must be a true no-op in the fake, exactly like the interface and
-// the concrete store: pre-existing in-memory state must survive untouched
-// (R05-005/R02-003 -- the fake used to clear/replace it on Disabled).
-void ContractMatrixTest::test_C4_fake_replaceAll_disabled_does_not_mutate_storedDurations()
-{
-    FakeSessionStore fakeDb;
-    const QDate today = QDate::currentDate();
-    TimeDuration preExisting = TimeDuration::fromPersistedRow(DurationType::Activity,
-        QDateTime(today, QTime(7, 0, 0), Qt::UTC), QDateTime(today, QTime(7, 30, 0), Qt::UTC));
-    fakeDb.storedDurations.push_back(preExisting);
-
-    fakeDb.replaceDurationsResult = SessionStoreResult::disabled();
-    const SessionStoreResult r = fakeDb.replaceAll(Timeline(oneRow(), std::nullopt), Timeline({}, std::nullopt));
-
-    QCOMPARE(r.category, SessionStoreResult::Disabled);
-    QCOMPARE(fakeDb.storedDurations.size(), static_cast<size_t>(1));
-    QCOMPARE(fakeDb.storedDurations[0].segment_id, preExisting.segment_id);
 }
 
 // The fake must classify a segment_id already finalized via commitSession as
@@ -1356,47 +1232,3 @@ void ContractMatrixTest::test_H2_fake_loadHistoryRows_output_sorted_and_parsed_l
     QCOMPARE(result.rows[1].parsed->startTime.timeSpec(), Qt::LocalTime);
 }
 
-// Acceptance: successful replaceAll clears unfinalized rows and reports session rows with "0"
-void ContractMatrixTest::test_H2_fake_replaceAll_reports_session_rows_as_unfinalized()
-{
-    FakeSessionStore fakeDb;
-    const QDate today = QDate::currentDate();
-    const SegmentId historyId = SegmentId::mint();
-    const SegmentId sessionId = SegmentId::mint();
-
-    // Pre-seed some unfinalized rows that should be cleared
-    fakeDb.historyUnfinalizedRows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
-        QDateTime(today, QTime(7, 0, 0), Qt::UTC), QDateTime(today, QTime(7, 30, 0), Qt::UTC)));
-    fakeDb.savedCheckpoints.push_back({DurationType::Pause,
-        QDateTime(today, QTime(7, 30, 0), Qt::UTC),
-        QDateTime(today, QTime(8, 0, 0), Qt::UTC),
-        SegmentId::mint()});
-
-    // replaceAll with history rows (finalized) and session rows (unfinalized)
-    std::deque<TimeDuration> history;
-    history.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
-        QDateTime(today, QTime(9, 0, 0), Qt::UTC), QDateTime(today, QTime(9, 30, 0), Qt::UTC), historyId));
-
-    std::deque<TimeDuration> session;
-    session.push_back(TimeDuration::fromPersistedRow(DurationType::Activity,
-        QDateTime(today, QTime(10, 0, 0), Qt::UTC), QDateTime(today, QTime(10, 30, 0), Qt::UTC), sessionId));
-
-    QVERIFY(fakeDb.replaceAll(Timeline(history, std::nullopt), Timeline(session, std::nullopt)).ok());
-
-    const HistoryRowsResult result = fakeDb.loadHistoryRows();
-    QCOMPARE(result.status, SessionStoreResult::Success);
-    QCOMPARE(result.rows.size(), static_cast<size_t>(2));
-
-    // Find history and session rows
-    StoredHistoryRow historyRow = result.rows[0];  // Earlier time
-    StoredHistoryRow sessionRow = result.rows[1];  // Later time
-
-    // History row should be finalized
-    QCOMPARE(historyRow.isFinalized, QString("1"));
-    // Session row should be unfinalized
-    QCOMPARE(sessionRow.isFinalized, QString("0"));
-
-    // Verify unfinalized rows were cleared
-    QVERIFY(fakeDb.historyUnfinalizedRows.empty());
-    QVERIFY(fakeDb.savedCheckpoints.empty());
-}

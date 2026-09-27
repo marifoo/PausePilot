@@ -13,24 +13,9 @@
 #include "settings.h"
 #include "sessionstore.h"
 
-// createBackup uses TransactionMode as an implementation detail.
-// The enum is not part of SessionStore's public interface; it lives here
-// so it can be removed from types.h.
-enum class TransactionMode { Append, Replace };
-
-// Three-way result returned by createBackup().
-//   Success      — file copied and DB reopened.
-//   BackupFailed — no backup exists — the copy failed or was deliberately
-//                  skipped (low disk); DB connection state is unchanged, the
-//                  caller may proceed without a backup — data is not at risk
-//                  yet.
-//   ReopenFailed — DB could not be reopened after the close-copy step; caller
-//                  must abort the pending write — the connection is dead.
-enum class BackupResult { Success, BackupFailed, ReopenFailed };
-
 // Connection lifecycle: the database is opened in the constructor
 // (ensureSchema creates tables, indexes, and sets PRAGMA once) and
-// closed in the destructor.  Retention cleanup and backup pruning run once per
+// closed in the destructor.  Retention cleanup runs once per
 // startup via checkSchemaOnStartup() — safe to call more than once (idempotent),
 // but intended to be called once.  All public methods call ensureOpen() as a
 // lightweight health check; if the connection is unexpectedly lost, ensureOpen()
@@ -44,7 +29,6 @@ public:
     ~SqliteSessionStore();
 
     SessionStoreResult commitSession(const Timeline& session) override;
-    SessionStoreResult replaceAll(const Timeline& history, const Timeline& session) override;
     LoadResult loadDurations() override;
     HistoryRowsResult loadHistoryRows() override;
     SessionStoreResult saveHistoryDays(const std::vector<StoredHistoryRow>& openSnapshot,
@@ -180,21 +164,11 @@ private:
     // test stays correct even if an earlier commit is ever added to the
     // path. D11 scope, same as the two seams above.
     bool force_settings_commit_failure_dbg_ = false;
-    // M2 test seam: makes createBackup()'s low-disk check take the skip
-    // branch without a genuinely near-full volume. Self-resetting once
-    // consumed.
-    bool force_backup_low_disk_dbg_ = false;
-    // M2 test seam: makes createBackup()'s file copy report failure without
-    // touching the real file. Self-resetting once consumed.
-    bool force_backup_copy_failure_dbg_ = false;
 #endif
 
     // Guards all public entry points so that no two operations can interleave.
-    // This is particularly important for createBackup(), which closes and
-    // reopens the database file: the mutex prevents any concurrent call from
-    // hitting a closed connection during that window.  QRecursiveMutex is used
-    // because public methods may call each other (e.g. replaceAll →
-    // createBackup) and we must not deadlock on re-entry.
+    // QRecursiveMutex is used because public methods may call each other and
+    // we must not deadlock on re-entry.
     mutable QRecursiveMutex db_mutex_;
 
     // D11 (D6 debt/R09-002): no longer part of the SessionStore interface --
@@ -211,10 +185,10 @@ private:
     // D8 (R06-004): applies every connection-local PRAGMA the store requires
     // for the lifetime of a native SQLite connection (currently just
     // synchronous=NORMAL) and reads it back to verify it took effect. Shared
-    // by construction, ensureOpen()'s transparent reconnect, and
-    // createBackup()'s reopen, so a reconnect can no longer silently drift
-    // from the configured policy. Failures are logged and non-fatal,
-    // matching this PRAGMA's pre-existing best-effort treatment.
+    // by construction and ensureOpen()'s transparent reconnect, so a
+    // reconnect can no longer silently drift from the configured policy.
+    // Failures are logged and non-fatal, matching this PRAGMA's
+    // pre-existing best-effort treatment.
     bool applyConnectionPragmas();
     // D8 (R06-002): proves the database directory can host SQLite's rollback
     // journal, not just that the file's own permission bits are writable.
@@ -229,15 +203,7 @@ private:
     // Loads all durable discard-intent segment ids. nullopt on a real DB error
     // (distinct from "table empty").
     std::optional<std::vector<SegmentId>> loadDiscardIntents();
-    BackupResult createBackup(const std::deque<TimeDuration>& durations, TransactionMode mode);
-    // Path of the most recent successful createBackup() copy; empty if none
-    // has run yet. Set for test observability (lastBackupPath_dbg() below)
-    // so a test can assert against the exact file createBackup() wrote
-    // instead of scanning the data directory.
-    QString lastBackupPath_;
     void performRetentionCleanup();
-    void pruneOldBackups(int keepCount = 5);
-    bool insertRows(QSqlQuery& query, const std::deque<TimeDuration>& rows);
     // H5: shared row-validity parse used by both loadDurations() and
     // loadHistoryRows(). Applies the same rules loadDurations() has always
     // used (non-empty id, valid type, valid timestamps, positive interval);
@@ -252,7 +218,7 @@ private:
     std::optional<std::vector<StoredHistoryRow>> selectRowsForSpan(const QDateTime& dayStartUtc, const QDateTime& dayEndUtc);
     // D11 (R07-005/R09-002): no longer part of the public surface -- its only
     // caller is commitSession(). Kept private; every test call site now goes
-    // through commitSession()/replaceAll() or a scoped raw-SQL fixture.
+    // through commitSession() or a scoped raw-SQL fixture.
     SessionStoreResult updateDurationsById(const std::deque<TimeDuration>& durations,
                                            const std::vector<QString>& removedSegmentIds = {});
     // C2 (R07-001): commits the currently open transaction, rolling back on
@@ -362,11 +328,6 @@ public:
     }
     QString dbConnectionName_dbg() const { return db.connectionName(); }
 
-    /// The path createBackup() last copied to on success; empty if no backup
-    /// has been written yet. Lets a test identify the exact backup file
-    /// instead of scanning the data directory for one.
-    QString lastBackupPath_dbg() const { return lastBackupPath_; }
-
     /// Exposes the private marker-write step directly for tests that need to
     /// exercise ITS OWN Success/Disabled/TransientError contract, without
     /// going through the full markCleanShutdown() durability barrier.
@@ -427,14 +388,6 @@ public:
     /// first). Self-resetting once consumed (only if a rebuild is actually
     /// reached). D11 scope, same as the two setters above.
     void setForceSettingsCommitFailure_dbg(bool v) { force_settings_commit_failure_dbg_ = v; }
-
-    /// Forces the next createBackup() call to take the low-disk skip branch,
-    /// without a genuinely near-full volume. Self-resetting once consumed.
-    void setForceBackupLowDisk_dbg(bool v) { force_backup_low_disk_dbg_ = v; }
-
-    /// Forces the next createBackup() call's file copy to report failure,
-    /// without touching the real file. Self-resetting once consumed.
-    void setForceBackupCopyFailure_dbg(bool v) { force_backup_copy_failure_dbg_ = v; }
 #endif // QT_NO_DEBUG
 
 };
