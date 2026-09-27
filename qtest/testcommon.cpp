@@ -62,6 +62,32 @@ void clearDataDirOverride()
     qunsetenv("UTIMER_DATA_DIR");
 }
 
+void seedStoredRows(SqliteSessionStore& db, const std::deque<TimeDuration>& rows, bool finalized)
+{
+    QVERIFY(db.ensureOpen_dbg());
+    QSqlQuery query(db.rawDb_dbg());
+    query.prepare(
+        "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+        "VALUES (:segment_id, :type, :start_utc, :end_utc, :is_finalized)");
+    for (const auto& d : rows) {
+        query.bindValue(":segment_id", d.segment_id.toString());
+        query.bindValue(":type", static_cast<int>(d.type));
+        query.bindValue(":start_utc", d.startTime.toUTC().toString(Qt::ISODateWithMs));
+        query.bindValue(":end_utc", d.endTime.toUTC().toString(Qt::ISODateWithMs));
+        query.bindValue(":is_finalized", finalized ? 1 : 0);
+        QVERIFY(query.exec());
+    }
+}
+
+void seedStoredRows(FakeSessionStore& db, const std::deque<TimeDuration>& rows, bool finalized)
+{
+    if (finalized) {
+        for (const auto& d : rows) db.loadDurationsResult.durations.push_back(d);
+    } else {
+        for (const auto& d : rows) db.historyUnfinalizedRows.push_back(d);
+    }
+}
+
 std::vector<DayOverlapRow> dayOverlapRows()
 {
     return {

@@ -41,20 +41,25 @@ void HistoryCommitTest::test_accept_stays_open_on_db_failure()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    const QDateTime now = fixedNow();
-    const TimeDuration seeded =
-        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-30), now.addSecs(-20));
-    tracker.seedCompletedDuration_dbg(seeded);
-
+    // WP4b: not Today-specific -- both rows moved onto a past-date page
+    // seeded in the store (page 1; page 0 is the now-empty Today page),
+    // rather than today's memory + replaceAll rows.
+    const QDateTime yesterday = fixedNow().addDays(-1);
+    const TimeDuration unaffected =
+        TimeDuration::fromPersistedRow(DurationType::Activity, yesterday.addSecs(-30), yesterday.addSecs(-20));
+    const TimeDuration edited =
+        TimeDuration::fromPersistedRow(DurationType::Pause, yesterday.addSecs(-19), yesterday.addSecs(-10));
     std::deque<TimeDuration> dbDurations;
-    dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-19), now.addSecs(-10)));
-    QVERIFY(tracker.replaceAll(Timeline(dbDurations, std::nullopt), Timeline({}, std::nullopt)).ok());
+    dbDurations.push_back(unaffected);
+    dbDurations.push_back(edited);
+    TestCommon::seedStoredRows(db, dbDurations, true);
 
     HistoryDialog dialog(tracker, settings);
 
-    // A10: an editless OK is a no-op, so make a genuine edit (toggle the DB row's
-    // type) to exercise the save path that must fail under the exclusive lock.
-    dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(1, DurationType::Activity));
+    // A10: an editless OK is a no-op, so make a genuine edit (toggle the second
+    // row's type) to exercise the save path that must fail under the exclusive lock.
+    QVERIFY(dialog.editSession_dbg().setPageTimeline(1, dialog.editSession_dbg().pendingTimelines()[1].withSegmentType(1, DurationType::Activity)));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     // Hold an exclusive DB transaction to force replaceAll to fail.
     const QString lockConnName = "commit_test_db_lock";
@@ -80,13 +85,17 @@ void HistoryCommitTest::test_accept_stays_open_on_db_failure()
     // default (not QDialog::Accepted).
     QVERIFY(dialog.result() != QDialog::Accepted);
 
-    // TimeTracker state must be unchanged.
-    const auto completedAfterFailedAccept = tracker.completedTimeline();
-    QCOMPARE(completedAfterFailedAccept.completed().size(), static_cast<size_t>(1));
+    // Store state must be unchanged: the failed replaceAll wrote nothing.
+    const auto loadedAfterFailedAccept = db.loadDurations();
+    QCOMPARE(static_cast<int>(loadedAfterFailedAccept.size()), 2);
     const auto& rowAfterFailedAccept = *std::find_if(
-        completedAfterFailedAccept.completed().begin(), completedAfterFailedAccept.completed().end(),
-        [&](const TimeDuration& d) { return d.segment_id == seeded.segment_id; });
+        loadedAfterFailedAccept.durations.begin(), loadedAfterFailedAccept.durations.end(),
+        [&](const TimeDuration& d) { return d.segment_id == unaffected.segment_id; });
     QCOMPARE(rowAfterFailedAccept.type, DurationType::Activity);
+    const auto& editedRowAfterFailedAccept = *std::find_if(
+        loadedAfterFailedAccept.durations.begin(), loadedAfterFailedAccept.durations.end(),
+        [&](const TimeDuration& d) { return d.segment_id == edited.segment_id; });
+    QCOMPARE(editedRowAfterFailedAccept.type, DurationType::Pause);
 }
 
 // ---------------------------------------------------------------------------
@@ -102,23 +111,27 @@ void HistoryCommitTest::test_accept_stays_open_on_merge_decline()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    const QDate today = QDate::currentDate();
-    const QDateTime dbStart(today, QTime(11, 0, 0), Qt::UTC);
-    const QDateTime dbEnd(today, QTime(11, 30, 0), Qt::UTC);
-    const QDateTime memStart(today, QTime(11, 15, 0), Qt::UTC);
-    const QDateTime memEnd(today, QTime(11, 45, 0), Qt::UTC);
+    // WP4b: not Today-specific -- both rows moved onto a past-date page
+    // seeded in the store (page 1; page 0 is the now-empty Today page),
+    // rather than today's DB row plus a memory row.
+    const QDate pastDate = QDate::currentDate().addDays(-1);
+    const QDateTime dbStart(pastDate, QTime(11, 0, 0), Qt::UTC);
+    const QDateTime dbEnd(pastDate, QTime(11, 30, 0), Qt::UTC);
+    const QDateTime secondStart(pastDate, QTime(11, 15, 0), Qt::UTC);
+    const QDateTime secondEnd(pastDate, QTime(11, 45, 0), Qt::UTC);
 
     std::deque<TimeDuration> dbDurations;
     dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, dbStart, dbEnd));
-    QVERIFY(tracker.replaceAll(Timeline(dbDurations, std::nullopt), Timeline({}, std::nullopt)).ok());
-    tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
+    dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, secondStart, secondEnd));
+    TestCommon::seedStoredRows(db, dbDurations, true);
 
     HistoryDialog dialog(tracker, settings);
 
     // A10: an editless OK is a no-op. Make a genuine same-type edit — split the
-    // memory row into two Activity halves — so the save runs and the overlap
-    // merge confirmation is still triggered.
-    dialog.applySplit_dbg(0, 0, DurationType::Activity, DurationType::Activity);
+    // first row into two Activity halves — so the save runs and the overlap
+    // merge confirmation is still triggered against the second, overlapping row.
+    dialog.applySplit_dbg(0, 1, DurationType::Activity, DurationType::Activity);
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     // Bypass QMessageBox::question() to avoid offscreen QPA propagateSizeHints() warnings.
     // Supplies "No" — same as user declining the merge — so accept() should not close the dialog.
@@ -128,8 +141,8 @@ void HistoryCommitTest::test_accept_stays_open_on_merge_decline()
     // Dialog must remain open (result still not Accepted).
     QVERIFY(dialog.result() != QDialog::Accepted);
 
-    // TimeTracker session unchanged.
-    QCOMPARE(tracker.completedTimeline().completed().size(), static_cast<size_t>(1));
+    // Store unchanged: the declined merge never reached saveHistoryDays/replaceAll.
+    QCOMPARE(static_cast<int>(db.loadDurations().size()), 2);
 }
 
 // ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@
 #include "timetracker.h"
 #include "lockstatewatcher.h"
 #include "sqlitesessionstore.h"
+#include "fakesessionstore.h"
 
 #include "settings.h"
 #include "timeline.h"
@@ -93,6 +94,18 @@ std::vector<DayOverlapRow> dayOverlapRows();
 /// cleanupTestCase().
 void setDataDirOverride(const QString& dirPath);
 void clearDataDirOverride();
+
+/// WP4b: seeds `rows` directly into the durations table via rawDb_dbg(),
+/// bypassing commitSession/replaceAll, in canonical toUtcIso text
+/// (UTC, ISODateWithMs). Does not normalize or merge -- each row is
+/// inserted exactly as given. `finalized` sets is_finalized for every row.
+/// Tests use this instead of TimeTracker::replaceAll to seed store rows
+/// (see B7/WP4b in the H5 plan).
+void seedStoredRows(SqliteSessionStore& db, const std::deque<TimeDuration>& rows, bool finalized);
+
+/// Fake counterpart of seedStoredRows(): appends to loadDurationsResult.durations
+/// (finalized) or historyUnfinalizedRows (not finalized) instead of writing SQL.
+void seedStoredRows(FakeSessionStore& db, const std::deque<TimeDuration>& rows, bool finalized);
 
 } // namespace TestCommon
 

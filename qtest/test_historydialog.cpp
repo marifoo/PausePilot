@@ -57,7 +57,7 @@ void HistoryDialogTest::test_historydialog_createPages_includes_current_db_ongoi
     // Save a DB entry for today
     std::deque<TimeDuration> dbDurations;
     dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-50), now.addSecs(-40)));
-    QVERIFY(tracker.replaceAll(Timeline(dbDurations, std::nullopt), Timeline({}, std::nullopt)).ok());
+    TestCommon::seedStoredRows(db, dbDurations, true);
 
     // Start ongoing activity
     tracker.useTimerViaButton(Button::Start);
@@ -93,7 +93,7 @@ void HistoryDialogTest::test_historydialog_createPages_dedups_db_row_with_small_
 
     std::deque<TimeDuration> dbDurations;
     dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, memoryStart.addMSecs(-2), memoryEnd, segmentId));
-    QVERIFY(tracker.replaceAll(Timeline(dbDurations, std::nullopt), Timeline({}, std::nullopt)).ok());
+    TestCommon::seedStoredRows(db, dbDurations, true);
 
     HistoryDialog dialog(tracker, settings);
     QCOMPARE(dialog.editSession_dbg().pages().size(), static_cast<size_t>(1));
@@ -127,7 +127,7 @@ void HistoryDialogTest::test_historydialog_createPages_groups_unsplit_cross_midn
         QVERIFY(validSeg.has_value());
         std::deque<TimeDuration> init;
         init.push_back(std::move(*validSeg));
-        QVERIFY(tracker.replaceAll(Timeline(std::move(init), std::nullopt), Timeline({}, std::nullopt)).ok());
+        TestCommon::seedStoredRows(db, init, true);
     }
 
     // Insert the cross-midnight row directly via SQL (bypassing same-day invariant).
@@ -181,17 +181,18 @@ void HistoryDialogTest::test_historydialog_checkbox_toggle_updates_pending_and_t
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    QDateTime now = fixedNow();
-    tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
+    QDateTime now = fixedNow().addDays(-1);
+    TestCommon::seedStoredRows(db, {TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50))}, true);
 
     HistoryDialog dialog(tracker, settings);
+    dialog.onOlder_dbg();  // page 1: yesterday
 
     QCheckBox* box = qobject_cast<QCheckBox*>(dialog.table_dbg()->cellWidget(0, 3));
     QVERIFY(box != nullptr);
-    QCOMPARE(dialog.editSession_dbg().pendingTimelines()[0].completed()[0].type, DurationType::Activity);
+    QCOMPARE(dialog.editSession_dbg().pendingTimelines()[1].completed()[0].type, DurationType::Activity);
     box->setChecked(false);
 
-    QCOMPARE(dialog.editSession_dbg().pendingTimelines()[0].completed()[0].type, DurationType::Pause);
+    QCOMPARE(dialog.editSession_dbg().pendingTimelines()[1].completed()[0].type, DurationType::Pause);
     QVERIFY(dialog.pageLabel_dbg()->text().contains("Pause"));
 }
 
@@ -209,10 +210,11 @@ void HistoryDialogTest::test_historydialog_saveChanges_updates_timetracker_and_d
 
     std::deque<TimeDuration> dbDurations;
     dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-140), now.addSecs(-120)));
-    QVERIFY(tracker.replaceAll(Timeline(dbDurations, std::nullopt), Timeline({}, std::nullopt)).ok());
+    TestCommon::seedStoredRows(db, dbDurations, true);
 
     HistoryDialog dialog(tracker, settings);
     dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     dialog.done(QDialog::Accepted);
     dialog.saveChanges();
@@ -234,10 +236,10 @@ void HistoryDialogTest::test_historydialog_split_action_splits_row()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    QDateTime start = fixedNow().addSecs(-10);
-    QDateTime end = fixedNow().addSecs(-4);
+    QDateTime start = fixedNow().addDays(-1).addSecs(-10);
+    QDateTime end = fixedNow().addDays(-1).addSecs(-4);
     const TimeDuration seeded = TimeDuration::fromPersistedRow(DurationType::Activity, start, end);
-    tracker.seedCompletedDuration_dbg(seeded);
+    TestCommon::seedStoredRows(db, {seeded}, true);
     const SegmentId originalSegmentId = seeded.segment_id;
 
     HistoryDialog dialog(tracker, settings);
@@ -245,10 +247,10 @@ void HistoryDialogTest::test_historydialog_split_action_splits_row()
     // Bypass SplitDialog::exec() to avoid offscreen QPA propagateSizeHints() warnings.
     // The split types are supplied directly; logic under test is the model update (withSplit,
     // origin registration, segment_id preservation) — not the dialog UI itself.
-    dialog.applySplit_dbg(0, 0, DurationType::Activity, DurationType::Pause);
-    QCOMPARE(dialog.editSession_dbg().pendingTimelines()[0].completed().size(), static_cast<size_t>(2));
-    const auto& first = dialog.editSession_dbg().pendingTimelines()[0].completed()[0];
-    const auto& second = dialog.editSession_dbg().pendingTimelines()[0].completed()[1];
+    dialog.applySplit_dbg(0, 1, DurationType::Activity, DurationType::Pause);
+    QCOMPARE(dialog.editSession_dbg().pendingTimelines()[1].completed().size(), static_cast<size_t>(2));
+    const auto& first = dialog.editSession_dbg().pendingTimelines()[1].completed()[0];
+    const auto& second = dialog.editSession_dbg().pendingTimelines()[1].completed()[1];
     QCOMPARE(first.startTime, start);
     QCOMPARE(second.endTime, end);
     QCOMPARE(first.endTime, second.startTime);
@@ -278,7 +280,7 @@ void HistoryDialogTest::test_historydialog_split_today_mixed_origins_routes_to_c
 
     std::deque<TimeDuration> dbDurations;
     dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, dbStart, dbEnd));
-    QVERIFY(tracker.replaceAll(Timeline(dbDurations, std::nullopt), Timeline({}, std::nullopt)).ok());
+    TestCommon::seedStoredRows(db, dbDurations, true);
 
     HistoryDialog dialog(tracker, settings);
     QCOMPARE(dialog.editSession_dbg().pendingTimelines()[0].completed().size(), static_cast<size_t>(2));
@@ -291,6 +293,7 @@ void HistoryDialogTest::test_historydialog_split_today_mixed_origins_routes_to_c
     QCOMPARE(dialog.editSession_dbg().originIsMemory().value(dialog.editSession_dbg().pendingTimelines()[0].completed()[0].segment_id.toString()), true);
     QCOMPARE(dialog.editSession_dbg().originIsMemory().value(dialog.editSession_dbg().pendingTimelines()[0].completed()[1].segment_id.toString()), true);
     QCOMPARE(dialog.editSession_dbg().originIsMemory().value(dialog.editSession_dbg().pendingTimelines()[0].completed()[2].segment_id.toString()), false);
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     dialog.done(QDialog::Accepted);
     dialog.saveChanges();
@@ -332,7 +335,7 @@ void HistoryDialogTest::test_historydialog_split_non_today_db_row_survives_save_
 
     std::deque<TimeDuration> dbDurations;
     dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
-    QVERIFY(tracker.replaceAll(Timeline(dbDurations, std::nullopt), Timeline({}, std::nullopt)).ok());
+    TestCommon::seedStoredRows(db, dbDurations, true);
 
     HistoryDialog dialog(tracker, settings);
     QVERIFY(dialog.editSession_dbg().pages().size() >= static_cast<size_t>(2));
@@ -343,6 +346,7 @@ void HistoryDialogTest::test_historydialog_split_non_today_db_row_survives_save_
     QCOMPARE(dialog.editSession_dbg().pendingTimelines()[1].completed().size(), static_cast<size_t>(2));
     QCOMPARE(dialog.editSession_dbg().originIsMemory().value(dialog.editSession_dbg().pendingTimelines()[1].completed()[0].segment_id.toString()), false);
     QCOMPARE(dialog.editSession_dbg().originIsMemory().value(dialog.editSession_dbg().pendingTimelines()[1].completed()[1].segment_id.toString()), false);
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     dialog.done(QDialog::Accepted);
     dialog.saveChanges();
@@ -374,7 +378,7 @@ void HistoryDialogTest::test_historydialog_save_unrelated_edit_preserves_row_and
     const QDateTime historicalEnd = historicalStart.addSecs(300);
     std::deque<TimeDuration> historicalRows;
     historicalRows.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, historicalStart, historicalEnd));
-    QVERIFY(tracker.replaceAll(Timeline(historicalRows, std::nullopt), Timeline({}, std::nullopt)).ok());
+    TestCommon::seedStoredRows(db2, historicalRows, true);
 
 
     tracker.useTimerViaButton(Button::Start);
@@ -391,6 +395,7 @@ void HistoryDialogTest::test_historydialog_save_unrelated_edit_preserves_row_and
         HistoryDialog dialog(tracker, settings);
         QVERIFY(dialog.editSession_dbg().pages().size() >= static_cast<size_t>(2));
         dialog.editSession_dbg().setPageTimeline(1, dialog.editSession_dbg().pendingTimelines()[1].withSegmentType(0, DurationType::Activity));
+        QVERIFY(dialog.editSession_dbg().hasEdits());
         dialog.done(QDialog::Accepted);
         dialog.saveChanges();
     }
@@ -518,7 +523,7 @@ void HistoryDialogTest::test_historydialog_save_keeps_db_rows_for_history_plus_c
     const QDateTime historicalEnd = historicalStart.addSecs(60);
     std::deque<TimeDuration> historicalRows;
     historicalRows.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, historicalStart, historicalEnd));
-    QVERIFY(tracker.replaceAll(Timeline(historicalRows, std::nullopt), Timeline({}, std::nullopt)).ok());
+    TestCommon::seedStoredRows(db, historicalRows, true);
 
     const QDateTime now = fixedNow();
     tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-30), now.addSecs(-20)));
@@ -530,6 +535,7 @@ void HistoryDialogTest::test_historydialog_save_keeps_db_rows_for_history_plus_c
     // historical row's type on its page) to exercise the save path.
     QVERIFY(dialog.editSession_dbg().pages().size() >= static_cast<size_t>(2));
     dialog.editSession_dbg().setPageTimeline(1, dialog.editSession_dbg().pendingTimelines()[1].withSegmentType(0, DurationType::Activity));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     dialog.done(QDialog::Accepted);
     dialog.saveChanges();
@@ -583,6 +589,7 @@ void HistoryDialogTest::test_historydialog_save_then_crash_reopen_retains_curren
         // A10: an editless OK is a no-op, so make a genuine edit (toggle the
         // row's type) to exercise the save path.
         dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+        QVERIFY(dialog.editSession_dbg().hasEdits());
         dialog.done(QDialog::Accepted);
         dialog.saveChanges();
 
@@ -710,7 +717,7 @@ void HistoryDialogTest::test_historydialog_save_failed_db_replace_keeps_runtime_
 
     std::deque<TimeDuration> dbDurations;
     dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, dbStart, dbEnd));
-    QVERIFY(tracker.replaceAll(Timeline(dbDurations, std::nullopt), Timeline({}, std::nullopt)).ok());
+    TestCommon::seedStoredRows(db, dbDurations, true);
 
     HistoryDialog dialog(tracker, settings);
     QCOMPARE(dialog.editSession_dbg().pendingTimelines()[0].completed().size(), static_cast<size_t>(2));
@@ -718,6 +725,7 @@ void HistoryDialogTest::test_historydialog_save_failed_db_replace_keeps_runtime_
     QCOMPARE(dialog.editSession_dbg().originIsMemory().value(dialog.editSession_dbg().pendingTimelines()[0].completed()[1].segment_id.toString()), false);
 
     dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     const QString lockConnName = "historydialog_save_failure_lock";
     {
@@ -841,7 +849,7 @@ void HistoryDialogTest::test_splitdialog_setters_affect_types()
 }
 
 // ============================================================================
-// Test R — round-trip type toggle via accept updates TimeTracker
+// Test R — round-trip type toggle via accept updates the store
 // ============================================================================
 
 void HistoryDialogTest::test_R_round_trip_type_toggle_via_accept()
@@ -853,25 +861,28 @@ void HistoryDialogTest::test_R_round_trip_type_toggle_via_accept()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    const QDateTime now = fixedNow();
-    tracker.seedCompletedDuration_dbg(
-        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
+    const QDateTime now = fixedNow().addDays(-1);
+    TestCommon::seedStoredRows(db,
+        {TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50))}, true);
 
     {
         HistoryDialog dialog(tracker, settings);
-        QCOMPARE(dialog.editSession_dbg().pendingTimelines()[0].completed()[0].type, DurationType::Activity);
+        QCOMPARE(dialog.editSession_dbg().pendingTimelines()[1].completed()[0].type, DurationType::Activity);
 
         // Toggle to Pause via Timeline API
-        dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
-        QCOMPARE(dialog.editSession_dbg().pendingTimelines()[0].completed()[0].type, DurationType::Pause);
+        dialog.editSession_dbg().setPageTimeline(1, dialog.editSession_dbg().pendingTimelines()[1].withSegmentType(0, DurationType::Pause));
+        QCOMPARE(dialog.editSession_dbg().pendingTimelines()[1].completed()[0].type, DurationType::Pause);
+        QVERIFY(dialog.editSession_dbg().hasEdits());
 
         dialog.done(QDialog::Accepted);
         dialog.saveChanges();
     }
 
-    // TimeTracker reflects the change
-    QCOMPARE(tracker.completedTimeline().completed().size(), static_cast<size_t>(1));
-    QCOMPARE(tracker.completedTimeline().completed()[0].type, DurationType::Pause);
+    // The store reflects the change
+    SqliteSessionStore db2(settings);
+    const auto loaded = db2.loadDurations();
+    QCOMPARE(loaded.size(), static_cast<size_t>(1));
+    QCOMPARE(loaded.durations[0].type, DurationType::Pause);
 }
 
 // ============================================================================
@@ -887,22 +898,25 @@ void HistoryDialogTest::test_S_cancel_preserves_state()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    const QDateTime now = fixedNow();
-    tracker.seedCompletedDuration_dbg(
-        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
+    const QDateTime now = fixedNow().addDays(-1);
+    TestCommon::seedStoredRows(db,
+        {TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50))}, true);
 
     {
         HistoryDialog dialog(tracker, settings);
         // Toggle to Pause but cancel
-        dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+        dialog.editSession_dbg().setPageTimeline(1, dialog.editSession_dbg().pendingTimelines()[1].withSegmentType(0, DurationType::Pause));
+        QVERIFY(dialog.editSession_dbg().hasEdits());
 
         dialog.done(QDialog::Rejected);
         dialog.saveChanges();  // saveChanges checks result() and returns early when Rejected
     }
 
-    // TimeTracker is unchanged — still Activity
-    QCOMPARE(tracker.completedTimeline().completed().size(), static_cast<size_t>(1));
-    QCOMPARE(tracker.completedTimeline().completed()[0].type, DurationType::Activity);
+    // The store is unchanged — still Activity
+    SqliteSessionStore db2(settings);
+    const auto loaded = db2.loadDurations();
+    QCOMPARE(loaded.size(), static_cast<size_t>(1));
+    QCOMPARE(loaded.durations[0].type, DurationType::Activity);
 }
 
 void HistoryDialogTest::test_saveChanges_deduplicates_cross_bucket_overlaps()
@@ -926,7 +940,7 @@ void HistoryDialogTest::test_saveChanges_deduplicates_cross_bucket_overlaps()
     // Seed DB with today's finalized history row
     std::deque<TimeDuration> dbDurations;
     dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, dbStart, dbEnd));
-    QVERIFY(tracker.replaceAll(Timeline(dbDurations, std::nullopt), Timeline({}, std::nullopt)).ok());
+    TestCommon::seedStoredRows(db, dbDurations, true);
 
     // Seed in-memory session row (overlaps the DB row)
     tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
@@ -937,6 +951,7 @@ void HistoryDialogTest::test_saveChanges_deduplicates_cross_bucket_overlaps()
     // memory row into two Activity halves — so the save runs and normalization
     // still merges the whole overlapping cluster into one 10:00-10:45 row.
     dialog.applySplit_dbg(0, 0, DurationType::Activity, DurationType::Activity);
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     dialog.done(QDialog::Accepted);
 
@@ -1016,11 +1031,12 @@ void HistoryDialogTest::test_saveChanges_noop_save_unchanged()
 
     std::deque<TimeDuration> dbDurations;
     dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, dbStart, dbEnd));
-    QVERIFY(tracker.replaceAll(Timeline(dbDurations, std::nullopt), Timeline({}, std::nullopt)).ok());
+    TestCommon::seedStoredRows(db, dbDurations, true);
 
     tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
 
     HistoryDialog dialog(tracker, settings);
+    QVERIFY(!dialog.editSession_dbg().hasEdits());
     dialog.done(QDialog::Accepted);
     dialog.saveChanges();
 
@@ -1074,9 +1090,10 @@ void HistoryDialogTest::test_saveChanges_editless_ok_leaves_mergeable_rows_untou
     std::deque<TimeDuration> dbRows;
     dbRows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, aStart, aEnd));
     dbRows.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, bStart, bEnd));
-    QVERIFY(tracker.replaceAll(Timeline(dbRows, std::nullopt), Timeline({}, std::nullopt)).ok());
+    TestCommon::seedStoredRows(db, dbRows, true);
 
     HistoryDialog dialog(tracker, settings);
+    QVERIFY(!dialog.editSession_dbg().hasEdits());
     dialog.done(QDialog::Accepted);
     // If the no-op guard were absent, saveChanges() would normalize and merge,
     // prompting for confirmation; supply "Yes" so that path would proceed.
@@ -1150,26 +1167,35 @@ void HistoryDialogTest::test_H4_overlap_cancel_aborts_save()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    const QDate today = QDate::currentDate();
-    const QDateTime dbStart(today, QTime(11, 0, 0), Qt::UTC);
-    const QDateTime dbEnd(today, QTime(11, 30, 0), Qt::UTC);
-    const QDateTime memStart(today, QTime(11, 15, 0), Qt::UTC);
-    const QDateTime memEnd(today, QTime(11, 45, 0), Qt::UTC);
+    // WP4b: not Today-specific -- both rows moved onto a past-date page
+    // seeded in the store (page 1; page 0 is the now-empty Today page),
+    // rather than today's DB row plus a memory row.
+    const QDate pastDate = QDate::currentDate().addDays(-1);
+    const QDateTime dbStart(pastDate, QTime(11, 0, 0), Qt::UTC);
+    const QDateTime dbEnd(pastDate, QTime(11, 30, 0), Qt::UTC);
+    const QDateTime secondStart(pastDate, QTime(11, 15, 0), Qt::UTC);
+    const QDateTime secondEnd(pastDate, QTime(11, 45, 0), Qt::UTC);
 
     std::deque<TimeDuration> dbDurations;
     dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, dbStart, dbEnd));
-    QVERIFY(tracker.replaceAll(Timeline(dbDurations, std::nullopt), Timeline({}, std::nullopt)).ok());
-    tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, memStart, memEnd));
+    dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, secondStart, secondEnd));
+    TestCommon::seedStoredRows(db, dbDurations, true);
 
     HistoryDialog dialog(tracker, settings);
+
+    // An editless OK is a no-op that never reaches the merge prompt. Make a
+    // genuine same-type edit (split row 0 into two Activity halves) so the
+    // save runs and normalization asks to merge the overlapping cluster.
+    dialog.applySplit_dbg(0, 1, DurationType::Activity, DurationType::Activity);
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     // Bypass QMessageBox::question() to avoid offscreen QPA propagateSizeHints() warnings.
     // Supplies "No" — same as user declining the merge — so saveChanges() aborts.
     dialog.debugOverlapAnswer_ = QMessageBox::No;
     dialog.done(QDialog::Accepted);
-    dialog.saveChanges();
+    QVERIFY(!dialog.saveChanges());
 
-    // Save aborted — DB should still have exactly 1 finalized row (original)
+    // Save aborted — DB should still have exactly 2 finalized rows (original)
     const QString connName = "historydialog_h4_cancel";
     {
         QSqlDatabase sqlDb = QSqlDatabase::addDatabase("QSQLITE", connName);
@@ -1178,13 +1204,10 @@ void HistoryDialogTest::test_H4_overlap_cancel_aborts_save()
         QSqlQuery q(sqlDb);
         QVERIFY(q.exec("SELECT COUNT(*) FROM durations WHERE is_finalized = 1"));
         QVERIFY(q.next());
-        QCOMPARE(q.value(0).toInt(), 1);
+        QCOMPARE(q.value(0).toInt(), 2);
         sqlDb.close();
     }
     QSqlDatabase::removeDatabase(connName);
-
-    // TimeTracker session unchanged: still has 1 memory row
-    QCOMPARE(tracker.completedTimeline().completed().size(), static_cast<size_t>(1));
 }
 
 void HistoryDialogTest::test_H2_midnight_crossing_shown_on_both_pages()
@@ -1208,13 +1231,13 @@ void HistoryDialogTest::test_H2_midnight_crossing_shown_on_both_pages()
         const QString connName = "h2_test_setup";
         QSqlDatabase rawDb = QSqlDatabase::addDatabase("QSQLITE", connName);
         rawDb.setDatabaseName(db_path_);
-        // DB may not exist yet — seed it via replaceAll first.
+        // DB may not exist yet — seed it via seedStoredRows first.
         rawDb.close();
         rawDb = QSqlDatabase();
         QSqlDatabase::removeDatabase(connName);
     }
     // Seed DB to create the schema.
-    QVERIFY(tracker.replaceAll(Timeline({}, std::nullopt), Timeline({}, std::nullopt)).ok());
+    TestCommon::seedStoredRows(db, {}, true);
     {
         const QString connName = "h2_insert";
         QSqlDatabase rawDb = QSqlDatabase::addDatabase("QSQLITE", connName);
@@ -1283,7 +1306,7 @@ void HistoryDialogTest::test_H14_cross_midnight_totals_and_counts()
     const QDateTime segEnd(QDate::currentDate(), QTime(0, 10, 0), Qt::LocalTime); // 20 min total
 
     // Seed DB schema, then insert cross-midnight row directly via SQL.
-    QVERIFY(tracker.replaceAll(Timeline({}, std::nullopt), Timeline({}, std::nullopt)).ok());
+    TestCommon::seedStoredRows(db, {}, true);
     {
         const QString connName = "h14_insert";
         QSqlDatabase rawDb = QSqlDatabase::addDatabase("QSQLITE", connName);
@@ -1350,20 +1373,19 @@ void HistoryDialogTest::test_H6_split_dialog_preset_from_source_row_type()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    const QDateTime now = fixedNow();
+    const QDateTime now = fixedNow().addDays(-1);
     // Row 0 is Pause, row 1 is Activity — exercise both directions of the preset.
-    tracker.seedCompletedDuration_dbg(
-        TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-20), now.addSecs(-14)));
-    tracker.seedCompletedDuration_dbg(
-        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-12), now.addSecs(-4)));
+    TestCommon::seedStoredRows(db, {
+        TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-20), now.addSecs(-14)),
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-12), now.addSecs(-4))}, true);
 
     HistoryDialog dialog(tracker, settings);
 
     // splitDialogPresetFirstType_dbg() runs onSplitRow()'s real preset step
     // (dlg.setFirstSegmentType(duration.type)) without realizing the dialog, so this
     // asserts the production source-row-type -> preset wiring, not a value we supply.
-    QCOMPARE(dialog.splitDialogPresetFirstType_dbg(0, 0), DurationType::Pause);
-    QCOMPARE(dialog.splitDialogPresetFirstType_dbg(1, 0), DurationType::Activity);
+    QCOMPARE(dialog.splitDialogPresetFirstType_dbg(0, 1), DurationType::Pause);
+    QCOMPARE(dialog.splitDialogPresetFirstType_dbg(1, 1), DurationType::Activity);
 }
 
 // ---------------------------------------------------------------------------
@@ -1389,6 +1411,7 @@ void HistoryDialogTest::test_F1_saveChanges_refuses_when_history_load_failed()
     HistoryDialog dialog(tracker, settings);
     // Make an edit so the save path is not skipped by the editless no-op guard.
     dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     fakeDb.callLog.clear();
     dialog.debugSkipCritical_ = true;
@@ -1429,7 +1452,7 @@ void HistoryDialogTest::test_C3_saveChanges_refuses_when_edit_creates_violation(
     Settings settings(createSettingsFile(tempDir.path(), 7));
     FakeSessionStore fakeDb;
 
-    const QDateTime now = fixedNow();
+    const QDateTime now = fixedNow().addDays(-1);
     const SegmentId activityId = SegmentId::mint();
     const SegmentId pauseId = SegmentId::mint();
     // Originally non-overlapping.
@@ -1447,7 +1470,8 @@ void HistoryDialogTest::test_C3_saveChanges_refuses_when_edit_creates_violation(
         TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-400), now.addSecs(-300), activityId),
         TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-350), now.addSecs(-250), pauseId)
     };
-    dialog.editSession_dbg().setPageTimeline(0, Timeline(edited, std::nullopt));
+    dialog.editSession_dbg().setPageTimeline(1, Timeline(edited, std::nullopt));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     fakeDb.callLog.clear();
     dialog.debugSkipCritical_ = true;
@@ -1489,6 +1513,7 @@ void HistoryDialogTest::test_C3_saveChanges_drops_pre_existing_overlap_and_succe
     // Edit the unrelated row (index 0 on page 0 is the memory row) — the
     // overlapping pair above is untouched.
     dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     fakeDb.callLog.clear();
     dialog.debugSkipCritical_ = true;
@@ -1579,6 +1604,7 @@ void HistoryDialogTest::test_R13_001_multiboundary_row_dropped_by_unrelated_save
 
     // Edit the unrelated ordinary row.
     dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     dialog.done(QDialog::Accepted);
     QVERIFY(dialog.saveChanges());
@@ -1660,6 +1686,7 @@ void HistoryDialogTest::test_C3_single_boundary_cross_midnight_dropped_by_unrela
 
     // Edit the unrelated ordinary row.
     dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     dialog.done(QDialog::Accepted);
     // M3 Step 2.6 also asks before this save, since it drops a display-only
@@ -1701,6 +1728,7 @@ void HistoryDialogTest::test_C4_historydialog_shows_own_critical_when_already_la
 
     HistoryDialog dialog(tracker, settings);
     dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     // This call's own replaceAll() also returns Fatal (the latch was
     // already set, so enterFatalState() logs only -- no dialog of its own).
@@ -1729,6 +1757,7 @@ void HistoryDialogTest::test_C4_historydialog_suppresses_own_critical_when_this_
 
     HistoryDialog dialog(tracker, settings);
     dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     // This call's replaceAll() is the one that raises the latch, so
     // TimeTracker's own fatalError modal already fired -- HistoryDialog
@@ -1774,16 +1803,17 @@ void HistoryDialogTest::test_D5_dialog_opened_after_cancelShutdown_saves_success
     // A completed segment to edit -- withSegmentType(0, ...) below needs a
     // completed() entry at index 0. No new Start here: D5 requires History
     // to work immediately after cancellation, not after a fresh session.
-    const QDateTime now = fixedNow();
-    tracker.seedCompletedDuration_dbg(
-        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-150)));
+    const QDateTime now = fixedNow().addDays(-1);
+    TestCommon::seedStoredRows(fakeDb,
+        {TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-150))}, true);
 
     // Act: the dialog is opened only now, strictly after the shutdown/
     // cancellation above -- D5's own requirement (History works immediately,
     // no new Start needed) is exercised by the Start above already having
     // succeeded; this proves the dialog itself is not still refused.
     HistoryDialog dialog(tracker, settings);
-    dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+    dialog.editSession_dbg().setPageTimeline(1, dialog.editSession_dbg().pendingTimelines()[1].withSegmentType(0, DurationType::Pause));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     fakeDb.callLog.clear();
     dialog.done(QDialog::Accepted);
@@ -1810,14 +1840,15 @@ void HistoryDialogTest::test_D5_dialog_spanning_cancelled_shutdown_refuses_save(
     clock.advance(20);
     // A completed segment to edit -- withSegmentType(0, ...) below needs a
     // completed() entry at index 0, not just the live ongoing segment.
-    const QDateTime now = fixedNow();
-    tracker.seedCompletedDuration_dbg(
-        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-150)));
+    const QDateTime now = fixedNow().addDays(-1);
+    TestCommon::seedStoredRows(fakeDb,
+        {TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-150))}, true);
 
     // The dialog opens while the session is still live -- its snapshot
     // predates the shutdown that is about to run.
     HistoryDialog dialog(tracker, settings);
-    dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+    dialog.editSession_dbg().setPageTimeline(1, dialog.editSession_dbg().pendingTimelines()[1].withSegmentType(0, DurationType::Pause));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     // WM_QUERYENDSESSION: the OS runs the Direct shutdown while the dialog
     // is still open (a nested modal event loop does not block nativeEvent
@@ -1852,25 +1883,26 @@ void HistoryDialogTest::test_D9_split_updates_table_rowcount_and_title_and_highl
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    QDateTime start = fixedNow().addSecs(-10);
-    QDateTime end = fixedNow().addSecs(-2);
-    tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
+    QDateTime start = fixedNow().addDays(-1).addSecs(-10);
+    QDateTime end = fixedNow().addDays(-1).addSecs(-2);
+    TestCommon::seedStoredRows(db, {TimeDuration::fromPersistedRow(DurationType::Activity, start, end)}, true);
 
     HistoryDialog dialog(tracker, settings);
+    dialog.onOlder_dbg();  // page 1: yesterday
 
     QCOMPARE(dialog.table_dbg()->rowCount(), 1);
-    QVERIFY(dialog.editSession_dbg().pageTitle(0).contains("entries: 1"));
-    QVERIFY(!dialog.editSession_dbg().pageModified(0));
+    QVERIFY(dialog.editSession_dbg().pageTitle(1).contains("entries: 1"));
+    QVERIFY(!dialog.editSession_dbg().pageModified(1));
 
     // D9 review (finding 2): applySplit_dbg() must share onSplitRow()'s
     // production tail (session_.splitRow() + updateTable()) so a debug-only
     // path cannot silently diverge from what a real split renders.
-    dialog.applySplit_dbg(0, 0, DurationType::Activity, DurationType::Pause);
+    dialog.applySplit_dbg(0, 1, DurationType::Activity, DurationType::Pause);
 
     // Model side: count/title/dirty state update immediately.
-    QCOMPARE(dialog.editSession_dbg().pendingTimelines()[0].completed().size(), static_cast<size_t>(2));
-    QVERIFY(dialog.editSession_dbg().pageTitle(0).contains("entries: 2"));
-    QVERIFY(dialog.editSession_dbg().pageModified(0));
+    QCOMPARE(dialog.editSession_dbg().pendingTimelines()[1].completed().size(), static_cast<size_t>(2));
+    QVERIFY(dialog.editSession_dbg().pageTitle(1).contains("entries: 2"));
+    QVERIFY(dialog.editSession_dbg().pageModified(1));
 
     // Rendering side: the table itself must reflect the split and be highlighted.
     QCOMPARE(dialog.table_dbg()->rowCount(), 2);
@@ -1888,18 +1920,19 @@ void HistoryDialogTest::test_D9_checkbox_toggle_highlights_row_and_marks_dirty()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    QDateTime now = fixedNow();
-    tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
+    QDateTime now = fixedNow().addDays(-1);
+    TestCommon::seedStoredRows(db, {TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50))}, true);
 
     HistoryDialog dialog(tracker, settings);
+    dialog.onOlder_dbg();  // page 1: yesterday
 
-    QVERIFY(!dialog.editSession_dbg().pageModified(0));
+    QVERIFY(!dialog.editSession_dbg().pageModified(1));
 
     QCheckBox* box = qobject_cast<QCheckBox*>(dialog.table_dbg()->cellWidget(0, 3));
     QVERIFY(box != nullptr);
     box->setChecked(false);
 
-    QVERIFY(dialog.editSession_dbg().pageModified(0));
+    QVERIFY(dialog.editSession_dbg().pageModified(1));
     QCOMPARE(dialog.table_dbg()->item(0, 0)->background().color(), QColor(180, 216, 228, 255));
     QCOMPARE(dialog.table_dbg()->item(0, 1)->background().color(), QColor(180, 216, 228, 255));
     QCOMPARE(dialog.table_dbg()->item(0, 2)->background().color(), QColor(180, 216, 228, 255));
@@ -1952,7 +1985,7 @@ void HistoryDialogTest::test_D9_navigation_preserves_per_page_dirty_state()
 
     std::deque<TimeDuration> dbDurations;
     dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
-    QVERIFY(tracker.replaceAll(Timeline(dbDurations, std::nullopt), Timeline({}, std::nullopt)).ok());
+    TestCommon::seedStoredRows(db, dbDurations, true);
 
     HistoryDialog dialog(tracker, settings);
     QVERIFY(dialog.editSession_dbg().pages().size() >= static_cast<size_t>(2));
@@ -1982,14 +2015,15 @@ void HistoryDialogTest::test_D9_cancel_after_split_and_toggle_preserves_runtime_
     FakeSessionStore fakeDb;
     TimeTracker tracker(settings, fakeDb);
 
-    QDateTime start = fixedNow().addSecs(-10);
-    QDateTime end = fixedNow().addSecs(-2);
-    tracker.seedCompletedDuration_dbg(TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
+    QDateTime start = fixedNow().addDays(-1).addSecs(-10);
+    QDateTime end = fixedNow().addDays(-1).addSecs(-2);
+    TestCommon::seedStoredRows(fakeDb, {TimeDuration::fromPersistedRow(DurationType::Activity, start, end)}, true);
 
     {
         HistoryDialog dialog(tracker, settings);
-        dialog.applySplit_dbg(0, 0, DurationType::Activity, DurationType::Pause);
-        QVERIFY(dialog.editSession_dbg().pageModified(0));
+        dialog.onOlder_dbg();  // page 1: yesterday
+        dialog.applySplit_dbg(0, 1, DurationType::Activity, DurationType::Pause);
+        QVERIFY(dialog.editSession_dbg().pageModified(1));
 
         // Also toggle the first half's type -- named "split and toggle",
         // exercise both operations before cancelling.
@@ -2005,11 +2039,12 @@ void HistoryDialogTest::test_D9_cancel_after_split_and_toggle_preserves_runtime_
     // No store writes occurred for either the split or the toggle.
     QVERIFY(!fakeDb.callLog.contains("replaceAll"));
 
-    // Runtime is unchanged — still the original single Activity row.
-    QCOMPARE(tracker.completedTimeline().completed().size(), static_cast<size_t>(1));
-    QCOMPARE(tracker.completedTimeline().completed()[0].type, DurationType::Activity);
-    QCOMPARE(tracker.completedTimeline().completed()[0].startTime, start);
-    QCOMPARE(tracker.completedTimeline().completed()[0].endTime, end);
+    // The store is unchanged — still the original single Activity row.
+    const auto loaded = fakeDb.loadDurations();
+    QCOMPARE(loaded.durations.size(), static_cast<size_t>(1));
+    QCOMPARE(loaded.durations[0].type, DurationType::Activity);
+    QCOMPARE(loaded.durations[0].startTime, start);
+    QCOMPARE(loaded.durations[0].endTime, end);
 }
 
 // ---------------------------------------------------------------------------
@@ -2027,11 +2062,12 @@ void HistoryDialogTest::test_D9_toggle_off_then_on_clears_highlight_and_dirty_st
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    QDateTime now = fixedNow();
-    tracker.seedCompletedDuration_dbg(
-        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
+    QDateTime now = fixedNow().addDays(-1);
+    TestCommon::seedStoredRows(db,
+        {TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50))}, true);
 
     HistoryDialog dialog(tracker, settings);
+    dialog.onOlder_dbg();  // page 1: yesterday
 
     QCheckBox* box = qobject_cast<QCheckBox*>(dialog.table_dbg()->cellWidget(0, 3));
     QVERIFY(box != nullptr);
@@ -2039,7 +2075,7 @@ void HistoryDialogTest::test_D9_toggle_off_then_on_clears_highlight_and_dirty_st
     box->setChecked(false); // Activity -> Pause
     box->setChecked(true);  // Pause -> Activity: back to the original value
 
-    QVERIFY(!dialog.editSession_dbg().pageModified(0));
+    QVERIFY(!dialog.editSession_dbg().pageModified(1));
     QVERIFY(!dialog.editSession_dbg().hasEdits());
     QCOMPARE(dialog.table_dbg()->item(0, 0)->background(), QBrush());
 }
@@ -2053,21 +2089,22 @@ void HistoryDialogTest::test_D9_toggle_twice_clears_highlight()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    QDateTime now = fixedNow();
-    tracker.seedCompletedDuration_dbg(
-        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
+    QDateTime now = fixedNow().addDays(-1);
+    TestCommon::seedStoredRows(db,
+        {TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50))}, true);
 
     HistoryDialog dialog(tracker, settings);
+    dialog.onOlder_dbg();  // page 1: yesterday
 
     QCheckBox* box = qobject_cast<QCheckBox*>(dialog.table_dbg()->cellWidget(0, 3));
     QVERIFY(box != nullptr);
 
     box->setChecked(false);
-    QVERIFY(dialog.editSession_dbg().pageModified(0));
+    QVERIFY(dialog.editSession_dbg().pageModified(1));
     QCOMPARE(dialog.table_dbg()->item(0, 0)->background().color(), QColor(180, 216, 228, 255));
 
     box->setChecked(true); // same net effect as the pair above, checked separately
-    QVERIFY(!dialog.editSession_dbg().pageModified(0));
+    QVERIFY(!dialog.editSession_dbg().pageModified(1));
     QCOMPARE(dialog.table_dbg()->item(0, 0)->background(), QBrush());
 }
 
@@ -2100,9 +2137,8 @@ void HistoryDialogTest::test_D9_ongoing_toggle_then_navigate_away_and_back_highl
 
     // A historical page so Older/Newer has somewhere to go.
     const QDateTime histStart(QDate::currentDate().addDays(-1), QTime(10, 0, 0));
-    QVERIFY(tracker.replaceAll(
-        Timeline({TimeDuration::fromPersistedRow(DurationType::Activity, histStart, histStart.addSecs(300))}, std::nullopt),
-        Timeline({}, std::nullopt)).ok());
+    TestCommon::seedStoredRows(db,
+        {TimeDuration::fromPersistedRow(DurationType::Activity, histStart, histStart.addSecs(300))}, true);
 
     HistoryDialog dialog(tracker, settings);
     QVERIFY(dialog.editSession_dbg().pages().size() >= static_cast<size_t>(2));
@@ -2141,14 +2177,14 @@ void HistoryDialogTest::test_D9_split_too_short_row_does_not_open_modal()
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
 
-    // Anchored to a fixed local noon-ish time on today's date (not real now)
-    // so the row can never straddle local midnight -- see the house
-    // convention at test_timer.cpp:78 and git show 5e63eae. "Today" is still
-    // needed here: pendingTimelines()[0] below is the current-day page.
-    const QDateTime end(QDate::currentDate(), QTime(12, 0, 0), Qt::LocalTime);
+    // Anchored to a fixed local noon-ish time on yesterday's date (not real
+    // now) so the row can never straddle local midnight -- see the house
+    // convention at test_timer.cpp:78 and git show 5e63eae. Yesterday is
+    // page 1: pendingTimelines()[1] below.
+    const QDateTime end(QDate::currentDate().addDays(-1), QTime(12, 0, 0), Qt::LocalTime);
     const QDateTime start = end.addMSecs(-2500); // 2.5s -- under the 3s minimum
-    tracker.seedCompletedDuration_dbg(
-        TimeDuration::fromPersistedRow(DurationType::Activity, start, end));
+    TestCommon::seedStoredRows(db,
+        {TimeDuration::fromPersistedRow(DurationType::Activity, start, end)}, true);
 
     HistoryDialog dialog(tracker, settings);
     dialog.debugSkipSplitMessages_ = true;
@@ -2162,7 +2198,7 @@ void HistoryDialogTest::test_D9_split_too_short_row_does_not_open_modal()
             w->close();
     });
 
-    dialog.setContextMenuTarget_dbg(0, 0);
+    dialog.setContextMenuTarget_dbg(0, 1);
     dialog.onSplitRow_dbg();
 
     // D9 review (finding 1, round 3): refused before SplitDialog was ever
@@ -2177,7 +2213,8 @@ void HistoryDialogTest::test_D9_split_too_short_row_does_not_open_modal()
     // so this also asserts on the actual message content that would be
     // shown, not just an opaque branch tag.
     QVERIFY(dialog.debugLastSplitMessage_.contains("too short to split meaningfully"));
-    QCOMPARE(dialog.editSession_dbg().pendingTimelines()[0].completed().size(), static_cast<size_t>(1));
+    QCOMPARE(dialog.editSession_dbg().pendingTimelines()[1].completed().size(), static_cast<size_t>(1));
+    QVERIFY(!dialog.editSession_dbg().hasEdits());
 }
 
 // ---------------------------------------------------------------------------
@@ -2199,6 +2236,7 @@ void HistoryDialogTest::test_M2_saveChanges_warns_when_backup_missing()
 
     HistoryDialog dialog(tracker, settings);
     dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     SessionStoreResult r = SessionStoreResult::success();
     r.backupMissing = true;
@@ -2228,6 +2266,7 @@ void HistoryDialogTest::test_M2_saveChanges_silent_when_backup_present()
 
     HistoryDialog dialog(tracker, settings);
     dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     fakeDb.callLog.clear();
     dialog.debugSkipCritical_ = true;
@@ -2297,6 +2336,7 @@ void HistoryDialogTest::test_M3_saveChanges_decline_cross_midnight_drop_preserve
 
     // Edit the unrelated ordinary row.
     dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     dialog.done(QDialog::Accepted);
     dialog.debugDropAnswer_ = QMessageBox::No;
@@ -2347,6 +2387,7 @@ void HistoryDialogTest::test_M3_saveChanges_decline_pre_existing_overlap_preserv
 
     HistoryDialog dialog(tracker, settings);
     dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     fakeDb.callLog.clear();
     dialog.debugSkipCritical_ = true;
@@ -2404,6 +2445,7 @@ void HistoryDialogTest::test_M3_saveChanges_combined_drop_causes_single_prompt()
 
     HistoryDialog dialog(tracker, settings);
     dialog.editSession_dbg().setPageTimeline(0, dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     fakeDb.callLog.clear();
     dialog.debugSkipCritical_ = true;
@@ -2481,17 +2523,18 @@ void HistoryDialogTest::test_revoked_dialog_refuses_save_and_leaves_store_untouc
 
     const QDateTime now = fixedNow();
 
-    // Save a Pause row to the DB (historical, earlier today)
+    // Save a Pause row to the DB (historical, yesterday)
     std::deque<TimeDuration> dbDurations;
-    dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Pause, now.addSecs(-200), now.addSecs(-150)));
+    dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Pause,
+        now.addDays(-1).addSecs(-200), now.addDays(-1).addSecs(-150)));
 
     // FakeClock declared before TimeTracker so it outlives it.
     FakeClock clock(now);
     TimeTracker tracker(settings, db);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
-    // Write the historical row to the DB via replaceAll
-    QVERIFY(tracker.replaceAll(Timeline(dbDurations, std::nullopt), Timeline({}, std::nullopt)).ok());
+    // Write the historical row to the DB
+    TestCommon::seedStoredRows(db, dbDurations, true);
 
     // Start the timer to create the ongoing segment
     tracker.useTimerViaButton(Button::Start);
@@ -2506,8 +2549,9 @@ void HistoryDialogTest::test_revoked_dialog_refuses_save_and_leaves_store_untouc
     HistoryDialog dialog(tracker, settings);
 
     // Flip the Pause row to Activity (an edit)
-    dialog.editSession_dbg().setPageTimeline(0,
-        dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Activity));
+    dialog.editSession_dbg().setPageTimeline(1,
+        dialog.editSession_dbg().pendingTimelines()[1].withSegmentType(0, DurationType::Activity));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     // Arrange: create the finished spy before Act (per MEDIUM-1 rule)
     QSignalSpy finished(&dialog, &QDialog::finished);
@@ -2561,9 +2605,9 @@ void HistoryDialogTest::test_revoked_dialog_accept_does_not_commit()
     FakeSessionStore fakeDb;
 
     const QDateTime now = fixedNow();
-    // Add an Activity row earlier today (same-day, so it's on page 0)
+    // Add an Activity row yesterday (so it's on page 1)
     fakeDb.loadDurationsResult.durations.push_back(
-        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addDays(-1).addSecs(-100), now.addDays(-1).addSecs(-50)));
 
     // FakeClock declared before TimeTracker so it outlives it.
     FakeClock clock(now);
@@ -2578,8 +2622,9 @@ void HistoryDialogTest::test_revoked_dialog_accept_does_not_commit()
     HistoryDialog dialog(tracker, settings);
 
     // Make an edit: toggle the Activity row to Pause
-    dialog.editSession_dbg().setPageTimeline(0,
-        dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+    dialog.editSession_dbg().setPageTimeline(1,
+        dialog.editSession_dbg().pendingTimelines()[1].withSegmentType(0, DurationType::Pause));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     // Arrange the finished spy
     QSignalSpy finished(&dialog, &QDialog::finished);
@@ -2622,7 +2667,7 @@ void HistoryDialogTest::test_revoked_editless_accept_same_turn_never_accepts()
 
     const QDateTime now = fixedNow();
     fakeDb.loadDurationsResult.durations.push_back(
-        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-100), now.addSecs(-50)));
+        TimeDuration::fromPersistedRow(DurationType::Activity, now.addDays(-1).addSecs(-100), now.addDays(-1).addSecs(-50)));
 
     // FakeClock declared before TimeTracker so it outlives it.
     FakeClock clock(now);
@@ -2634,6 +2679,7 @@ void HistoryDialogTest::test_revoked_editless_accept_same_turn_never_accepts()
 
     HistoryDialog dialog(tracker, settings);
     // No edits made: exercises saveChanges()'s no-edit early return.
+    QVERIFY(!dialog.editSession_dbg().hasEdits());
 
     // Arrange: create the finished spy before Act (per MEDIUM-1 rule).
     QSignalSpy finished(&dialog, &QDialog::finished);
@@ -2700,17 +2746,17 @@ void HistoryDialogTest::test_D1_scheduled_midnight_closes_dialog_and_keeps_cutof
     const QDate today = QDate::currentDate();
     const QDateTime segStart(today, QTime(23, 50, 0), Qt::LocalTime);
 
-    // Historical Pause row earlier the same day.
+    // Historical Pause row the day before.
     std::deque<TimeDuration> dbDurations;
     dbDurations.push_back(TimeDuration::fromPersistedRow(DurationType::Pause,
-        segStart.addSecs(-200), segStart.addSecs(-150)));
+        segStart.addDays(-1).addSecs(-200), segStart.addDays(-1).addSecs(-150)));
 
     // FakeClock declared before TimeTracker so it outlives it.
     FakeClock clock(segStart);
     TimeTracker tracker(settings, db);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
-    QVERIFY(tracker.replaceAll(Timeline(dbDurations, std::nullopt), Timeline({}, std::nullopt)).ok());
+    TestCommon::seedStoredRows(db, dbDurations, true);
 
     tracker.useTimerViaButton(Button::Start);
     QVERIFY(tracker.isActive());
@@ -2722,8 +2768,9 @@ void HistoryDialogTest::test_D1_scheduled_midnight_closes_dialog_and_keeps_cutof
         HistoryDialog dialog(tracker, settings);
 
         // Flip the historical Pause row to Activity (an edit); no prompt raised.
-        dialog.editSession_dbg().setPageTimeline(0,
-            dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Activity));
+        dialog.editSession_dbg().setPageTimeline(1,
+            dialog.editSession_dbg().pendingTimelines()[1].withSegmentType(0, DurationType::Activity));
+        QVERIFY(dialog.editSession_dbg().hasEdits());
 
         clock.setNow(cutoff);
 
@@ -2795,15 +2842,16 @@ void HistoryDialogTest::test_dialog_closes_on_shutdown_and_stays_closed_after_ca
     tracker.useTimerViaButton(Button::Start);
     clock.advance(20);
 
-    // Arrange: a completed segment to edit.
-    const QDateTime now = clock.now();
-    tracker.seedCompletedDuration_dbg(
-        TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-150)));
+    // Arrange: a completed segment to edit, on yesterday's page.
+    const QDateTime now = clock.now().addDays(-1);
+    TestCommon::seedStoredRows(fakeDb,
+        {TimeDuration::fromPersistedRow(DurationType::Activity, now.addSecs(-200), now.addSecs(-150))}, true);
 
     // Open the dialog and begin an edit.
     HistoryDialog dialog(tracker, settings);
-    dialog.editSession_dbg().setPageTimeline(0,
-        dialog.editSession_dbg().pendingTimelines()[0].withSegmentType(0, DurationType::Pause));
+    dialog.editSession_dbg().setPageTimeline(1,
+        dialog.editSession_dbg().pendingTimelines()[1].withSegmentType(0, DurationType::Pause));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
 
     // Create the finished spy AFTER arranging the dialog, BEFORE the shutdown.
     QSignalSpy dialogFinished(&dialog, &QDialog::finished);
