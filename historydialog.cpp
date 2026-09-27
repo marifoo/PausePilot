@@ -5,23 +5,33 @@
  * - Transactional Editing: All changes (type toggling, splitting) are performed
  *   on local copies inside HistoryEditSession (session_). The actual database and
  *   TimeTracker are only updated when the user clicks "OK" and saveChanges() succeeds.
- * - Paging Model: Data is grouped by Date (Pages). Page 0 is always "Today"
- *   (in-memory + today's DB + ongoing), while subsequent pages are historical (DB).
+ * - Paging Model (H5/WP5): session_.buildFromContext() groups pages from the
+ *   open-time HistoryEditContext captured by beginExclusiveEdit(). Pages are
+ *   sorted newest-first, so Today is NOT necessarily page 0 (a future-dated
+ *   page sorts ahead of it); use pages()[i].isCurrent/pageDate, never an
+ *   assumed index. A page is editable exactly when session_.pageEditable(i)
+ *   is true (H5/WP2's per-date permission rule); the ongoing row (if any) is
+ *   always read-only and never gets a type box.
  * - Safety: Checkpoints are paused while this dialog is open via
  *   TimerExclusiveEditGuard (beginExclusiveEdit on construction, endExclusiveEdit
  *   on destruction — guaranteed on all exit paths).
  * - Close blocking: accept() runs saveChanges() before closing. A failed DB
  *   save or a declined merge confirmation leaves the dialog open so the user
  *   can correct the situation or cancel explicitly.
+ * - Date-scoped save (H5/WP5): saveChanges() builds session_.buildScopedSave()'s
+ *   per-date diff and persists it via TimeTracker::saveHistoryEdit(), instead
+ *   of the old whole-table replaceAll(). Conflict (history changed underneath
+ *   this dialog since open) and any other failure both keep the edits and
+ *   leave the dialog open; neither ever partially writes.
  * - Close on edit revoke (WP1): when the engine revokes the edit (at lock,
  *   sleep, midnight, shutdown, or when the date moves forward),
  *   onExclusiveEditRevoked() sets editRevoked_, queues closeRevoked() to
  *   reject child dialogs/menus, then rejects History itself. saveChanges()
  *   checks editRevoked_ twice: once right after the result() guard, so an
  *   accept() landing before the queued closeRevoked() runs cannot slip past
- *   the no-edit early return, and again immediately before Step 4 (DB
- *   persist), since the Step 2.6/Step 3 prompts run nested event loops that
- *   can revoke after the early check.
+ *   the no-edit early return, and again immediately before persisting, since
+ *   the Step 3 merge-confirmation prompt runs a nested event loop that can
+ *   revoke after the early check.
  */
 
 #include "historydialog.h"
@@ -54,7 +64,7 @@ HistoryDialog::HistoryDialog(TimeTracker& timetracker, const Settings& settings,
     , exclusiveEditGuard_(timetracker)   // begins exclusive edit here
     , pageIndex_(0)
 {
-    session_.buildFromTimer(timetracker_, QDate::currentDate());
+    session_.buildFromContext(exclusiveEditGuard_.context());
     setupUI();
     updateTable(pageIndex_);
 
@@ -112,22 +122,28 @@ void HistoryDialog::accept()
 }
 
 /**
- * Commits pending edits to the Application State and Database.
+ * Commits pending edits via the date-scoped save (H5/WP5).
  *
- * Returns true on success (dialog may close), false if the save failed or
- * the user declined a merge confirmation or the result is not Accepted (dialog stays open).
+ * Returns true on success or on a true no-op, false if the save failed, the
+ * user declined a merge confirmation, or the result is not Accepted (dialog
+ * stays open in every false case).
  *
  * Strategy:
  * 1. Check result() — return false if Rejected (cancel path).
  * 1a. Check editRevoked_ — return false if the edit was revoked (early check;
  *     see the class-level "Close on edit revoke" note above).
- * 2. Refresh ongoing end-time from engine (preserving any user type edit).
- * 3. Delegate payload construction (normalization, origin re-split) to session_.
- * 3a. If the save would replace the DB and drop a display-only cross-midnight
- *     row or a pre-existing overlap row, ask for confirmation; abort on No.
- * 4. If a merge will occur, ask for confirmation; abort on No.
- * 5. Persist via replaceAll().
- * 6. Update TimeTracker runtime state via commitEditedTimeline() — only after persistence succeeds.
+ * 1b. Check the shutdown epoch and the earlier history-load-failed state.
+ * 2. If there are no edits at all, the save is a true no-op.
+ * 3. Build the per-date diff via session_.buildScopedSave().
+ *    - A violation shows "Invalid Entry" and refuses.
+ *    - An empty days list (edits that scope to no actual change) is also a
+ *      true no-op.
+ *    - A merge confirmation asks the user; abort on No.
+ * 4. Re-check editRevoked_ (the Step 3 prompt runs a nested event loop that
+ *    can revoke after the early check).
+ * 5. Persist via TimeTracker::saveHistoryEdit(). Conflict and any other
+ *    non-Success category both keep the edits and refuse; only Success closes
+ *    the dialog.
  */
 bool HistoryDialog::saveChanges()
 {
@@ -141,9 +157,9 @@ bool HistoryDialog::saveChanges()
     // synchronously (direct connection) but only queues closeRevoked() to
     // reject the dialog; an accept() landing in the same event turn, before
     // that queued reject runs, must not slip through the no-edit early
-    // return below and finish Accepted. The Step 4 check further down stays
-    // for edited sessions, since the Step 2.6/Step 3 prompts run nested
-    // event loops that can revoke after this early check.
+    // return below and finish Accepted. The late check further down stays
+    // for edited sessions, since the Step 3 prompt runs a nested event loop
+    // that can revoke after this early check.
     if (editRevoked_) {
         Logger::Log("[HISTORY] Edit was revoked; discarding changes");
         return false;
@@ -151,11 +167,9 @@ bool HistoryDialog::saveChanges()
 
     // D5 review fix (finding 1, R15-002): if the engine was shut down while
     // this dialog stayed open (e.g. a cancelled OS shutdown ran the save
-    // path, closing/committing the live segment), a save here would silently
-    // drop that segment (absent from this dialog's pre-shutdown snapshot) and
-    // re-insert the current-session bucket as unfinalized into a stopped
-    // engine. Per-dialog, not global: cancelShutdown() clears
-    // TimeTracker::wasShutDown() for everyone, but shutdownEpoch() is
+    // path, closing/committing the live segment), a save here would act on a
+    // stale open-time snapshot. Per-dialog, not global: cancelShutdown()
+    // clears TimeTracker::wasShutDown() for everyone, but shutdownEpoch() is
     // monotonic, so a dialog that spans the shutdown stays refused even
     // after cancellation, while one opened afterward saves normally.
     if (timetracker_.shutdownEpoch() != shutdownEpochAtOpen_) {
@@ -163,9 +177,8 @@ bool HistoryDialog::saveChanges()
         return false;
     }
 
-    // A failed history load means the model is incomplete; saving would
-    // replaceAll() the DB with only the rows we managed to load, wiping the
-    // rest. Refuse; the user can cancel and retry.
+    // A failed history load means the model is incomplete; refuse so the
+    // user can cancel and retry rather than saving from a partial snapshot.
     if (session_.historyLoadFailed()) {
         Logger::Log("[HISTORY] History load failed earlier; refusing to save edits");
 #ifndef QT_NO_DEBUG
@@ -182,25 +195,18 @@ bool HistoryDialog::saveChanges()
         return false;
     }
 
-    // Step 0: If the user made no edits, the save is a true no-op. Skip it
-    // entirely so an editless OK never rewrites or merges untouched DB history.
+    // If the user made no edits, the save is a true no-op. Skip it entirely
+    // so an editless OK never touches the store.
     if (!session_.hasEdits()) {
         Logger::Log("[HISTORY] No edits; skipping save (no-op)");
         return true;
     }
 
-    // Step 1: Refresh the ongoing segment's end-time from the engine.
-    session_.refreshOngoing(timetracker_);
+    // Build the date-scoped diff against the open-time snapshot.
+    const HistoryEditSession::ScopedSaveResult scoped = session_.buildScopedSave();
 
-    // Step 2: Build the three save buckets from the session model.
-    const HistoryEditSession::SavePayload payload = session_.buildSavePayload();
-
-    // Step 2.5 (C3/R13-001/R14-001): refuse a save that would write an
-    // unsupported row (invalid/non-positive interval, empty/duplicate id, or
-    // an Activity/Pause overlap). SessionStore::replaceAll() also rejects this
-    // as a final guard, but refusing here avoids reaching the DB at all.
-    if (payload.violation != DayValidity::Violation::None) {
-        Logger::Log("[HISTORY] buildSavePayload rejected: " + DayValidity::describe(payload.violation));
+    if (scoped.violation != DayValidity::Violation::None) {
+        Logger::Log("[HISTORY] buildScopedSave rejected: " + DayValidity::describe(scoped.violation));
 #ifndef QT_NO_DEBUG
         if (!debugSkipCritical_) {
             QMessageBox::critical(this, "Invalid Entry",
@@ -213,55 +219,19 @@ bool HistoryDialog::saveChanges()
         return false;
     }
 
-    // Step 2.6 (M3): replaceAll() below is a whole-table replace that can
-    // silently remove rows the user never touched -- a single-boundary
-    // cross-midnight row (display-only, never carried into the payload; see
-    // buildSavePayload()) or a pre-existing Activity/Pause overlap between two
-    // persisted, unedited rows (category 3, payload.preExistingOverlapDrops).
-    // Ask before either loss, but only when the save will actually call
-    // replaceAll() (same predicate as Step 4 below).
-    int crossMidnightDrops = 0;
-    for (const auto& page : session_.pages())
-        crossMidnightDrops += static_cast<int>(page.crossMidnight.size());
-    const int overlapDrops = payload.preExistingOverlapDrops;
-    const bool willReplace = !payload.historyTimeline.completed().empty() ||
-        !payload.sessionTimeline.completed().empty();
-
-    if (willReplace && (crossMidnightDrops > 0 || overlapDrops > 0)) {
-        QString dropText;
-        if (crossMidnightDrops > 0)
-            dropText += QString("%1 entries spanning midnight will be removed.").arg(crossMidnightDrops);
-        if (overlapDrops > 0) {
-            if (!dropText.isEmpty())
-                dropText += " ";
-            dropText += QString("%1 pre-existing overlapping entries will be removed.").arg(overlapDrops);
-        }
-        dropText += " Continue saving?";
-
-#ifndef QT_NO_DEBUG
-        debugDropPromptText_ = dropText;
-        // Default to No (abort the save) rather than exec()-ing a real
-        // QMessageBox::question() when a test hits this path without setting
-        // debugDropAnswer_ -- under offscreen QPA that dialog has nothing to
-        // dismiss it and would hang the run instead of failing the assertion on
-        // saveChanges()'s return value.
-        QMessageBox::StandardButton dropAnswer = QMessageBox::No;
-        if (debugDropAnswer_.has_value()) {
-            dropAnswer = *debugDropAnswer_;
-            debugDropAnswer_ = std::nullopt;
-        }
-#else
-        const auto dropAnswer = QMessageBox::question(this, "Entries Will Be Removed",
-            dropText, QMessageBox::Yes | QMessageBox::No);
-#endif
-        if (dropAnswer != QMessageBox::Yes) {
-            return false;
-        }
+    // H5/WP5: an editable page can be "modified" (hasEdits() true) yet scope
+    // to no actual change, e.g. a toggle back to its original value. Treat
+    // this like no edits -- it is not a failure.
+    if (scoped.days.empty()) {
+        Logger::Log("[HISTORY] No scoped changes after diffing; skipping save (no-op)");
+        return true;
     }
 
-    // Step 3: Confirm if normalization merged overlapping segments.
-    if (payload.needsMergeConfirmation) {
+    // Confirm if the diff merged overlapping same-type rows.
+    if (scoped.needsMergeConfirmation) {
 #ifndef QT_NO_DEBUG
+        if (debugOnMergePromptShown_)
+            debugOnMergePromptShown_();
         // Default to No (abort the save) rather than exec()-ing a real
         // QMessageBox::question() when a test hits this path without setting
         // debugOverlapAnswer_ -- under offscreen QPA that dialog has nothing to
@@ -282,84 +252,57 @@ bool HistoryDialog::saveChanges()
         }
     }
 
-    const Timeline& historyTimeline  = payload.historyTimeline;
-    const Timeline& sessionTimeline  = payload.sessionTimeline;
-    const Timeline& memoryTimeline   = payload.memoryTimeline;
-
-    bool backupMissing = false;
-
     // WP1: if the edit was revoked (at lock, sleep, midnight, shutdown, or
-    // when the date moves forward), refuse the save and discard all edits.
-    // This check gates both Step 4 (DB persist) and Step 5 (memory-only commit).
+    // when the date moves forward, or now also any mode change from WP7c),
+    // refuse the save and discard all edits. The Step 3 prompt above runs a
+    // nested event loop that can revoke after the early check.
     if (editRevoked_) {
         Logger::Log("[HISTORY] Edit was revoked; discarding changes");
         return false;
     }
 
-    // Step 4: Persist to DB.
-    if (!historyTimeline.completed().empty() || !sessionTimeline.completed().empty()) {
-        Logger::Log(QString("[HISTORY] Saving %1 historical + %2 current-session durations to DB")
-            .arg(historyTimeline.completed().size())
-            .arg(sessionTimeline.completed().size()));
-
-        // C4 fix round 2 (MEDIUM-5): capture the latch state BEFORE the
-        // store call. If it was already latched, enterFatalState() returns
-        // early and shows nothing for THIS call -- so a FatalError here
-        // still needs this dialog. Only suppress it when this very call is
-        // the one that raised the modal.
-        const bool wasLatchedBefore = timetracker_.isFatalLatched();
-        const SessionStoreResult dbResult = timetracker_.replaceAll(historyTimeline, sessionTimeline);
-        if (!dbResult.ok() && dbResult.category != SessionStoreResult::Disabled) {
-            Logger::Log("[HISTORY] CRITICAL: Failed to save durations to DB: " + dbResult.message);
-            // C4 (finding 1): a FatalError that THIS call raised already
-            // latched TimeTracker and showed its own single modal error via
-            // fatalError -- do not show a second dialog for the same
-            // failure. Every other failure category still shows this dialog
-            // as before, and so does a FatalError that arrives while the
-            // latch was already set (this call raised no dialog of its own).
-            if (!(dbResult.category == SessionStoreResult::FatalError && !wasLatchedBefore)) {
-#ifndef QT_NO_DEBUG
-                ++debugCriticalShownCount_;
-                if (!debugSkipCritical_) {
-                    QMessageBox::critical(this, "Database Error",
-                        "Failed to save changes to the database. Your changes to historical entries may be lost.");
-                }
-#else
-                QMessageBox::critical(this, "Database Error",
-                    "Failed to save changes to the database. Your changes to historical entries may be lost.");
-#endif
-            }
-            return false;
-        }
-        Logger::Log("[HISTORY] Successfully saved historical durations to DB");
-        backupMissing = dbResult.backupMissing;
-    } else {
-        Logger::Log("[HISTORY] No historical durations to save");
+    // Persist the scoped diff.
+    const SessionStoreResult dbResult = timetracker_.saveHistoryEdit(exclusiveEditGuard_.context(), scoped.days);
+    if (dbResult.ok()) {
+        Logger::Log("[HISTORY] Successfully saved scoped history edit");
+        return true;
     }
 
-    // Step 5: Atomically update TimeTracker's in-memory durations and checkpoint tracking.
-    const auto commitResult = timetracker_.commitEditedTimeline(memoryTimeline);
-    if (!commitResult.ok) {
-        Logger::Log("[HISTORY] commitEditedTimeline: checkpoint write failed after edit commit");
-    }
-    Logger::Log("[HISTORY] Updated TimeTracker current session and checkpoint tracking");
-
-    if (backupMissing) {
+    if (dbResult.category == SessionStoreResult::Conflict) {
+        Logger::Log("[HISTORY] saveHistoryEdit: Conflict: " + dbResult.message);
 #ifndef QT_NO_DEBUG
-        ++debugBackupWarningShownCount_;
+        ++debugConflictShownCount_;
+        if (debugOnSaveErrorShown_)
+            debugOnSaveErrorShown_();
         if (!debugSkipCritical_) {
-            QMessageBox::warning(this, "Database Warning",
-                "Your changes were saved, but no safety backup of the previous history "
-                "could be created (e.g. low disk space or a copy failure).");
+            QMessageBox::critical(this, "History Changed",
+                "History changed since this window was opened. Your edits were not "
+                "saved. Close and reopen History to review the current data.");
         }
 #else
-        QMessageBox::warning(this, "Database Warning",
-            "Your changes were saved, but no safety backup of the previous history "
-            "could be created (e.g. low disk space or a copy failure).");
+        QMessageBox::critical(this, "History Changed",
+            "History changed since this window was opened. Your edits were not "
+            "saved. Close and reopen History to review the current data.");
 #endif
+        return false;
     }
 
-    return true;
+    Logger::Log("[HISTORY] saveHistoryEdit failed: " + dbResult.message);
+#ifndef QT_NO_DEBUG
+    ++debugCriticalShownCount_;
+    if (debugOnSaveErrorShown_)
+        debugOnSaveErrorShown_();
+    if (!debugSkipCritical_) {
+        QMessageBox::critical(this, "Database Error",
+            "Could not save your changes to the database. Your edits are still "
+            "here -- you can retry or cancel.");
+    }
+#else
+    QMessageBox::critical(this, "Database Error",
+        "Could not save your changes to the database. Your edits are still "
+        "here -- you can retry or cancel.");
+#endif
+    return false;
 }
 
 void HistoryDialog::onExclusiveEditRevoked()
@@ -492,7 +435,12 @@ void HistoryDialog::updateTotalsLabel(uint idx)
 
     QString totalsStr = QString("\nActivity: ") + convMSecToTimeStr(totalActivity)
                       + QString("  Pause: ") + convMSecToTimeStr(totalPause);
-    pageLabel_->setText(session_.pageTitle(idx) + totalsStr);
+    // H5/WP5: a read-only page (Today while running, or any date the open-time
+    // permission rule excluded) gets a " (read-only)" title suffix.
+    QString title = session_.pageTitle(idx);
+    if (!session_.pageEditable(idx))
+        title += " (read-only)";
+    pageLabel_->setText(title + totalsStr);
 }
 
 void HistoryDialog::addReadOnlyRow(QTableWidget* table, int row, const TimeDuration& d, const QString& suffix)
@@ -518,7 +466,12 @@ void HistoryDialog::applyDirtyHighlight(uint idx)
     const bool modified = session_.pageModified(idx);
     const QBrush highlight(QColor(180, 216, 228, 255));
     const QBrush clear; // default (invalid) brush: falls back to the item's normal background
-    const int editableRows = session_.editableRowCount(idx);
+    // H5/WP5: the ongoing row never gets a type box and is rendered fully
+    // read-only (addReadOnlyRow), so only the completed rows above it are
+    // ever highlighted -- unlike editableRowCount(), which still counts it.
+    const auto& pendingTimelines = session_.pendingTimelines();
+    const int editableRows = idx < pendingTimelines.size()
+        ? static_cast<int>(pendingTimelines[idx].completed().size()) : 0;
     for (int row = 0; row < editableRows; ++row) {
         for (int col = 0; col < table_->columnCount(); ++col) {
             if (table_->item(row, col))
@@ -568,6 +521,10 @@ void HistoryDialog::updateTable(uint idx)
 
     updateTotalsLabel(idx);
 
+    // H5/WP5: a read-only page (Today while running, or any date the
+    // open-time permission rule excluded) shows disabled type boxes.
+    const bool editable = session_.pageEditable(idx);
+
     // Populate completed rows
     for (int row = 0; row < static_cast<int>(comp.size()); ++row) {
         const auto& d = comp[row];
@@ -582,7 +539,7 @@ void HistoryDialog::updateTable(uint idx)
 
         QCheckBox* box = new QCheckBox(table_);
         box->setChecked(d.type == DurationType::Activity);
-        box->setEnabled(true);
+        box->setEnabled(editable);
         table_->setCellWidget(row, 3, box);
 
         const SegmentId segId = d.segment_id;
@@ -609,40 +566,14 @@ void HistoryDialog::updateTable(uint idx)
         });
     }
 
-    // Populate ongoing row if present
+    // Populate ongoing row if present. H5/WP5: the ongoing row never gets a
+    // type box -- it is always read-only (setOngoingType() is dead API from
+    // this dialog's perspective; the page it sits on is read-only anyway
+    // whenever tracking is running, by the open-time permission rule).
     if (hasOngoing) {
         int row = static_cast<int>(comp.size());
         const auto& og = pendingTimelines[idx].ongoing().value();
-        QString typeStr = og.type == DurationType::Activity ? "Activity  " : "Pause  ";
-        QTableWidgetItem* typeItem = new QTableWidgetItem(typeStr);
-        QTableWidgetItem* startEndItem = new QTableWidgetItem(
-            og.startTime.toString("hh:mm:ss") + " - " + og.endTime.toString("hh:mm:ss"));
-        QTableWidgetItem* durationItem = new QTableWidgetItem(
-            convMSecToTimeStr(og.duration()) + "  (Running)");
-        table_->setItem(row, 0, typeItem);
-        table_->setItem(row, 1, startEndItem);
-        table_->setItem(row, 2, durationItem);
-
-        QCheckBox* box = new QCheckBox(table_);
-        box->setChecked(og.type == DurationType::Activity);
-        box->setEnabled(true);
-        table_->setCellWidget(row, 3, box);
-
-        connect(box, &QCheckBox::stateChanged, this, [this, capturedPageIdx = idx, displayRow = row](int state) {
-            if (capturedPageIdx != pageIndex_) return;
-            const DurationType newType = (state == Qt::Checked) ? DurationType::Activity : DurationType::Pause;
-            if (!session_.setOngoingType(capturedPageIdx, newType))
-                return;
-            const QString ts = newType == DurationType::Activity ? "Activity  " : "Pause  ";
-            if (table_->item(displayRow, 0)) {
-                table_->item(displayRow, 0)->setText(ts);
-                updateTotalsLabel(capturedPageIdx);
-                // D9 review (finding 1): the ongoing row previously received
-                // no dirty highlight at all, unlike completed rows -- the one
-                // applyDirtyHighlight() rule now covers both.
-                applyDirtyHighlight(capturedPageIdx);
-            }
-        });
+        addReadOnlyRow(table_, row, og, "(Running)");
     }
 
     // D9 review (finding 1): apply the single dirty-highlight rule once, to
@@ -689,6 +620,10 @@ void HistoryDialog::showContextMenu(const QPoint& pos)
 {
     int row = table_->rowAt(pos.y());
     if (row < 0) return;
+
+    // H5/WP5: no split menu on a read-only page.
+    if (pageIndex_ < session_.pageCount() && !session_.pageEditable(pageIndex_))
+        return;
 
     const auto& pendingTimelines = session_.pendingTimelines();
 
@@ -795,6 +730,15 @@ void HistoryDialog::onSplitRow()
             .arg(idx).arg(row));
         return;
     }
+    // H5/WP5: the split context menu is already suppressed on a read-only
+    // page (showContextMenu()), but refuse defensively here too -- e.g. a
+    // stale contextMenuRow_/contextMenuPage_ from before a revoke -- so
+    // SplitDialog never opens on a read-only page.
+    if (rejection == HistoryEditSession::SplitError::ReadOnly) {
+        Logger::Log(QString("[HISTORY] Error: onSplitRow: page not editable - page: %1, row: %2")
+            .arg(idx).arg(row));
+        return;
+    }
 
     const auto& completed = pendingTimelines[idx].completed();
     const TimeDuration& duration = completed[row];
@@ -840,9 +784,10 @@ void HistoryDialog::onSplitRow()
             .arg(idx).arg(row));
         break;
     case HistoryEditSession::SplitError::ReadOnly:
-        // Defensive: buildFromTimer() (still the only build this dialog uses)
-        // marks every page editable, so this cannot fire yet -- H5/WP5 wires
-        // the scoped-save model in.
+        // Defensive: already refused above (the ReadOnly check before
+        // SplitDialog is even shown) and the split menu itself is
+        // suppressed on a read-only page (showContextMenu()), so this
+        // cannot fire in production.
         Logger::Log(QString("[HISTORY] Error: onSplitRow: page not editable - page: %1, row: %2")
             .arg(idx).arg(row));
         break;

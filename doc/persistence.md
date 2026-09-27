@@ -179,71 +179,48 @@ flowchart TD
     K --> Z
 ```
 
-## History saves
+## History saves (H5/WP5)
 
-A History save is a whole-table replace: all durations in the
-`durations` table are deleted and re-inserted based on the edited
-timeline. Consequently, editing one row on one day rewrites every
-day's entries.
+A History save is date-scoped, not a whole-table replace:
+`HistoryDialog::saveChanges()` builds a per-date diff via
+`HistoryEditSession::buildScopedSave()` and persists it through
+`TimeTracker::saveHistoryEdit()` / `SqliteSessionStore::saveHistoryDays()`.
+Only the dates the user actually edited are touched; every other date, and
+every untouched row on an edited date, is left byte-identical. Rows the old
+whole-table replace used to drop silently -- a single-boundary cross-midnight
+row, a pre-existing cross-type overlap between two untouched rows, a
+multi-boundary row, an unfinalized checkpoint row -- are simply never part of
+the diff for an unrelated edit, so they now survive a save unmodified instead
+of needing a confirmation prompt to avoid losing them.
 
-When `HistoryDialog::saveChanges()` calls `replaceAll()`, it may
-remove rows the user never touched:
+`HistoryEditSession::buildScopedSave()` computes, for each editable page that
+was modified: the changed/new rows to upsert, the ids of rows deleted by a
+same-type merge, and whether a merge occurred (`needsMergeConfirmation`) --
+`saveChanges()` asks a blocking Yes/No confirmation only in that case,
+before persisting. A No leaves the database untouched and the dialog open.
+A violation (an edit landing outside its day's span, or creating a new
+Activity/Pause overlap with a retained row -- U3) refuses the save with an
+"Invalid Entry" message before the store is ever called. An empty diff (e.g.
+a toggle back to its original value) is a true no-op, not a failure.
 
-1. **Cross-midnight rows** (counted): A single-boundary row that
-   crosses one local calendar boundary is displayed read-only in
-   History (since it spans more than one local date) but is
-   deliberately never added to `pendingTimelines_`. Therefore,
-   `buildSavePayload()` builds the save payload from
-   `pendingTimelines_[i].completed()` and the row is simply absent
-   from the payload — it is not discarded, but was never included.
+`TimeTracker::saveHistoryEdit()` additionally refuses (`Conflict`) if the
+edit was revoked, the local date moved backward, or a day's timezone-derived
+span changed since the dialog opened, and refuses (`CallerBug`) if a date in
+the diff was not editable at open -- see "Scoped History save" below for the
+store's own contract. Any non-`Success` result keeps the user's edits in the
+dialog (nothing is written) and shows a critical dialog; the user can retry
+or cancel.
 
-2. **Pre-existing overlaps** (counted): A persisted, unedited
-   Activity/Pause overlap between two already-saved rows (or between
-   a saved row and an unedited ongoing row) is resolved by a
-   `(startTime, segment_id)` tie-break. When the overlap is
-   completed-vs-completed, both rows compete in the tie-break and
-   the loser is dropped. When one row is ongoing, the ongoing row
-   is never dropped — only a conflicting completed row can lose.
-   This is reported in the payload as `preExistingOverlapDrops`.
-
-Before a destructive replace, `saveChanges()` computes both counts
-and asks a blocking Yes/No confirmation before any database write:
-"{count} entries spanning midnight will be removed. {count}
-pre-existing overlapping entries will be removed. Continue saving?"
-The prompt appears only if either count is positive and the save
-will actually call `replaceAll()` (i.e., the history or session
-timeline is non-empty). A No leaves the database untouched and the
-dialog open; the user can retry or cancel editing.
-
-The dialog does **not** count or announce rows spanning more than
-one local midnight — those are discarded on load and never reach
-the display or the editor.
-
-Additionally, an unfinalized row (checkpoint with `is_finalized = 0`)
-that was not loaded by the model (e.g., because `loadDurations()`
-filters to `is_finalized = 1`) is also erased by the whole-table
-replace. This fourth deletion path is not covered by the confirmation
-prompt; its production reachability is outside the scope of this
-feature.
-
-Before the replace, a safety backup is attempted
-(`SqliteSessionStore::replaceAll()`, before the write), but it may
-fail due to low disk space or a copy error; in that case, the user
-is warned after the save has been committed. Nothing in the UI or
-documentation promises that an overwritten row is recoverable.
-
-This differs from orphan reconciliation on startup
-(`recoverStartupCheckpoints()`), which applies a policy-drop decision
-and one-time transaction to decide whether orphans are finalized or
-removed. History saves replace the table unconditionally after
-confirmation.
+`SessionStore::replaceAll()` and its safety-backup step still exist in
+production code (removed only in a later package, C11), but nothing in
+`HistoryDialog`'s save path calls them any more.
 
 ### Scoped History save (H5/WP2)
 
-`SqliteSessionStore::saveHistoryDays(openSnapshot, days)` is a second, narrower
-write path alongside `replaceAll()`. It is not yet called by `HistoryDialog`
-(that switch is WP5) -- for now it exists as a store-level contract, exercised
-directly by `test_database.cpp`/`test_contract_matrix.cpp`.
+`SqliteSessionStore::saveHistoryDays(openSnapshot, days)` is the write path
+`HistoryDialog` uses (H5/WP5) -- exercised directly by
+`test_database.cpp`/`test_contract_matrix.cpp`, and end-to-end through
+`HistoryDialog` by `test_historydialog.cpp`/`test_history_commit.cpp`.
 
 `openSnapshot` is the caller's own `loadHistoryRows()` read, taken once when
 History was opened. `days` carries one `HistoryDayChange` per edited local
@@ -297,13 +274,16 @@ No backup and no `*.durations.txt` export -- this path never creates either.
 ### Revoked edits
 
 When the engine revokes History's edit (at lock, sleep, midnight or shutdown),
-the dialog is flagged immediately. A revoke is never followed by a new save.
-If a save is in-flight when the revoke lands, the outcome depends on timing:
-if the revoke interrupts Steps 1–3 (model construction, conflict checking, user
-prompts), the save writes nothing and the table remains untouched. If the save
-already committed before the revoke (e.g. the revoke lands during the M2 warning
-shown after Step 4), the committed changes stay. Steps 4 and 5 run without an
-event loop, so a save lands whole or not at all.
+the dialog is flagged (`editRevoked_`) immediately. A revoke is never followed
+by a new save: `saveChanges()` checks `editRevoked_` right after the
+`result()` guard, and again immediately before calling `saveHistoryEdit()`,
+since the merge-confirmation prompt runs a nested event loop that can revoke
+after the early check. `TimeTracker::saveHistoryEdit()` itself also refuses
+(`Conflict`) once the edit is revoked (`dialog_open_` is false), as a second,
+engine-side enforcement of the same rule. Because `saveHistoryDays()` is one
+transaction with no nested event loop, a save always lands whole or not at
+all -- there is no window where a revoke can land after the write starts but
+before it commits.
 
 ## What is inside the `SessionStore` seam — and what is not
 
@@ -321,7 +301,7 @@ exactly as stored (finalized, unfinalized, multi-boundary, and malformed
 alike), never deletes or repairs anything, and is used by History's
 date-scoped editor rather than by `TimeTracker`. `saveHistoryDays` (H5/WP2,
 see "Scoped History save" above) is the date-scoped write counterpart to
-`loadHistoryRows`; it is not yet called in production (WP5 wires
-`HistoryDialog` to it). That is what makes `FakeSessionStore` in `qtest/` viable: it can
+`loadHistoryRows`; `HistoryDialog` saves through it exclusively (H5/WP5).
+That is what makes `FakeSessionStore` in `qtest/` viable: it can
 re-implement the interface in pure C++ data structures and the engine code
 is none the wiser.

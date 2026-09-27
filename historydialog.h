@@ -5,6 +5,7 @@
 #include <QDate>
 #include <QMessageBox>
 #include <optional>
+#include <functional>
 #include "types.h"
 #include "timetracker.h"
 #include "timeline.h"
@@ -34,7 +35,7 @@ public:
     TimerExclusiveEditGuard& operator=(const TimerExclusiveEditGuard&) = delete;
 
     /// The open-time HistoryEditContext captured by beginExclusiveEdit()
-    /// (H5/WP3). The dialog does not consume this yet (WP5).
+    /// (H5/WP3), consumed by saveChanges()'s date-scoped save (H5/WP5).
     const HistoryEditContext& context() const { return context_; }
 
 private:
@@ -65,9 +66,9 @@ private:
     /// moves forward). saveChanges() checks this twice: once right after the
     /// result() guard, so an accept() landing before the queued closeRevoked()
     /// runs cannot slip past the no-edit early return, and again immediately
-    /// before Step 4, also gating Step 5's memory-only commit when nothing is
-    /// written (the Step 2.6/Step 3 prompts run nested event loops that can
-    /// revoke after the early check).
+    /// before the date-scoped save, also gating the no-op return when nothing
+    /// is written (the merge/overlap confirmation prompts run nested event
+    /// loops that can revoke after the early check).
     bool editRevoked_ = false;
 
     /// Non-widget model owning all edit state: pages, pending timelines, origin tracking.
@@ -92,9 +93,11 @@ private:
     /// pageModified() itself is page-scoped: once any row on a page changed,
     /// every editable row on that page is highlighted; a per-row highlight
     /// would need a per-row dirty predicate the model does not expose. Sets
-    /// or clears every editable (completed + ongoing) row's Type/Start-End/
-    /// Duration cells so a toggle back to the original value un-highlights,
-    /// unlike the old handler-local "always highlight, never clear" rule.
+    /// or clears every completed row's Type/Start-End/Duration cells so a
+    /// toggle back to the original value un-highlights, unlike the old
+    /// handler-local "always highlight, never clear" rule. H5/WP5: the
+    /// ongoing row is excluded -- it never gets a type box and is rendered
+    /// fully read-only.
     void applyDirtyHighlight(uint idx);
     void showContextMenu(const QPoint& pos);
     QString buildLoadReconciliationMessage() const;
@@ -158,32 +161,31 @@ public:
     /// for the overlap confirmation.  Reset to nullopt after each saveChanges() call.
     std::optional<QMessageBox::StandardButton> debugOverlapAnswer_;
 
-    /// M3: if set, saveChanges() uses this answer instead of showing
-    /// QMessageBox::question() for the display-only-row/pre-existing-overlap
-    /// drop confirmation (Step 2.6). Defaults to No under offscreen QPA when
-    /// unset -- that dialog has nothing to dismiss it and would hang the test
-    /// run instead of failing the assertion on saveChanges()'s return value.
-    /// Reset to nullopt after each saveChanges() call.
-    std::optional<QMessageBox::StandardButton> debugDropAnswer_;
-    /// M3: the composed Step 2.6 prompt text, captured for tests to inspect
-    /// which clauses (cross-midnight/overlap) were included.
-    QString debugDropPromptText_;
-
     /// If true, saveChanges() skips QMessageBox::critical() on DB failure (still returns false).
     /// Defaults to true: under offscreen QPA a real QMessageBox::critical() has nothing to
     /// dismiss it, so an unexpected failure would hang the test run instead of failing the
     /// assertion on saveChanges()'s (unaffected) false return. A test that wants to observe
-    /// the "would have shown" signal still can, via debugCriticalShownCount_. Also suppresses
-    /// the M2 backup-missing warning (see debugBackupWarningShownCount_), for the same reason.
+    /// the "would have shown" signal still can, via debugCriticalShownCount_.
     bool debugSkipCritical_ = true;
     /// C4 fix round 2 (MEDIUM-5/LOW-9): incremented each time saveChanges()'s
-    /// replaceAll() failure path reaches its own critical-dialog branch,
-    /// regardless of debugSkipCritical_ -- lets a test observe whether this
-    /// dialog would have been shown without exec()-ing a real QMessageBox.
+    /// generic (non-Conflict) DB-failure path reaches its own critical-dialog
+    /// branch, regardless of debugSkipCritical_ -- lets a test observe whether
+    /// this dialog would have been shown without exec()-ing a real QMessageBox.
     int debugCriticalShownCount_ = 0;
-    /// M2: incremented each time saveChanges() shows (or, under
-    /// debugSkipCritical_, would show) the backup-missing warning.
-    int debugBackupWarningShownCount_ = 0;
+    /// H5/WP5: incremented each time saveChanges()'s Conflict branch (the
+    /// store detected that History changed underneath this dialog) reaches
+    /// its own critical-dialog branch, regardless of debugSkipCritical_.
+    int debugConflictShownCount_ = 0;
+    /// H5/WP5: if set, called just before saveChanges() would show the Step 3
+    /// merge-confirmation prompt (before consulting debugOverlapAnswer_).
+    /// Lets a test fire a mode-change/revoke from inside the nested prompt
+    /// and observe that the late editRevoked_ check below it still refuses.
+    std::function<void()> debugOnMergePromptShown_;
+    /// H5/WP5: if set, called wherever saveChanges() would show the Conflict
+    /// or the generic DB-failure critical dialog (right before that dialog).
+    /// Lets a test fire a revoke from inside that callback and observe that
+    /// the dialog still ends up Rejected with no further write.
+    std::function<void()> debugOnSaveErrorShown_;
 
     /// D9 review (finding 1, round 3): if true, onSplitRow() skips its
     /// QMessageBox::information()/warning() calls for a rejected split
@@ -207,12 +209,17 @@ public:
 #endif
 
     /**
-     * Commits pending edits to the database and TimeTracker. Returns true on success.
-     * Returns false (and keeps the dialog open / exits early) if:
+     * Commits pending edits via the date-scoped save (H5/WP5). Returns true on
+     * success or on a true no-op (no edits, or edits that scope to no actual
+     * change). Returns false (and keeps the dialog open / exits early) if:
      *   - The dialog result is not Accepted (cancelled path).
      *   - The edit was revoked (exclusiveEditRevoked() signal received).
+     *   - The prior history load failed.
+     *   - session_.buildScopedSave() reports a violation (shows "Invalid Entry").
      *   - A merge confirmation was declined by the user.
-     *   - The DB save failed (shows a critical error dialog).
+     *   - TimeTracker::saveHistoryEdit() returned Conflict (history changed
+     *     since open) or any other non-Success category (shows a critical
+     *     error dialog either way; the edits are kept in both cases).
      *
      * Called by accept() to block close on failure. Can also be called directly
      * in tests (via #define private public) to exercise the commit path explicitly.

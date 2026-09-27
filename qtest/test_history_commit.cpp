@@ -2,6 +2,9 @@
 #include "fakeclock.h"
 #include <QtTest>
 #include <QMessageBox>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <algorithm>
 
 #include "../historydialog.h"
@@ -61,7 +64,7 @@ void HistoryCommitTest::test_accept_stays_open_on_db_failure()
     QVERIFY(dialog.editSession_dbg().setPageTimeline(1, dialog.editSession_dbg().pendingTimelines()[1].withSegmentType(1, DurationType::Activity)));
     QVERIFY(dialog.editSession_dbg().hasEdits());
 
-    // Hold an exclusive DB transaction to force replaceAll to fail.
+    // Hold an exclusive DB transaction to force the date-scoped save to fail.
     const QString lockConnName = "commit_test_db_lock";
     {
         QSqlDatabase lockDb = QSqlDatabase::addDatabase("QSQLITE", lockConnName);
@@ -71,8 +74,9 @@ void HistoryCommitTest::test_accept_stays_open_on_db_failure()
         QVERIFY(lockQuery.exec("BEGIN EXCLUSIVE TRANSACTION"));
 
         // Skip QMessageBox::critical() to avoid offscreen QPA propagateSizeHints() warnings.
-        // The DB-failure path is still fully exercised: replaceAll fails, debugSkipCritical_
-        // suppresses only the dialog, and accept() is expected to NOT close the dialog.
+        // The DB-failure path is still fully exercised: the date-scoped save fails,
+        // debugSkipCritical_ suppresses only the dialog, and accept() is expected to
+        // NOT close the dialog.
         dialog.debugSkipCritical_ = true;
         dialog.accept();
 
@@ -85,7 +89,7 @@ void HistoryCommitTest::test_accept_stays_open_on_db_failure()
     // default (not QDialog::Accepted).
     QVERIFY(dialog.result() != QDialog::Accepted);
 
-    // Store state must be unchanged: the failed replaceAll wrote nothing.
+    // Store state must be unchanged: the failed date-scoped save wrote nothing.
     const auto loadedAfterFailedAccept = db.loadDurations();
     QCOMPARE(static_cast<int>(loadedAfterFailedAccept.size()), 2);
     const auto& rowAfterFailedAccept = *std::find_if(
@@ -141,7 +145,7 @@ void HistoryCommitTest::test_accept_stays_open_on_merge_decline()
     // Dialog must remain open (result still not Accepted).
     QVERIFY(dialog.result() != QDialog::Accepted);
 
-    // Store unchanged: the declined merge never reached saveHistoryDays/replaceAll.
+    // Store unchanged: the declined merge never reached the date-scoped save.
     QCOMPARE(static_cast<int>(db.loadDurations().size()), 2);
 }
 
@@ -345,4 +349,72 @@ void HistoryCommitTest::test_merge_save_survives_late_crash_recovery()
     QCOMPARE(static_cast<int>(loaded.size()), 1);
     QCOMPARE(loaded.durations[0].startTime.toUTC().time(), QTime(10, 0, 0));
     QCOMPARE(loaded.durations[0].endTime.toUTC().time(), QTime(10, 45, 0));
+}
+
+// ---------------------------------------------------------------------------
+// WP5 acceptance: a date-scoped save never touches backup/export sidecars.
+// saveHistoryDays() never calls createBackup() (unlike replaceAll()), so a
+// save through the dialog must leave the DB directory's file listing --
+// including any pre-existing *.backup / *.durations.txt sidecars -- exactly
+// as it was: same files, same sizes, same mtimes. This guards against a
+// later change that adds a backup/export to the scoped path, or routes a
+// save back through replaceAll.
+// ---------------------------------------------------------------------------
+
+void HistoryCommitTest::test_save_leaves_sidecars_unchanged()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore db(settings);
+    TimeTracker tracker(settings, db);
+
+    const QDateTime yesterday = fixedNow().addDays(-1);
+    std::deque<TimeDuration> dbDurations;
+    dbDurations.push_back(
+        TimeDuration::fromPersistedRow(DurationType::Activity, yesterday.addSecs(-30), yesterday.addSecs(-10)));
+    TestCommon::seedStoredRows(db, dbDurations, true);
+
+    // Seed old sidecar files named the way createBackup() would name them
+    // (sqlitesessionstore.cpp: base + ".<timestamp>.backup" and
+    // "...durations.txt"), in the DB's own directory.
+    const QString backupPath = db_path_ + ".2020-01-01T00-00-00-000.backup";
+    const QString durationsPath = db_path_ + ".2020-01-01T00-00-00-000.durations.txt";
+    {
+        QFile backupFile(backupPath);
+        QVERIFY(backupFile.open(QIODevice::WriteOnly));
+        backupFile.write("old backup contents");
+        backupFile.close();
+        QFile durationsFile(durationsPath);
+        QVERIFY(durationsFile.open(QIODevice::WriteOnly));
+        durationsFile.write("old durations contents");
+        durationsFile.close();
+    }
+
+    const QDir dbDir(QFileInfo(db_path_).absoluteDir());
+    const QStringList entriesBefore = dbDir.entryList(QDir::Files, QDir::Name);
+    QVERIFY(entriesBefore.contains(QFileInfo(backupPath).fileName()));
+    QVERIFY(entriesBefore.contains(QFileInfo(durationsPath).fileName()));
+    const qint64 backupSizeBefore = QFileInfo(backupPath).size();
+    const qint64 durationsSizeBefore = QFileInfo(durationsPath).size();
+    const QDateTime backupMtimeBefore = QFileInfo(backupPath).lastModified();
+    const QDateTime durationsMtimeBefore = QFileInfo(durationsPath).lastModified();
+
+    HistoryDialog dialog(tracker, settings);
+    QVERIFY(dialog.editSession_dbg().setPageTimeline(1, dialog.editSession_dbg().pendingTimelines()[1].withSegmentType(0, DurationType::Pause)));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
+
+    dialog.accept();
+
+    // The save must have succeeded (Accepted), so the comparison below is of
+    // a real save, not a no-op.
+    QCOMPARE(dialog.result(), static_cast<int>(QDialog::Accepted));
+
+    const QStringList entriesAfter = dbDir.entryList(QDir::Files, QDir::Name);
+    QCOMPARE(entriesAfter, entriesBefore);
+    QCOMPARE(QFileInfo(backupPath).size(), backupSizeBefore);
+    QCOMPARE(QFileInfo(durationsPath).size(), durationsSizeBefore);
+    QCOMPARE(QFileInfo(backupPath).lastModified(), backupMtimeBefore);
+    QCOMPARE(QFileInfo(durationsPath).lastModified(), durationsMtimeBefore);
 }

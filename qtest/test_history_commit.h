@@ -42,6 +42,9 @@ private slots:
 
     // A9: merge-save finalizes completed rows so a late crash-recovery keeps them
     void test_merge_save_survives_late_crash_recovery();
+
+    // WP5 acceptance: a date-scoped save leaves backup/export sidecars untouched
+    void test_save_leaves_sidecars_unchanged();
 };
 
 #endif // TEST_HISTORY_COMMIT_H

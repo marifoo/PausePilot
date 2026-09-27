@@ -121,6 +121,35 @@ bug elsewhere cannot poison the in-memory session or the database.
 `MainWin` has **no** midnight logic. It reacts to `stopped(StopReason)` like
 any other stop.
 
+### History permission (H5/WP5)
+
+Which dates `HistoryDialog` lets the user edit is decided once, at open, by
+`HistoryEligibility::isEditable(date, ctx)` (`historyeligibility.h`) against
+the snapshot `TimeTracker::beginExclusiveEdit()` captures (`HistoryEditContext`:
+one clock read, one `loadHistoryRows()` call, and the live/pending-commit/
+stopped state at that instant). Nothing is re-checked against the live engine
+while the dialog stays open -- a date's permission is fixed for that dialog's
+lifetime.
+
+A date is **not** editable if any of:
+- the open-time store read failed;
+- a live row (in-memory session, or the ongoing segment), or a pending-commit
+  row, overlaps the date;
+- a stored row that is unfinalized, well-formed, and overlaps the date exists
+  (the live checkpoint, an orphan row, or a row behind a pending discard);
+- the date is Today, and either tracking was not stopped at open, or no
+  stored row is finalized, well-formed and fully inside Today's span (a
+  cross-midnight continuation does not qualify).
+
+Every other date is editable, including a future-dated page (U2) -- there is
+no special case for "today" beyond the rule above. A read-only page shows
+disabled type checkboxes, no split context menu, and a " (read-only)" title
+suffix; the ongoing row (when present) never gets a type box at all, since
+whenever it exists its own date already fails the rule above. Saving only
+ever writes the dates named in the diff `HistoryEditSession::buildScopedSave()`
+computes from the editable, modified pages -- see "History saves" in
+`doc/persistence.md`.
+
 ### History force-close at midnight, lock, sleep, and shutdown
 
 When `HistoryDialog` is open and any of the following events occurs, the engine
