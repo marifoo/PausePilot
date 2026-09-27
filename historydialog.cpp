@@ -567,8 +567,7 @@ void HistoryDialog::updateTable(uint idx)
     }
 
     // Populate ongoing row if present. H5/WP5: the ongoing row never gets a
-    // type box -- it is always read-only (setOngoingType() is dead API from
-    // this dialog's perspective; the page it sits on is read-only anyway
+    // type box -- it is always read-only (the page it sits on is read-only
     // whenever tracking is running, by the open-time permission rule).
     if (hasOngoing) {
         int row = static_cast<int>(comp.size());

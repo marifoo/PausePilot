@@ -11,22 +11,19 @@
 #include "dayvalidity.h"
 #include "historyeligibility.h"
 
-class TimeTracker;
-
 /**
  * HistoryEditSession — non-widget model for a single history-editing transaction.
  *
  * Owns all state that was previously scattered across HistoryDialog:
  *   - The page list (pendingTimelines_ + display-only cross-midnight rows per page)
- *   - Origin tracking (which segments came from in-memory session vs DB)
- *   - Legacy cross-midnight rows are display-only and dropped from the save
- *     payload (see buildSavePayload())
+ *   - Legacy cross-midnight rows are display-only, kept out of the scoped
+ *     save diff (see buildScopedSave())
  *
  * No widget dependency. Can be constructed and exercised in tests without a QPA platform.
  *
  * Lifetime: constructed when HistoryDialog opens, destroyed when it closes.
- * The containing dialog calls buildSavePayload() on accept to get the data to
- * persist, then calls TimeTracker::commitEditedTimeline() with the resulting timelines.
+ * The containing dialog calls buildScopedSave() on accept to get the
+ * date-scoped diff, then calls TimeTracker::saveHistoryEdit() with it.
  */
 class HistoryEditSession {
 public:
@@ -49,126 +46,42 @@ public:
         QDate pageDate;                             ///< local calendar date this page represents
     };
 
-    /**
-     * Output of buildSavePayload() — the three buckets HistoryDialog hands to
-     * TimeTracker::replaceAll() and TimeTracker::commitEditedTimeline().
-     *
-     * needsMergeConfirmation is true when normalization reduced the segment count,
-     * meaning the user must confirm before the save proceeds.
-     */
-    struct SavePayload {
-        Timeline historyTimeline;        ///< finalized rows (non-current-session)
-        Timeline sessionTimeline;        ///< rows to save to DB as unfinalized (ongoing only)
-        Timeline memoryTimeline;         ///< rows to commit into TimeTracker's live session (current-session + ongoing)
-        bool needsMergeConfirmation;     ///< true iff normalization merged overlapping rows
-        /// Count of persisted, unedited completed rows removed by the
-        /// category-3 pre-existing-overlap tie-break in buildSavePayload().
-        int preExistingOverlapDrops = 0;
-        /// C3 (R13-001/R14-001): non-None means split/type-change/ongoing-conversion
-        /// produced (or left in place) an unsupported row -- invalid/non-positive/
-        /// cross-day interval, duplicate id, or an Activity/Pause overlap the user's
-        /// own edit created. The caller (HistoryDialog) must refuse to save rather
-        /// than call replaceAll(). Two categories of out-of-contract input never
-        /// reach this violation: a legacy cross-day row loaded unmodified from the
-        /// database is silently dropped from the payload (not preserved, not
-        /// rejected -- see buildSavePayload()), and a pre-existing cross-type
-        /// overlap between two genuinely persisted (never memory-origin) rows --
-        /// completed or the live ongoing segment -- loaded/held unmodified is
-        /// resolved the same way (see buildSavePayload()'s pre-existing-overlap
-        /// drop rule).
-        DayValidity::Violation violation = DayValidity::Violation::None;
-    };
-
     HistoryEditSession() = default;
-
-    /// Populates pages_, pendingTimelines_, and originIsMemory_ from the
-    /// TimeTracker's current state and its DB history. `today` decides page
-    /// grouping/editability (which page is "today" vs. read-only history) --
-    /// an explicit parameter (D2/MEDIUM-C) rather than a TimeTracker clock
-    /// accessor, so this stays testable without adding engine API surface.
-    void buildFromTimer(TimeTracker& timer, const QDate& today);
 
     /// Populates pages_, pendingTimelines_ and the per-page permission/span
     /// state from an open-time HistoryEditContext (H5/WP4), without touching
     /// TimeTracker or the store. Finalized, well-formed stored rows sharing a
     /// calendar date become that page's editable candidates; rows crossing
     /// exactly one local-midnight boundary are display-only (crossMidnight/
-    /// continuations, as buildFromTimer() already does); rows crossing more
-    /// than one boundary are skipped from the pages entirely -- but kept
-    /// internally so buildScopedSave()'s new-cross-type-overlap check can
-    /// still see them (B4). Unfinalized and malformed stored rows are never
-    /// displayed. Memory rows (ctx.live.completed()) are grouped by their own
-    /// date and deduplicated against stored rows by id, memory winning. The
-    /// ongoing row (if any) is attached to ctx.today, read-only.
+    /// continuations); rows crossing more than one boundary are skipped from
+    /// the pages entirely -- but kept internally so buildScopedSave()'s
+    /// new-cross-type-overlap check can still see them (B4). Unfinalized and
+    /// malformed stored rows are never displayed. Memory rows
+    /// (ctx.live.completed()) are grouped by their own date and deduplicated
+    /// against stored rows by id, memory winning. The ongoing row (if any)
+    /// is attached to ctx.today, read-only.
     /// pageEditable(i) is set from ctx.isEditable(pages_[i].pageDate);
     /// daySpan(i) is DayValidity::localDayStart/localDayEnd(pageDate).toUTC(),
-    /// captured once here. The old buildFromTimer()/buildSavePayload() path
-    /// is untouched and does not use this method.
+    /// captured once here.
     void buildFromContext(const HistoryEditContext& ctx);
 
     /// True iff pages_[pageIdx] may be mutated: ctx.isEditable(pageDate) as
-    /// captured by buildFromContext(). buildFromTimer() marks every page
-    /// editable instead (until WP7a removes the old API), so old-model tests
-    /// and callers are unaffected.
+    /// captured by buildFromContext().
     bool pageEditable(size_t pageIdx) const;
 
     /// The half-open UTC span of pages_[pageIdx]'s calendar date, captured at
     /// buildFromContext() time. Default-constructed (invalid QDateTimes) for
-    /// an out-of-range index or a session built with buildFromTimer().
+    /// an out-of-range index.
     struct DaySpan {
         QDateTime startUtc;
         QDateTime endUtc;
     };
     DaySpan daySpan(size_t pageIdx) const;
 
-    /// Refreshes the ongoing segment's end-time from the engine. If the user has
-    /// edited the type, the type edit is preserved while the end-time advances.
-    /// Call just before save.
-    void refreshOngoing(TimeTracker& timer);
-
-    /// Builds the three timeline buckets ready for persistence and TimeTracker commit.
-    /// Does NOT perform the save — the caller (HistoryDialog::accept()) owns that.
-    ///
-    /// Two categories of out-of-contract data loaded unmodified from the
-    /// database are silently dropped here rather than surfacing a violation
-    /// (plan C3 step 5: this loss is explicitly accepted for out-of-contract
-    /// data, however it arose -- manual database modification, uTimer's own
-    /// recording across a wall-clock step (in either direction), e.g. an NTP
-    /// correction or a DST transition, or an ordinary timezone change that
-    /// reinterprets a stored UTC row as spanning a local midnight on reload;
-    /// D2 owns removing the generating condition only for new tracker
-    /// recordings across wall-clock steps -- it cannot stop an old UTC row
-    /// from being reinterpreted in another timezone, not this method):
-    ///   - a legacy single-boundary cross-midnight row (buildFromTimer() already
-    ///     drops a row spanning more than one boundary; this drops the
-    ///     supported one-boundary case too, instead of carrying it forward);
-    ///   - a pre-existing Activity/Pause overlap between two completed rows,
-    ///     or between a completed row and the live ongoing segment, resolved
-    ///     by dropping one deterministically: on each conflict the later-
-    ///     starting row is dropped, and on equal starts the lexicographically
-    ///     larger SegmentId is dropped (the same tie-break plan section 2
-    ///     uses for same-type merges). The earliest-starting row of the
-    ///     candidate set always survives; a row dropped by an earlier
-    ///     conflict may itself be the earlier row of a later one. The
-    ///     ongoing row is NEVER the one dropped -- dropping it would end the
-    ///     live session -- so a conflict against it always drops the
-    ///     completed row instead.
-    /// Either drop rule applies ONLY when every row involved is byte-identical
-    /// to what buildFromTimer() originally loaded (or, for the ongoing row,
-    /// unchanged in id and type) AND is genuinely persisted -- never
-    /// memory-origin, even if unedited, since a memory-origin row is
-    /// never-persisted current-session work and dropping it would be silent
-    /// data loss (finding 3, C3 review). An overlap involving a row the user
-    /// actually edited this session, or a memory-origin row, is left as a
-    /// violation instead; preventing a user-authored overlap during editing
-    /// is D9/D7 step 4's job, not this method's.
-    SavePayload buildSavePayload() const;
-
     /// Output of buildScopedSave() (H5/WP4): the date-scoped diff between
     /// every editable, modified page's pending rows and its open-time
     /// snapshot, ready for TimeTracker::saveHistoryEdit()/
-    /// SessionStore::saveHistoryDays(). needsMergeConfirmation and violation
-    /// mirror SavePayload's fields; days is empty when nothing editable
+    /// SessionStore::saveHistoryDays(). days is empty when nothing editable
     /// changed.
     struct ScopedSaveResult {
         std::vector<HistoryDayChange> days;
@@ -176,9 +89,8 @@ public:
         DayValidity::Violation violation = DayValidity::Violation::None;
     };
 
-    /// Builds the date-scoped save diff (H5/WP4), alongside buildSavePayload()
-    /// which the old dialog still uses. For each page that is editable
-    /// (pageEditable()) and modified (pageModified()):
+    /// Builds the date-scoped save diff (H5/WP4). For each page that is
+    /// editable (pageEditable()) and modified (pageModified()):
     ///   - E = the page's rows at open (originalTimelines_); F = its pending
     ///     rows. A row is "changed" if its id is new or any field differs
     ///     from its E counterpart.
@@ -196,8 +108,8 @@ public:
     ///     retained is the page's untouched E survivors plus its
     ///     crossMidnight/continuations rows plus the parsed multi-boundary
     ///     snapshot rows overlapping the page's date (U3).
-    /// Never mutates pending state. Does not use buildSavePayload()'s whole-
-    /// timeline normalized(), its overlap tie-break, or originIsMemory_.
+    /// Never mutates pending state. Does not use whole-timeline normalized()
+    /// or an overlap tie-break.
     ScopedSaveResult buildScopedSave() const;
 
     /// True iff the user changed any page's rows since the session was built
@@ -235,20 +147,16 @@ public:
     // ---- Editing operations (pure; return new session state via mutation) ----
 
     /// Replaces the Timeline for page[pageIdx] wholesale. D9 review: no
-    /// production caller uses this anymore -- setCompletedType(),
-    /// setOngoingType(), and splitRow() cover the dialog's actual operations
-    /// directly. Kept as a general primitive for test setup. Returns false
-    /// (no-op) for an out-of-range or read-only (H5/WP4) page.
+    /// production caller uses this anymore -- setCompletedType() and
+    /// splitRow() cover the dialog's actual operations directly. Kept as a
+    /// general primitive for test setup. Returns false (no-op) for an
+    /// out-of-range or read-only (H5/WP4) page.
     bool setPageTimeline(size_t pageIdx, const Timeline& tl);
 
     /// Changes the type of the completed row identified by `segId` on
     /// page[pageIdx]. Returns false (no-op) if the id is not found on that
     /// page, or if the page is not editable (H5/WP4).
     bool setCompletedType(size_t pageIdx, const SegmentId& segId, DurationType type);
-
-    /// Changes the type of the pending ongoing row on page[pageIdx]. Returns
-    /// false (no-op) if that page has no pending ongoing row.
-    bool setOngoingType(size_t pageIdx, DurationType type);
 
     /// Why splitRow() refused a split. D9 review (finding 3): the minimum-
     /// length rules used to live in HistoryDialog with no typed result;
@@ -282,9 +190,7 @@ public:
     SplitError splitRejection(size_t pageIdx, size_t rowIdx) const;
 
     /// Splits pages_[pageIdx]'s completed row `rowIdx` into two at `at`, with
-    /// `firstType`/`secondType` for the resulting halves. Registers the new
-    /// second half's origin as the same as the original row's (D9: split's
-    /// origin bookkeeping is owned here, not by HistoryDialog).
+    /// `firstType`/`secondType` for the resulting halves.
     ///
     /// Enforces splitRejection() first, then its own per-half rule: `at` must
     /// leave at least kMinSplitHalfMsec (historyeditsession.cpp) on each
@@ -294,19 +200,13 @@ public:
     SplitOutcome splitRow(size_t pageIdx, size_t rowIdx, const QDateTime& at,
                            DurationType firstType, DurationType secondType);
 
-    /// Registers the second half's segment_id with the same origin as the first
-    /// half after a split. Called by splitRow(); also exposed for tests that
-    /// exercise origin registration directly.
-    void registerSplitChild(const QString& childSegmentId, bool wasMemory);
-
     // ---- Accessors ----
     const std::vector<Page>& pages() const { return pages_; }
     const std::vector<Timeline>& pendingTimelines() const { return pendingTimelines_; }
-    const QHash<QString, bool>& originIsMemory() const { return originIsMemory_; }
     size_t pageCount() const { return pages_.size(); }
 
-    /// True iff loadHistoryFromStore() reported TransientError/FatalError in
-    /// buildFromTimer() — Disabled is a legitimate empty state, not a failure.
+    /// True iff loadHistoryRows() reported TransientError in
+    /// buildFromContext() — Disabled is a legitimate empty state, not a failure.
     /// The model is then built from only whatever partial history did load,
     /// so saving it back would silently drop the rest (see HistoryDialog::saveChanges()).
     bool historyLoadFailed() const { return history_load_failed_; }
@@ -319,13 +219,10 @@ private:
     std::vector<Page> pages_;
     std::vector<Timeline> pendingTimelines_;
     std::vector<Timeline> originalTimelines_; ///< snapshot of pendingTimelines_ at build (for hasEdits)
-    QHash<QString, bool> originIsMemory_; ///< segment_id.toString() → true if memory row
     bool history_load_failed_ = false;
 
-    /// Parallel to pages_ (H5/WP4): buildFromContext() sets these from
-    /// ctx.isEditable()/DayValidity; buildFromTimer() sets pageEditable_ to
-    /// all-true and leaves daySpan_ empty (the old path never calls
-    /// buildScopedSave()).
+    /// Parallel to pages_ (H5/WP4): set by buildFromContext() from
+    /// ctx.isEditable()/DayValidity.
     std::vector<bool> pageEditable_;
     std::vector<DaySpan> daySpan_;
     /// Stored rows crossing more than one local-midnight boundary (H5/WP4):

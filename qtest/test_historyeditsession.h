@@ -29,88 +29,33 @@ private slots:
     void test_build_historical_page_separate_from_today();
     void test_build_deduplicates_db_row_matching_memory_segment_id();
 
-    // 5.1 — origin routing
-    void test_origin_memory_rows_marked_true();
-    void test_origin_db_rows_marked_false();
-
-    // 5.1 — split op
-    void test_split_registers_child_with_same_origin();
-    void test_split_history_row_child_is_false_origin();
-
     // 5.1 — type toggle
     void test_type_toggle_updates_pending_timeline();
 
-    // 5.1 — merge detection
-    void test_no_merge_needed_for_non_overlapping();
-    void test_merge_needed_for_overlapping_rows();
-
-    // 5.1 — cross-midnight preservation
-    void test_cross_midnight_dropped_from_payload();
-
-    // 5.1 — ongoing refresh/clear behaviour
-    void test_refresh_ongoing_updates_end_time();
-    void test_refresh_ongoing_advances_end_time_and_preserves_user_type_edit();
-    void test_refresh_ongoing_clears_when_engine_has_no_ongoing();
-
-    // 5.1 — ongoing type toggle + refresh: end time advances, type preserved in payload
-    void test_toggle_activity_to_pause_payload_end_utc_advances();
-    void test_toggle_pause_to_activity_payload_end_utc_advances();
-
-    // 5.1 — payload correctness (history / session / memory timelines)
-    void test_payload_history_vs_session_buckets();
-    void test_payload_memory_timeline_for_commit();
-    void test_payload_memory_absorbs_merged_memory_row();
-
-    // A8: a backward clock jump during a running session must not stop the engine
-    void test_backward_clock_jump_keeps_engine_running();
-    // Finding 1 (C3 review): same arrangement, pinning buildSavePayload()'s
-    // violation classification directly.
-    void test_C3_payload_backward_clock_jump_not_nonpositive();
+    // 5.1 — cross-midnight rows are display-only, absent from the scoped save
+    void test_WP4_cross_midnight_absent_from_scopedSave_unrelatedEditSucceeds();
 
     // F1: a failed history load must be remembered (Disabled is not a failure)
     void test_F1_historyLoadFailed_true_on_transient_error();
     void test_F1_historyLoadFailed_false_when_disabled();
 
-    // C3 (R13-001/R14-001): buildSavePayload() classifies whether the save
-    // would create an unsupported row.
-    void test_C3_payload_violation_none_for_ordinary_edit();
-    // MUST-FIX2 (user decision, review packet C3): a pre-existing cross-type
-    // overlap between two unedited rows is dropped (deterministically), not
-    // flagged, so an unrelated save still succeeds.
-    void test_C3_payload_drops_pre_existing_cross_type_overlap();
-    void test_C3_payload_drops_pre_existing_overlap_equal_start_tie_break();
-    // An overlap created by this session's own edit is still a violation --
-    // the pre-existing drop rule must not blur into edit-time prevention.
-    void test_C3_payload_flags_overlap_created_by_edit();
-    // Finding 3 (C3 review): a memory-origin row involved in a pre-existing
-    // overlap must never be silently dropped, even if otherwise unedited.
-    void test_C3_payload_flags_memory_origin_overlap_instead_of_dropping();
-    // Finding 2 (C3 review): the drop rule must also cover a conflict
-    // between an unedited completed row and the unedited live ongoing
-    // segment -- dropping the completed row, never the ongoing one.
-    void test_C3_payload_drops_completed_row_conflicting_with_unedited_ongoing();
-
-    // D2/MEDIUM-C: buildFromTimer()'s `today` parameter, not the real
-    // system date, decides page grouping/editability -- a pinned date far
-    // from the real one must still be classified as the current page.
-    void test_D2_buildFromTimer_uses_explicit_today_not_real_date();
+    // D2/MEDIUM-C: buildFromContext()'s ctx.today, not the real system date,
+    // decides page grouping/editability -- a pinned date far from the real
+    // one must still be classified as the current page.
+    void test_D2_buildFromContext_uses_ctx_today_not_real_date();
 
     // D2 test list ("History rejection"): an edit that produces a reversed
-    // interval must be flagged by buildSavePayload(), never silently
-    // written -- the History boundary rejecting an invalid interval before
-    // HistoryDialog could call replaceAll().
-    void test_D2_payload_flags_reversed_interval_created_by_edit();
+    // interval must be flagged by buildScopedSave(), never silently written.
+    void test_D2_scopedSave_flags_reversed_interval_created_by_edit();
 
-    // D9 (R14-002): split/type-change/ongoing-toggle operations, dynamic
-    // display count, and per-page dirty state are owned by HistoryEditSession.
+    // D9 (R14-002): split/type-change operations, dynamic display count, and
+    // per-page dirty state are owned by HistoryEditSession.
     void test_D9_displayCount_reflects_split_immediately();
     void test_D9_pageTitle_reflects_dynamic_count();
-    void test_D9_splitRow_registers_origin_and_returns_ids();
+    void test_D9_splitRow_returns_original_and_new_ids();
     void test_D9_splitRow_out_of_range_reports_not_applied();
     void test_D9_setCompletedType_updates_type_and_marks_page_modified();
     void test_D9_setCompletedType_unknown_id_returns_false();
-    void test_D9_setOngoingType_updates_type_and_marks_page_modified();
-    void test_D9_setOngoingType_no_ongoing_returns_false();
     void test_D9_pageModified_false_before_any_edit();
     void test_D9_pageModified_scoped_to_single_page();
     void test_D9_page_has_one_ongoing_representation();

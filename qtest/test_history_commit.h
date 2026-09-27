@@ -42,9 +42,6 @@ private slots:
     // RAII guard: endExclusiveEdit called on destruction without accept/reject
     void test_raii_guard_resumes_on_destruction();
 
-    // A9: merge-save finalizes completed rows so a late crash-recovery keeps them
-    void test_merge_save_survives_late_crash_recovery();
-
     // WP5 acceptance: a date-scoped save leaves backup/export sidecars untouched
     void test_save_leaves_sidecars_unchanged();
 

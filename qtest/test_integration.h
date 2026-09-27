@@ -64,9 +64,6 @@ private slots:
     void test_midnight_boundary_timezone_data();
     void test_midnight_boundary_timezone();
 
-    // Item A: toggle ongoing type then crash — refreshed end_utc survives recovery.
-    void test_A_toggle_ongoing_to_pause_crash_recovery_uses_refreshed_end_utc();
-
     // A3 (R11-001): Exit Anyway (drain attempted and failed, no further
     // retry) leaves an existing durable checkpoint untouched. A real SQLite
     // reopen proves ordinary startup recovery finalizes only that durable

@@ -54,10 +54,10 @@ enum class Violation {
 /// A row spanning local midnight is always a violation, at every write
 /// boundary (commitSession, saveCheckpoint, replaceAll) -- uTimer adds no
 /// split, pass-through, or repair mode for manually introduced multi-day
-/// data (plan section 2). A pre-existing legacy cross-day row loaded by
-/// HistoryEditSession is dropped from the save payload before it ever
-/// reaches this guard (see historyeditsession.cpp's buildSavePayload()),
-/// so replaceAll() never needs an exception for it.
+/// data (plan section 2). HistoryEditSession never routes such a row this
+/// far (a legacy cross-day row is display-only and never enters its scoped
+/// save diff -- see historyeditsession.cpp's buildScopedSave()), so
+/// replaceAll() never needs an exception for it.
 ///
 /// segment_id is not checked for emptiness: TimeDuration's private
 /// constructor mints a fresh id whenever the caller passes an empty one, so

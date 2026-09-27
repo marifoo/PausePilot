@@ -1098,12 +1098,10 @@ SessionStoreResult SqliteSessionStore::replaceAll(const Timeline& history, const
     allDurations.insert(allDurations.end(), currentSessionDurations.begin(), currentSessionDurations.end());
 
     // C3 (R13-001/R14-001): reject the entire payload before any mutation, the
-    // same uniform rule as every other write boundary. HistoryEditSession
-    // never carries a legacy cross-midnight or pre-existing cross-type-overlap
-    // row this far -- it drops both from the save payload before calling
-    // replaceAll() (see historyeditsession.cpp's buildSavePayload()) -- so
-    // this guard should never actually trigger from the History path; it
-    // remains the final backstop for any other caller.
+    // same uniform rule as every other write boundary. HistoryEditSession no
+    // longer calls replaceAll() at all (WP5's scoped save uses
+    // saveHistoryDays() instead), so this guard is now the final backstop for
+    // any other caller only.
     // C4 (R05-003): checked before the Disabled guard below -- see the
     // precedence rule in sessionstore.h.
     const DayValidity::Violation violation = DayValidity::validatePayload(allDurations);

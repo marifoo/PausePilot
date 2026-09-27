@@ -4380,10 +4380,10 @@ void DatabaseTest::test_C2_saveCheckpoint_insert_rolls_back_on_genuine_commit_lo
 // C3 (R13-001/R14-001): the day-validity/overlap payload guard (dayvalidity.h)
 // rejects an invalid payload as a CallerBug before any mutation at every
 // uTimer write boundary, uniformly -- including a legacy cross-midnight row
-// (MUST-FIX1, review packet C3: HistoryEditSession drops any such row from
-// the save payload before it ever reaches replaceAll(); see
-// historyeditsession.cpp's buildSavePayload() and
-// qtest/test_historyeditsession.cpp's test_cross_midnight_dropped_from_payload).
+// (MUST-FIX1, review packet C3: HistoryEditSession never carries such a row
+// into its scoped save diff; see historyeditsession.cpp's buildScopedSave()
+// and qtest/test_historyeditsession.cpp's
+// test_WP4_cross_midnight_absent_from_scopedSave_unrelatedEditSucceeds).
 //
 // SHOULD-FIX #6 (review packet C3): these cross-day fixtures are built with
 // Qt::LocalTime, not Qt::UTC. isCrossMidnight() (types.h) is timezone-aware
@@ -4478,10 +4478,10 @@ void DatabaseTest::test_C3_replaceAll_rejects_cross_day_payload()
 {
     // MUST-FIX1 (user decision, review packet C3): replaceAll() now rejects a
     // cross-day row the same uniform way as commitSession()/saveCheckpoint(),
-    // with no allowCrossDay exception. HistoryEditSession is responsible for
-    // never sending one this far (it drops a legacy cross-midnight row from
-    // the save payload instead -- see buildSavePayload()); this test pins
-    // replaceAll()'s own guard as the final backstop for any other caller.
+    // with no allowCrossDay exception. HistoryEditSession no longer calls
+    // replaceAll() at all (WP5's scoped save uses saveHistoryDays() instead);
+    // this test pins replaceAll()'s own guard as the final backstop for any
+    // other caller.
     resetDatabaseFile();
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
