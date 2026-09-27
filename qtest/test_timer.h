@@ -39,7 +39,7 @@ private slots:
     void test_C12c_lock_writes_immediate_checkpoint();
 
     void test_timer_ongoing_duration();
-    void test_timer_checkpoints_paused();
+    void test_timer_checkpoints_keep_running_during_exclusive_edit();
     void test_timer_retry_append_failure_then_success_preserves_segments();
     void test_timer_retry_failure_keeps_unsaved_state_and_durations();
 

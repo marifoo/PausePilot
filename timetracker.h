@@ -232,7 +232,7 @@ private:
     Mode mode_;
     bool autopause_pending_resume_;
     bool is_locked_;     // Track if desktop is currently locked (to prevent checkpoints while locked)
-    bool dialog_open_;   // True while HistoryDialog is open. Checkpoints are suspended; lock-watcher events, a forward date change, the midnight stop/discard and shutdown revoke it first (revokeExclusiveEdit()).
+    bool dialog_open_;   // True while HistoryDialog is open. Checkpoints keep running (WP6); lock-watcher events, a forward date change, the midnight stop/discard and shutdown revoke it first (revokeExclusiveEdit()).
     QDate exclusive_edit_date_;  // WP4: the date when beginExclusiveEdit() was called.
                                  // Used to detect when the date moves forward (>) and revoke the edit.
     bool shutdown_called_ = false;  // Set once shutdown() has torn down the engine.

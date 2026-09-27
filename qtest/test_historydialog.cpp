@@ -443,7 +443,7 @@ void HistoryDialogTest::test_historydialog_save_unrelated_edit_preserves_row_and
     QSqlDatabase::removeDatabase(connName);
 }
 
-void HistoryDialogTest::test_historydialog_pauses_checkpoint_timer_for_dialog_lifetime()
+void HistoryDialogTest::test_historydialog_checkpoint_timer_keeps_running_for_dialog_lifetime()
 {
     resetDatabaseFile();
     QTemporaryDir tempDir;
@@ -459,17 +459,18 @@ void HistoryDialogTest::test_historydialog_pauses_checkpoint_timer_for_dialog_li
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
 
     tracker.useTimerViaButton(Button::Start);
-    // Advance the fake clock (was QTest::qWait(20)) so the later
-    // triggerCheckpoint_dbg() below (after the dialog closes) has a nonzero
-    // wallClockMs and is not skipped by saveCheckpoint_locked's
-    // wallClockMs != 0 guard (timetracker.cpp:1653-1656).
+    // Advance the fake clock (was QTest::qWait(20)) so triggerCheckpoint_dbg()
+    // below has a nonzero wallClockMs and is not skipped by
+    // saveCheckpoint_locked's wallClockMs != 0 guard.
     clock.advance(20);
     QVERIFY(tracker.isCheckpointTimerActive_dbg());
 
     {
+        // WP6: an open History dialog no longer stops or reanchors the live
+        // checkpoint timer -- it keeps running, with its phase unchanged.
         HistoryDialog dialog(tracker, settings);
         QVERIFY(tracker.isDialogOpen_dbg());
-        QVERIFY(!tracker.isCheckpointTimerActive_dbg());
+        QVERIFY(tracker.isCheckpointTimerActive_dbg());
 
         tracker.triggerCheckpoint_dbg();
 
@@ -482,7 +483,7 @@ void HistoryDialogTest::test_historydialog_pauses_checkpoint_timer_for_dialog_li
             QSqlQuery countQuery(db);
             QVERIFY(countQuery.exec("SELECT COUNT(*) FROM durations WHERE is_finalized = 0"));
             QVERIFY(countQuery.next());
-            QCOMPARE(countQuery.value(0).toInt(), 0);
+            QCOMPARE(countQuery.value(0).toInt(), 1);
 
             db.close();
         }

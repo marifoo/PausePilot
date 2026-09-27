@@ -83,6 +83,15 @@ in-progress segment from the unfinalized row. They are deliberately cheap —
 that `replaceAll` produces, because at a 5-minute cadence
 that would generate hundreds of files per day.
 
+An open `HistoryDialog` no longer suspends checkpoints (H5/WP6): only
+`is_locked_` does. The periodic write keeps updating the live row's
+`end_utc` on its normal cadence while a past-day edit is open, because a
+History save only ever touches the dates named in its diff (see "History
+saves" below) and never the live row. `beginExclusiveEdit()` still captures
+the ongoing segment's state once, at open, for `HistoryEligibility` and the
+displayed pages; it does not pause the write path that keeps that same
+segment's DB row current.
+
 ## Orphan reconciliation on startup
 
 After a crash, an "orphan" is a row left with `is_finalized = 0` that no

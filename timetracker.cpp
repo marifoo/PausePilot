@@ -21,7 +21,9 @@
  *
  * Checkpoint behavior:
  * - Only saved during Activity mode (not Pause or Stopped)
- * - Suspended while PC is locked (is_locked_) or HistoryDialog is open (dialog_open_)
+ * - Suspended while PC is locked (is_locked_). HistoryDialog being open
+ *   (dialog_open_) no longer suspends checkpoints (WP6): a past-day edit
+ *   and a live checkpoint run concurrently.
  * - Uses session_.segment_id to update same DB row instead of creating new rows
  *
  * Backpause behavior:
@@ -1509,12 +1511,6 @@ void TimeTracker::saveCheckpoint()
         return;
     }
 
-    // Don't save checkpoints while HistoryDialog is open
-    if (dialog_open_) {
-        Logger::Log("[CHECKPOINT] Skipped - dialog open");
-        return;
-    }
-
     // Capture wall-clock time once for the entire checkpoint operation.
     const QDateTime now = now_provider_();
     saveCheckpoint_locked(now);
@@ -1567,8 +1563,6 @@ HistoryEditContext TimeTracker::beginExclusiveEdit()
     dialog_open_ = true;
     const QDateTime openedAt = now_provider_();
     exclusive_edit_date_ = openedAt.toLocalTime().date();
-    checkpointTimer_.stop();
-    Logger::Log("[CHECKPOINT] Checkpoints paused (dialog open)");
 
     HistoryEditContext ctx;
     ctx.openedAt = openedAt;
@@ -1601,10 +1595,6 @@ void TimeTracker::endExclusiveEdit()
 {
     QMutexLocker locker(&mutex_);
     dialog_open_ = false;
-    Logger::Log("[CHECKPOINT] Checkpoints resumed (dialog closed)");
-    if (mode_ == Mode::Activity && !is_locked_) {
-        checkpointTimer_.start();
-    }
 }
 
 SessionStoreResult TimeTracker::saveHistoryEdit(const HistoryEditContext& opened,

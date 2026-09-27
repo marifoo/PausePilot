@@ -150,6 +150,11 @@ ever writes the dates named in the diff `HistoryEditSession::buildScopedSave()`
 computes from the editable, modified pages -- see "History saves" in
 `doc/persistence.md`.
 
+An open dialog does not pause `TimeTracker::checkpointTimer_` (H5/WP6): the
+live checkpoint keeps advancing on its normal 5-minute cadence for the whole
+time History is open, since a past-day save never touches the dates the live
+row and Today occupy. Only `is_locked_` suspends checkpoints.
+
 ### History force-close at midnight, lock, sleep, and shutdown
 
 When `HistoryDialog` is open and any of the following events occurs, the engine

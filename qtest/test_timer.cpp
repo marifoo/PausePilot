@@ -342,7 +342,9 @@ void TimerTest::test_timer_ongoing_duration()
     QCOMPARE(tracker.getOngoingDuration(), std::nullopt);
 }
 
-void TimerTest::test_timer_checkpoints_paused()
+// WP6: checkpoints keep running while an exclusive edit (History dialog) is
+// open -- beginExclusiveEdit() no longer suspends the periodic write.
+void TimerTest::test_timer_checkpoints_keep_running_during_exclusive_edit()
 {
     resetDatabaseFile();
     QTemporaryDir tempDir;
@@ -352,28 +354,27 @@ void TimerTest::test_timer_checkpoints_paused()
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
-    
+
     // Must be in Activity to save checkpoints
     tracker.useTimerViaButton(Button::Start);
     QTest::qWait(100); // Ensure elapsed > 0
 
-    // Pause checkpoints
+    // Exclusive edit open: checkpoints must still write.
     tracker.beginExclusiveEdit();
-    tracker.triggerCheckpoint_dbg(); // Should be ignored
-    
-    // Check DB: no unfinalized checkpoint entries yet
+    tracker.triggerCheckpoint_dbg();
+
+    // Check DB: one unfinalized checkpoint entry already, while the edit is open.
     QVERIFY(db.ensureOpen_dbg());
     QSqlQuery query(db.rawDb_dbg());
     QVERIFY(query.exec("SELECT COUNT(*) FROM durations WHERE is_finalized = 0"));
     QVERIFY(query.next());
-    QCOMPARE(query.value(0).toInt(), 0);
+    QCOMPARE(query.value(0).toInt(), 1);
     db.closeConnection_dbg();
 
-    // Resume and trigger
+    // After the edit ends, checkpoints still write (same row, later end).
     tracker.endExclusiveEdit();
     tracker.triggerCheckpoint_dbg();
 
-    // Check DB: should now have one unfinalized checkpoint entry
     QVERIFY(db.ensureOpen_dbg());
     QVERIFY(query.exec("SELECT COUNT(*) FROM durations WHERE is_finalized = 0"));
     QVERIFY(query.next());
@@ -2276,9 +2277,14 @@ void TimerTest::test_M7_edit_to_activity_during_exclusive_edit_does_not_arm_time
     QVERIFY(tracker.isActive());
     QVERIFY2(!tracker.isCheckpointTimerActive_dbg(), "commitEditedTimeline must not re-arm checkpoints while an exclusive edit is in progress");
 
-    // Resume exclusive edit
+    // WP6: endExclusiveEdit() no longer restarts the checkpoint timer (that
+    // coupling belonged to the old suspend/resume design). commitEditedTimeline
+    // is dead code with no caller since WP5, so this interim state -- Activity
+    // mode with the timer left inactive by commitEditedTimeline's own dialog_open_
+    // guard above -- is unreachable in production and goes away with the
+    // function itself in WP7b.
     tracker.endExclusiveEdit();
-    QVERIFY(tracker.isCheckpointTimerActive_dbg());
+    QVERIFY(!tracker.isCheckpointTimerActive_dbg());
 
     tracker.useTimerViaButton(Button::Stop);
 }
