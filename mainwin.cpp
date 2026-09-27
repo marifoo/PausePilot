@@ -187,8 +187,8 @@ void MainWin::start()
 			.arg(convMSecToTimeStr(recoveredMsec));
 	}
 	if (policyDropped > 0) {
-		// M4: rows recovery deleted on its own policy (too short, too old,
-		// future-dated, spanning midnight, or overlapping existing history).
+		// M4: rows recovery deleted on its own policy (older than History
+		// retention, spanning midnight, or overlapping existing history).
 		// Discards the user asked for are excluded upstream and stay silent.
 		const QString droppedText = QString("%1 unfinished %2 from the last session could not be restored and %3 discarded.")
 			.arg(policyDropped)

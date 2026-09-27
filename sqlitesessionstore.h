@@ -70,8 +70,8 @@ private:
         QString errorMessage;  // populated only when outcome == Error
     };
     // B2: policy_dropped counts every row deleted for a recovery POLICY
-    // reason -- outright (too-short/stale/future/A4 discard-forced) drops
-    // supplied by the caller AND overlap-rejected rows discovered while
+    // reason -- outright (retention-expired/cross-day/A4 discard-forced)
+    // drops supplied by the caller AND overlap-rejected rows discovered while
     // finalizing (R08-002: these are now physically deleted here, not left
     // unfinalized to recur every launch). malformed_deleted is a logged-only
     // count, matching StartupRecoveryResult's public/internal split.

@@ -1939,7 +1939,7 @@ void DatabaseTest::test_recoverStartupCheckpoints_marker_intact_on_finalize_sql_
 
     QVERIFY(manager.ensureOpen_dbg());
 
-    // Seed a valid unfinalized orphan (duration > 1 s, not stale) with no
+    // Seed a valid unfinalized orphan (well inside History retention) with no
     // overlap, so it is eligible for finalization.
     const QDateTime startUtc = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
     const QDateTime endUtc   = QDateTime(QDate(2025, 6, 1), QTime(10, 5, 0), Qt::UTC);
@@ -2608,7 +2608,7 @@ void DatabaseTest::test_recoverStartupCheckpoints_marker_intact_on_reconcile_fai
 
     QVERIFY(manager.ensureOpen_dbg());
 
-    // Seed a valid unfinalized orphan (duration > 1 s, not stale).
+    // Seed a valid unfinalized orphan (well inside History retention).
     const QDateTime startUtc = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
     const QDateTime endUtc   = QDateTime(QDate(2025, 6, 1), QTime(10, 5, 0), Qt::UTC);
     const qint64 orphanId = seedOrphanRow(manager, startUtc, endUtc);
@@ -2747,13 +2747,15 @@ void DatabaseTest::test_recoverStartupCheckpoints_notifies_when_marker_covers_on
 }
 
 /**
- * A14: a backward clock jump between the checkpoint write and the restart
- * makes `endTime.msecsTo(now)` negative, defeating the >24h stale check and
- * letting a future-dated orphan pass through to be finalized. Seed an orphan
- * whose endTime is well past `now` and confirm recoverStartupCheckpoints()
- * drops it instead of resurrecting it.
+ * C1/C3 step 4: the old >60s-future-slack filter is gone. A backward clock
+ * jump between the checkpoint write and the restart can make an orphan's
+ * endTime land ahead of recovery's "now"; that alone is no longer a reason
+ * to drop it -- only cross-day, overlap, a discard intent, or falling
+ * outside History retention are. Seed an orphan whose endTime is 1-2h ahead
+ * of recovery's `now` and confirm recoverStartupCheckpoints() finalizes and
+ * credits it.
  */
-void DatabaseTest::test_recoverStartupCheckpoints_drops_future_dated_orphan()
+void DatabaseTest::test_recoverStartupCheckpoints_finalizes_future_dated_orphan()
 {
     // Arrange: fresh DB with one orphan whose endTime is 2 hours after `now`
     // (simulating a clock that jumped backward after the checkpoint was written).
@@ -2775,21 +2777,20 @@ void DatabaseTest::test_recoverStartupCheckpoints_drops_future_dated_orphan()
     // Act: recover at `now`, which is before the orphan's endTime.
     StartupRecoveryResult res = manager.recoverStartupCheckpoints(now);
 
-    // Assert: recovery succeeded, but the future-dated orphan was dropped, not finalized.
-    // Outright drops are deleted from the table entirely (see
-    // reconcileUnfinalizedCheckpoints), so no row survives with is_finalized == 0.
+    // Assert: the future-dated orphan is finalized and credited, not dropped.
     QVERIFY(res.ok());
-    QCOMPARE(res.finalized_count, 0);
-    QCOMPARE(res.policy_dropped_count, 1);
+    QCOMPARE(res.finalized_count, 1);
+    QCOMPARE(res.policy_dropped_count, 0);
     QCOMPARE(res.discard_dropped_count, 0);
+    QCOMPARE(res.recovered_msec, futureStart.msecsTo(futureEnd));
 
     QVERIFY(manager.ensureOpen_dbg());
     QSqlQuery checkOrphan(manager.rawDb_dbg());
-    checkOrphan.prepare("SELECT COUNT(*) FROM durations WHERE id = :id");
+    checkOrphan.prepare("SELECT is_finalized FROM durations WHERE id = :id");
     checkOrphan.bindValue(":id", orphanId);
     QVERIFY(checkOrphan.exec());
     QVERIFY(checkOrphan.next());
-    QCOMPARE(checkOrphan.value(0).toInt(), 0);
+    QCOMPARE(checkOrphan.value(0).toInt(), 1);
     manager.closeConnection_dbg();
 }
 
@@ -2800,10 +2801,10 @@ void DatabaseTest::test_recoverStartupCheckpoints_drops_unfinalized_cross_day_or
     // row is well-formed by that definition, so it would otherwise pass
     // straight through loadUnfinalizedCheckpoints() and get finalized by
     // reconcileUnfinalizedCheckpoints() with no day-validity check at all.
-    // Seed an otherwise-recoverable (not too-short/stale/future-dated)
-    // unfinalized row that genuinely spans local midnight and assert
-    // recovery drops it -- never finalizes it into history -- exactly like
-    // the existing too-short/stale/future-dated policy drops above.
+    // Seed an otherwise-recoverable (well inside History retention) unfinalized
+    // row that genuinely spans local midnight and assert recovery drops it --
+    // never finalizes it into history -- exactly like the retention-cutoff
+    // policy drop below.
     resetDatabaseFile();
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -2819,8 +2820,8 @@ void DatabaseTest::test_recoverStartupCheckpoints_drops_unfinalized_cross_day_or
     QVERIFY(orphanId > 0);
     manager.closeConnection_dbg();
 
-    // Recover shortly after the orphan's end -- well within the stale/future
-    // thresholds, so cross-day is the ONLY reason this row is dropped.
+    // Recover shortly after the orphan's end -- well within History
+    // retention, so cross-day is the ONLY reason this row is dropped.
     const QDateTime now(QDate::currentDate(), QTime(0, 20, 0), Qt::LocalTime);
     StartupRecoveryResult res = manager.recoverStartupCheckpoints(now);
 
@@ -2838,6 +2839,240 @@ void DatabaseTest::test_recoverStartupCheckpoints_drops_unfinalized_cross_day_or
     QVERIFY(checkOrphan.next());
     QCOMPARE(checkOrphan.value(0).toInt(), 0);
     manager.closeConnection_dbg();
+}
+
+// ============================================================================
+// C1/C3 step 4: retention cutoff inside recovery, and cleanup restricted to
+// finalized rows.
+// ============================================================================
+
+/**
+ * C1/C3 step 4: the retention cutoff is `now.addDays(-history_days_to_keep_)`,
+ * using recovery's own captured `now` (retention = 7 days here). An orphan
+ * ending exactly at the cutoff is retained (strict "<" only); one ending a
+ * millisecond earlier is dropped as a policy drop, not a discard.
+ */
+void DatabaseTest::test_recoverStartupCheckpoints_retention_cutoff_is_strict()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+    QVERIFY(manager.ensureOpen_dbg());
+
+    const QDateTime recoveryNow = QDateTime(QDate(2025, 6, 10), QTime(12, 0, 0), Qt::UTC);
+    const QDateTime cutoff = recoveryNow.addDays(-7);
+
+    // Ends exactly at the cutoff -- retained.
+    const qint64 atCutoffId = seedOrphanRow(manager, cutoff.addSecs(-60), cutoff);
+    // Ends 1 ms before the cutoff -- dropped.
+    const qint64 beforeCutoffId = seedOrphanRow(manager, cutoff.addMSecs(-61000), cutoff.addMSecs(-1));
+    QVERIFY(atCutoffId > 0 && beforeCutoffId > 0);
+    manager.closeConnection_dbg();
+
+    StartupRecoveryResult res = manager.recoverStartupCheckpoints(recoveryNow);
+
+    QVERIFY(res.ok());
+    QCOMPARE(res.finalized_count, 1);
+    QCOMPARE(res.policy_dropped_count, 1);
+    QCOMPARE(res.discard_dropped_count, 0);
+
+    QVERIFY(manager.ensureOpen_dbg());
+    QSqlQuery checkAt(manager.rawDb_dbg());
+    checkAt.prepare("SELECT is_finalized FROM durations WHERE id = :id");
+    checkAt.bindValue(":id", atCutoffId);
+    QVERIFY(checkAt.exec());
+    QVERIFY(checkAt.next());
+    QCOMPARE(checkAt.value(0).toInt(), 1);
+
+    QSqlQuery checkBefore(manager.rawDb_dbg());
+    checkBefore.prepare("SELECT COUNT(*) FROM durations WHERE id = :id");
+    checkBefore.bindValue(":id", beforeCutoffId);
+    QVERIFY(checkBefore.exec());
+    QVERIFY(checkBefore.next());
+    QCOMPARE(checkBefore.value(0).toInt(), 0);
+    manager.closeConnection_dbg();
+}
+
+/**
+ * C1/C3 step 4: performRetentionCleanup() (run from checkSchemaOnStartup())
+ * must delete only finalized rows. An expired unfinalized row is left in
+ * place for recoverStartupCheckpoints() to classify and drop with its own
+ * clock.
+ */
+void DatabaseTest::test_performRetentionCleanup_is_finalized_only()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    const QDateTime now = QDateTime(QDate(2025, 6, 10), QTime(12, 0, 0), Qt::UTC);
+    manager.setNowProvider_dbg([now]() { return now; });
+
+    QVERIFY(manager.ensureOpen_dbg());
+    const QDateTime expiredStart = now.addDays(-10);
+    const QDateTime expiredEnd   = expiredStart.addSecs(30);
+
+    // Expired finalized row -- cleanup deletes it.
+    std::deque<TimeDuration> seeded;
+    seeded.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, expiredStart.toLocalTime(), expiredEnd.toLocalTime()));
+    QVERIFY(manager.commitSession(Timeline(seeded, std::nullopt)).ok());
+
+    // Expired unfinalized row -- cleanup must leave it alone.
+    const qint64 orphanId = seedOrphanRow(manager, expiredStart, expiredEnd);
+    QVERIFY(orphanId > 0);
+    manager.closeConnection_dbg();
+
+    // A second store instance, as checkSchemaOnStartup() only runs cleanup
+    // on the fresh-DB path when db_was_fresh_ is false (i.e. re-opening an
+    // already-created DB), matching the on-disk startup sequence.
+    SqliteSessionStore manager2(settings);
+    manager2.setNowProvider_dbg([now]() { return now; });
+    QCOMPARE(manager2.checkSchemaOnStartup(), SchemaStatus::Ready);
+
+    QVERIFY(manager2.ensureOpen_dbg());
+    QSqlQuery countFinalized(manager2.rawDb_dbg());
+    QVERIFY(countFinalized.exec("SELECT COUNT(*) FROM durations WHERE is_finalized = 1"));
+    QVERIFY(countFinalized.next());
+    QCOMPARE(countFinalized.value(0).toInt(), 0);
+
+    QSqlQuery countOrphan(manager2.rawDb_dbg());
+    countOrphan.prepare("SELECT COUNT(*) FROM durations WHERE id = :id AND is_finalized = 0");
+    countOrphan.bindValue(":id", orphanId);
+    QVERIFY(countOrphan.exec());
+    QVERIFY(countOrphan.next());
+    QCOMPARE(countOrphan.value(0).toInt(), 1);
+    manager2.closeConnection_dbg();
+
+    // recoverStartupCheckpoints() then drops the orphan itself as expired.
+    StartupRecoveryResult res = manager2.recoverStartupCheckpoints(now);
+    QVERIFY(res.ok());
+    QCOMPARE(res.finalized_count, 0);
+    QCOMPARE(res.policy_dropped_count, 1);
+}
+
+/**
+ * C1/C3 step 4: a cleanup failure (blocked DELETE on a finalized row) must
+ * not admit an expired orphan into history. checkSchemaOnStartup() still
+ * reports Ready (cleanup failure is logged and non-fatal), and the
+ * subsequent recovery pass still drops the expired orphan.
+ */
+void DatabaseTest::test_performRetentionCleanup_failure_does_not_admit_expired_orphan()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    const QDateTime now = QDateTime(QDate(2025, 6, 10), QTime(12, 0, 0), Qt::UTC);
+    manager.setNowProvider_dbg([now]() { return now; });
+
+    QVERIFY(manager.ensureOpen_dbg());
+    const QDateTime expiredStart = now.addDays(-10);
+    const QDateTime expiredEnd   = expiredStart.addSecs(30);
+
+    std::deque<TimeDuration> seeded;
+    seeded.push_back(TimeDuration::fromPersistedRow(DurationType::Activity, expiredStart.toLocalTime(), expiredEnd.toLocalTime()));
+    QVERIFY(manager.commitSession(Timeline(seeded, std::nullopt)).ok());
+
+    const qint64 orphanId = seedOrphanRow(manager, expiredStart, expiredEnd);
+    QVERIFY(orphanId > 0);
+
+    QSqlQuery trig(manager.rawDb_dbg());
+    QVERIFY(trig.exec(
+        "CREATE TRIGGER block_cleanup_delete_c3_test BEFORE DELETE ON durations "
+        "WHEN OLD.is_finalized = 1 "
+        "BEGIN SELECT RAISE(ABORT, 'C3 test: blocked cleanup delete'); END"
+    ));
+    manager.closeConnection_dbg();
+
+    // A second store instance (see the sibling test above for why): its
+    // checkSchemaOnStartup() re-opens the already-created DB, so cleanup
+    // actually runs and its DELETE hits the trigger.
+    SqliteSessionStore manager2(settings);
+    manager2.setNowProvider_dbg([now]() { return now; });
+
+    // Cleanup's DELETE fails, but startup is still Ready -- cleanup failure
+    // does not block startup.
+    QCOMPARE(manager2.checkSchemaOnStartup(), SchemaStatus::Ready);
+
+    QVERIFY(manager2.ensureOpen_dbg());
+    QSqlQuery trig2(manager2.rawDb_dbg());
+    QVERIFY(trig2.exec("DROP TRIGGER block_cleanup_delete_c3_test"));
+    manager2.closeConnection_dbg();
+
+    // The expired orphan is dropped by recovery, not admitted.
+    StartupRecoveryResult res = manager2.recoverStartupCheckpoints(now);
+    QVERIFY(res.ok());
+    QCOMPARE(res.finalized_count, 0);
+    QCOMPARE(res.policy_dropped_count, 1);
+
+    QVERIFY(manager2.ensureOpen_dbg());
+    QSqlQuery checkOrphan(manager2.rawDb_dbg());
+    checkOrphan.prepare("SELECT COUNT(*) FROM durations WHERE id = :id");
+    checkOrphan.bindValue(":id", orphanId);
+    QVERIFY(checkOrphan.exec());
+    QVERIFY(checkOrphan.next());
+    QCOMPARE(checkOrphan.value(0).toInt(), 0);
+    manager2.closeConnection_dbg();
+}
+
+/**
+ * C1/C3 step 4: a backward clock move between cleanup and recovery must not
+ * let cleanup delete an orphan on an earlier, stricter clock than recovery
+ * itself uses. Cleanup runs at `T`; the orphan's end is older than T's
+ * cutoff but still inside `(T - 2h)`'s cutoff. Since cleanup never touches
+ * unfinalized rows at all now, this also proves recovery (at T - 2h) is the
+ * only clock that decides the orphan's fate.
+ */
+void DatabaseTest::test_backward_clock_across_cutoff_between_cleanup_and_recovery()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    const QDateTime cleanupNow = QDateTime(QDate(2025, 6, 10), QTime(12, 0, 0), Qt::UTC);
+    const QDateTime recoveryNow = cleanupNow.addSecs(-2 * 60 * 60); // backward 2h step
+
+    manager.setNowProvider_dbg([cleanupNow]() { return cleanupNow; });
+
+    QVERIFY(manager.ensureOpen_dbg());
+    // Older than cleanupNow's 7-day cutoff, but inside recoveryNow's cutoff
+    // (recoveryNow is 2h earlier, so its cutoff is 2h earlier too).
+    const QDateTime orphanEnd = cleanupNow.addDays(-7).addSecs(-3600); // 1h past cleanup's cutoff
+    const QDateTime orphanStart = orphanEnd.addSecs(-30);
+    const qint64 orphanId = seedOrphanRow(manager, orphanStart, orphanEnd);
+    QVERIFY(orphanId > 0);
+    manager.closeConnection_dbg();
+
+    // A second store instance (see the sibling tests above for why):
+    // checkSchemaOnStartup() re-opens the already-created DB and runs
+    // cleanup at cleanupNow; recovery below then runs at the older,
+    // backward-stepped recoveryNow.
+    SqliteSessionStore manager2(settings);
+    manager2.setNowProvider_dbg([cleanupNow]() { return cleanupNow; });
+    QCOMPARE(manager2.checkSchemaOnStartup(), SchemaStatus::Ready);
+
+    StartupRecoveryResult res = manager2.recoverStartupCheckpoints(recoveryNow);
+
+    QVERIFY(res.ok());
+    QCOMPARE(res.finalized_count, 1);
+    QCOMPARE(res.policy_dropped_count, 0);
+
+    QVERIFY(manager2.ensureOpen_dbg());
+    QSqlQuery checkOrphan(manager2.rawDb_dbg());
+    checkOrphan.prepare("SELECT is_finalized FROM durations WHERE id = :id");
+    checkOrphan.bindValue(":id", orphanId);
+    QVERIFY(checkOrphan.exec());
+    QVERIFY(checkOrphan.next());
+    QCOMPARE(checkOrphan.value(0).toInt(), 1);
+    manager2.closeConnection_dbg();
 }
 
 // ============================================================================
@@ -3601,8 +3836,8 @@ void DatabaseTest::test_M4_recovery_splits_discard_forced_from_policy_drops()
 
     manager.closeConnection_dbg();
 
-    // Act: recover shortly after both orphans' end times, well within the
-    // stale/future thresholds.
+    // Act: recover shortly after both orphans' end times, well within
+    // History retention.
     const QDateTime now(today, QTime(0, 20, 0), Qt::LocalTime);
     const StartupRecoveryResult res = manager.recoverStartupCheckpoints(now);
 
@@ -3849,7 +4084,7 @@ void DatabaseTest::test_C2_commitSession_fails_on_commit_failure_with_empty_erro
 /**
  * D13e (routed-in from D11 part 1 review): updateDurationsById() is
  * commitSession()'s commit site -- the dominant production write path --
- * but unlike replaceAll()/saveCheckpoint() it called db.commit()/
+ * but unlike saveCheckpoint() it called db.commit()/
  * db.rollback() directly instead of going through commitOrRollback(). That
  * meant a failed COMMIT there had no closeConnection() recovery when the
  * rollback also failed (C2/R07-001), and force_commit_failure_dbg_ (which

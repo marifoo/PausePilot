@@ -103,11 +103,11 @@ does all of the reconciliation internally (see `sqlitesessionstore.cpp`
    intent (see below), decide whether to **finalize** it (treat the last
    known endpoint as the segment's true end and recover the time) or
    **drop** it (delete it without crediting any time). The decision is:
-      - Drop if `duration < 1 second` — too short to be a real session.
-      - Drop if `endTime` is more than 24 hours old — too stale to trust.
-      - Drop if `endTime` is more than `kOrphanFutureSlackMs` (1 minute)
-        ahead of `now` — a backward wall-clock jump could otherwise
-        resurrect a future-dated checkpoint.
+      - Drop if `endTime` is strictly older than the configured History
+        retention cutoff, computed once as `now.addDays(-history_days_to_keep_)`
+        using this call's own captured `now` — the same semantics as
+        `performRetentionCleanup()`'s threshold, so the two clocks can never
+        disagree about the same row. A row exactly at the cutoff is retained.
       - Drop if `[startTime, endTime)` crosses a local-day boundary — a
         cross-day row is well-formed but outside the supported contract
         (MUST-FIX4/C3); it is policy-dropped rather than finalized.
@@ -164,6 +164,13 @@ separately as `policy_dropped_count - discard_dropped_count` and surfaced in
 the status bar/tray on the next launch, independently of the clean-marker
 logic above.
 
+Startup retention cleanup (`performRetentionCleanup()`, run from
+`checkSchemaOnStartup()` before recovery) deletes only `is_finalized = 1`
+rows older than the same retention threshold. It never touches an
+unfinalized (orphan) row; an expired orphan is left for
+`recoverStartupCheckpoints()` to drop inside its own atomic pass, using its
+own captured `now` for the retention cutoff above.
+
 ```mermaid
 flowchart TD
     A[Startup] --> B[loadUnfinalizedCheckpoints]
@@ -172,7 +179,7 @@ flowchart TD
     C -- yes --> D[For each orphan]
     D --> DI{discard-intent<br/>tombstone?}
     DI -- yes --> F[force drop]
-    DI -- no --> E{too short, stale,<br/>future-dated, or<br/>cross-day?}
+    DI -- no --> E{expired beyond<br/>retention, or<br/>cross-day?}
     E -- yes --> F
     E -- no --> OV{overlaps a<br/>finalized row?}
     OV -- yes --> F

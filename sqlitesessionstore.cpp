@@ -89,15 +89,6 @@ const char* kDurationsColumnsSql =
 // definition must be detected and rebuilt rather than left in place.
 const char* kIdxStartUtcTail =
     "idx_start_utc ON durations(start_utc) WHERE is_finalized = 1";
-constexpr qint64 kMinRecoverableOrphanDurationMs = 1000;
-constexpr qint64 kOrphanStaleAgeMs = 24LL * 60LL * 60LL * 1000LL;
-// A backward clock jump can make an orphan's endTime land after "now" at
-// recovery time (endTime.msecsTo(now) negative, defeating the stale check
-// below). A small slack tolerates normal timestamp/tick granularity without
-// misclassifying genuinely-fresh orphans; anything further in the future is
-// a clock-jump artifact and must be dropped, not resurrected.
-constexpr qint64 kOrphanFutureSlackMs = 60LL * 1000LL;
-
 static QString toUtcIso(const QDateTime& dt)
 {
     return dt.toUTC().toString(Qt::ISODateWithMs);
@@ -671,8 +662,13 @@ SchemaStatus SqliteSessionStore::checkSchemaOnStartup()
 }
 
 /**
- * Deletes entries older than history_days_to_keep_ from the durations table.
- * Called once per startup from checkSchemaOnStartup() after schema validation.
+ * Deletes finalized entries older than history_days_to_keep_ from the
+ * durations table. Called once per startup from checkSchemaOnStartup() after
+ * schema validation, before recoverStartupCheckpoints() runs. Touches only
+ * is_finalized = 1 rows -- an expired unfinalized (orphan) row is left for
+ * recoverStartupCheckpoints() to classify and drop using its own captured
+ * `now`, so this method's now_provider_() clock and recovery's clock can
+ * never disagree about the same orphan (C1/C3 step 4).
  * Non-fatal: failures are logged but do not propagate to the caller.
  */
 void SqliteSessionStore::performRetentionCleanup()
@@ -683,7 +679,7 @@ void SqliteSessionStore::performRetentionCleanup()
     }
     const QDateTime threshold = now_provider_().addDays(-static_cast<int>(history_days_to_keep_));
     QSqlQuery query(db);
-    query.prepare("DELETE FROM durations WHERE end_utc < :threshold");
+    query.prepare("DELETE FROM durations WHERE end_utc < :threshold AND is_finalized = 1");
     query.bindValue(":threshold", toUtcIso(threshold));
     if (!query.exec()) {
         db.rollback();
@@ -1940,7 +1936,7 @@ SqliteSessionStore::FinalizeResult SqliteSessionStore::finalizeOrOverlapWithinOp
 
 /**
  * B2: applies the entire row-mutation half of startup recovery's disposition
- * -- malformed-row deletion, policy drops (too-short/stale/future/A4
+ * -- malformed-row deletion, policy drops (retention-expired/cross-day/A4
  * discard-forced), and finalize-or-delete-on-overlap -- as steps sharing ONE
  * transaction that the CALLER already opened (recoverStartupCheckpoints()).
  * This method itself never begins, commits, or rolls back; on the first
@@ -1995,7 +1991,7 @@ SqliteSessionStore::ReconcileResult SqliteSessionStore::reconcileUnfinalizedChec
     }
     result.malformed_deleted = static_cast<int>(malformedIds.size());
 
-    // Policy drops supplied by the caller (too-short/stale/future/A4 discard-forced).
+    // Policy drops supplied by the caller (retention-expired/cross-day/A4 discard-forced).
     for (long long id : policyDropIds) {
         dropQuery.bindValue(":id", static_cast<qlonglong>(id));
         if (!dropQuery.exec()) {
@@ -2200,10 +2196,11 @@ std::optional<std::vector<SegmentId>> SqliteSessionStore::loadDiscardIntents()
  *
  * Loads and classifies every unfinalized checkpoint row and every durable
  * discard intent (A4) BEFORE any externally visible mutation, then applies
- * malformed-row deletion, policy drops (too-short <1s / stale >24h /
- * future-dated / A4 discard-forced), overlap-guarded finalization (deleting
- * overlap-rejected rows instead of leaving them to recur every launch), and
- * clean-marker consumption all within ONE transaction. A failure at any
+ * malformed-row deletion, policy drops (expired beyond History retention,
+ * evaluated with this call's own `now` / cross-day / A4 discard-forced),
+ * overlap-guarded finalization (deleting overlap-rejected rows instead of
+ * leaving them to recur every launch), and clean-marker consumption all
+ * within ONE transaction. A failure at any
  * mutation stage rolls back that entire transaction, so no partial
  * disposition can ever be reported as either success or (falsely) as a
  * "dropped" row -- and the marker is preserved.
@@ -2278,14 +2275,16 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
     // Either way there is nothing left to delete; just resolve the tombstone.
     resolvedIntents.insert(resolvedIntents.end(), unmatchedIntents.begin(), unmatchedIntents.end());
 
+    // C1/C3 step 4: an orphan outside configured History retention is
+    // dropped using recovery's own captured `now`, the same
+    // now.addDays(-history_days_to_keep_) semantics as performRetentionCleanup()'s
+    // threshold, so the two clocks can no longer disagree about the same row.
+    // A row exactly at the cutoff is retained (strict "<" only).
+    const QDateTime retentionCutoff = now.addDays(-static_cast<int>(history_days_to_keep_));
+
     std::vector<OrphanCheckpoint> toFinalize;
     for (const auto& orphan : remainingOrphans) {
-        const bool tooShort = orphan.duration < kMinRecoverableOrphanDurationMs;
-        const bool stale = orphan.endTime.isValid() && (orphan.endTime.msecsTo(now) > kOrphanStaleAgeMs);
-        // A backward clock jump since the checkpoint was written can leave the
-        // orphan's endTime after "now" (msecsTo(now) negative, passing the
-        // stale check above). Drop future-dated orphans instead of resurrecting them.
-        const bool futureDated = orphan.endTime.isValid() && (now.msecsTo(orphan.endTime) > kOrphanFutureSlackMs);
+        const bool expired = orphan.endTime.isValid() && orphan.endTime < retentionCutoff;
         // MUST-FIX4 (review packet C3): a cross-day orphan is well-formed by
         // B2's malformed-row definition (not empty id/invalid type/invalid
         // timestamp/start>=end), so it would otherwise reach finalizeOrOverlap
@@ -2294,7 +2293,7 @@ StartupRecoveryResult SqliteSessionStore::recoverStartupCheckpoints(const QDateT
         // history.
         const bool crossDay = isCrossMidnight(orphan.startTime, orphan.endTime);
 
-        if (tooShort || stale || futureDated || crossDay) {
+        if (expired || crossDay) {
             policyDropIds.push_back(orphan.id);
         } else {
             toFinalize.push_back(orphan);

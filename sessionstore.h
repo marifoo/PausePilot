@@ -272,9 +272,9 @@ struct HistoryDayChange {
  *
  * The store loads and classifies every unfinalized checkpoint row, then --
  * within one atomic disposition -- deletes malformed rows, applies the
- * too-short (<1 s) / stale (>24 h) / future-dated and overlap policies,
- * finalizes qualifying rows, resolves durable discard intents (A4), and
- * consumes the clean-shutdown marker.  A failure at any stage rolls back the
+ * expired-beyond-History-retention (using this call's own `now`) / cross-day
+ * / overlap policies, finalizes qualifying rows, resolves durable discard
+ * intents (A4), and consumes the clean-shutdown marker.  A failure at any stage rolls back the
  * ENTIRE disposition: no row is mutated and the marker (if any) is preserved.
  *
  *   status == Success        — recovery committed (even if zero rows were
@@ -296,8 +296,9 @@ struct HistoryDayChange {
  * method can take is consolidated onto TransientError.
  *
  * policy_dropped_count counts rows deleted for a recovery POLICY reason
- * (too-short, stale, future-dated, cross-day, overlap-rejected, or a durable
- * A4 discard intent) -- never a repaired-row count. Malformed rows (invalid timestamp/
+ * (expired beyond History retention using recovery's own `now`, cross-day,
+ * overlap-rejected, or a durable A4 discard intent) -- never a repaired-row
+ * count. Malformed rows (invalid timestamp/
  * type, empty id, non-positive interval) are also deleted as part of the
  * same atomic disposition, but are store-internal cleanup rather than a
  * policy decision: their count is logged only and is not part of this
@@ -307,7 +308,7 @@ struct HistoryDayChange {
  * force-dropped by a durable A4 discard intent, i.e. work the user
  * explicitly discarded. policy_dropped_count - discard_dropped_count is
  * therefore the number of rows recovery deleted on its own policy
- * (too-short/stale/future/cross-day/overlap-rejected) -- the only drops a
+ * (expired-beyond-retention/cross-day/overlap-rejected) -- the only drops a
  * caller should surface to the user.
  */
 struct StartupRecoveryResult {
@@ -472,7 +473,7 @@ public:
     /// Deletes the unfinalized checkpoint row(s) for segmentId (is_finalized = 0).
     /// Called when the engine deliberately discards an in-flight segment (e.g. the
     /// cross-midnight watchdog) so the orphaned checkpoint is neither resurrected
-    /// by startup recovery nor silently dropped by the stale-orphan policy.
+    /// by startup recovery nor silently dropped by its retention-expiry policy.
     ///
     /// The DISCARD INTENT itself must be durable across a failure of this call
     /// (R05-001): implementations own recording it (e.g. a store-owned tombstone)
@@ -517,10 +518,13 @@ public:
     virtual MarkCleanShutdownResult markCleanShutdown() = 0;
 
     /// Recovers unfinalized checkpoint rows left by a previous crash or unclean exit.
-    /// Internally consumes the last-clean-shutdown marker, applies too-short/stale/
-    /// overlap policies, and finalizes qualifying rows.  Returns domain facts only —
-    /// row ids and finalize/drop mechanics are hidden inside the store.
-    /// `now` is used for the stale-age check (>24 h) and should be the current time.
+    /// Internally consumes the last-clean-shutdown marker, applies the retention-
+    /// cutoff/cross-day/overlap policies, and finalizes qualifying rows.  Returns
+    /// domain facts only — row ids and finalize/drop mechanics are hidden inside
+    /// the store.
+    /// `now` is used to compute the retention cutoff (now.addDays(-history_days_to_keep_),
+    /// same semantics as performRetentionCleanup()'s threshold) and should be the
+    /// current time.
     virtual StartupRecoveryResult recoverStartupCheckpoints(const QDateTime& now) = 0;
 };
 

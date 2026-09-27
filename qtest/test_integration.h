@@ -25,7 +25,7 @@ private slots:
     
     void test_integration_checkpoint_recovery_on_restart();
     void test_integration_orphan_reconciliation_is_idempotent();
-    void test_integration_orphan_reconciliation_drops_stale_and_too_short();
+    void test_integration_orphan_reconciliation_recovers_short_and_stale_but_retained();
     void test_integration_orphan_reconciliation_marker_present_is_silent();
     void test_integration_orphan_reconciliation_marker_absent_shows_notification();
     void test_integration_memory_db_consistency();
@@ -80,6 +80,10 @@ private slots:
     // at the tracker boundary mainwin.cpp reads, while the old recovered-time
     // notification channel stays closed.
     void test_M4_tracker_reports_policy_dropped_count_for_cross_day_orphan();
+
+    // C1/C3 step 4: same M4 tracker-boundary shape, but for a
+    // retention-expired orphan rather than a cross-day one.
+    void test_M4_tracker_reports_policy_dropped_count_for_expired_orphan();
 
     // D2 (R11-003/MEDIUM-8): a real SQLite store proves a backward-clock
     // Stop writes no row reflecting the reversed interval. HIGH-A (round-2

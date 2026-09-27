@@ -128,13 +128,21 @@ private slots:
     // A12: empty segment_id rows are treated as corrupt at load
     void test_loadDurations_skips_empty_segment_id_row();
 
-    // A14: a backward clock jump must not resurrect a future-dated orphan
-    void test_recoverStartupCheckpoints_drops_future_dated_orphan();
+    // C1/C3 step 4: a backward clock jump no longer drops a future-dated
+    // orphan -- it is finalized and credited like any other valid row.
+    void test_recoverStartupCheckpoints_finalizes_future_dated_orphan();
 
     // MUST-FIX4 (review packet C3): a cross-day orphan is well-formed by B2's
     // malformed-row definition, so recovery finalization needs its own
     // day-validity check to avoid crediting a cross-day checkpoint.
     void test_recoverStartupCheckpoints_drops_unfinalized_cross_day_orphan();
+
+    // C1/C3 step 4: retention cutoff inside recovery, and cleanup restricted
+    // to finalized rows.
+    void test_recoverStartupCheckpoints_retention_cutoff_is_strict();
+    void test_performRetentionCleanup_is_finalized_only();
+    void test_performRetentionCleanup_failure_does_not_admit_expired_orphan();
+    void test_backward_clock_across_cutoff_between_cleanup_and_recovery();
 
     // B2 (R08-001..003,005, R05-004): atomic recovery disposition, exact
     // millisecond aggregation, malformed-row cleanup, and idempotency.

@@ -74,11 +74,12 @@ void IntegrationTest::test_integration_checkpoint_recovery_on_restart()
     {
         // Second session: startup reconciliation finalizes orphan checkpoint.
         // D15/F1: recoverStartupCheckpoints() policy-drops any orphan whose
-        // endTime is more than kOrphanFutureSlackMs ahead of "now"
-        // (sqlitesessionstore.cpp) -- the checkpoint above was written
-        // relative to fixedNow(), so "now" here must be pinned the same way
-        // rather than left as the real wall clock, or the checkpoint reads
-        // as future-dated whenever the real time of day is far from noon.
+        // endTime is strictly older than the History retention cutoff
+        // (now.addDays(-history_days_to_keep_), sqlitesessionstore.cpp) --
+        // the checkpoint above was written relative to fixedNow(), so "now"
+        // here must be pinned the same way rather than left as the real wall
+        // clock, or the checkpoint could read as expired depending on the
+        // real date.
         Settings settings(settingsPath);
         SqliteSessionStore db(settings);
         FakeClock clock(fixedNow());
@@ -158,7 +159,13 @@ void IntegrationTest::test_integration_orphan_reconciliation_is_idempotent()
     }
 }
 
-void IntegrationTest::test_integration_orphan_reconciliation_drops_stale_and_too_short()
+// C1/C3 step 4: the old kMinRecoverableOrphanDurationMs/kOrphanStaleAgeMs
+// filters are gone. A positive orphan is recovered regardless of how short
+// or how old it is, as long as its endTime is still inside configured
+// History retention (7 days here) relative to recovery's own captured
+// "now" -- pinned via fixedNow()/FakeClock rather than the real wall clock,
+// so the test does not depend on when it happens to run.
+void IntegrationTest::test_integration_orphan_reconciliation_recovers_short_and_stale_but_retained()
 {
     resetDatabaseFile();
     QTemporaryDir tempDir;
@@ -169,10 +176,12 @@ void IntegrationTest::test_integration_orphan_reconciliation_drops_stale_and_too
     SqliteSessionStore db(settings);
     QVERIFY(db.ensureOpen_dbg());
 
-    // Too short orphan (< 1s)
+    const QDateTime now = fixedNowUtc();
+
+    // Positive 500 ms orphan, otherwise unremarkable.
     {
         QSqlQuery insert(db.rawDb_dbg());
-        const QDateTime start = QDateTime::currentDateTimeUtc().addSecs(-10);
+        const QDateTime start = now.addSecs(-10);
         const QDateTime end = start.addMSecs(500);
         insert.prepare(
             "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
@@ -185,10 +194,11 @@ void IntegrationTest::test_integration_orphan_reconciliation_drops_stale_and_too
         QVERIFY(insert.exec());
     }
 
-    // Stale orphan (>24h)
+    // 2-day-old 30 s orphan -- more than 24h old, but well inside the 7-day
+    // retention window.
     {
         QSqlQuery insert(db.rawDb_dbg());
-        const QDateTime start = QDateTime::currentDateTimeUtc().addDays(-2);
+        const QDateTime start = now.addDays(-2);
         const QDateTime end = start.addSecs(30);
         insert.prepare(
             "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
@@ -204,12 +214,17 @@ void IntegrationTest::test_integration_orphan_reconciliation_drops_stale_and_too
     db.closeConnection_dbg();
 
     SqliteSessionStore db2(settings);
+    // FakeClock declared before TimeTracker: see outlives-tracker note above.
+    FakeClock clock(now);
     TimeTracker tracker(settings, db2);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     tracker.initializeFromStore();
-    QCOMPARE(tracker.getStartupRecoveredMsec(), static_cast<qint64>(0));
+    QCOMPARE(tracker.getStartupRecoveredMsec(), static_cast<qint64>(30500));
 
+    // loadDurations() only ever returns is_finalized = 1 rows, so finding
+    // both here already proves both were finalized by recovery.
     auto loaded = db.loadDurations();
-    QCOMPARE(loaded.size(), static_cast<size_t>(0));
+    QCOMPARE(loaded.size(), static_cast<size_t>(2));
 }
 
 void IntegrationTest::test_integration_orphan_reconciliation_marker_present_is_silent()
@@ -968,7 +983,7 @@ void IntegrationTest::test_recoverStartupCheckpoints_overlap_rejected_not_counte
     }
     db.closeConnection_dbg();
 
-    // Use a 'now' far enough in the future that neither orphan is stale (>24h old).
+    // Use a 'now' close enough that neither orphan is outside History retention.
     const QDateTime now = QDateTime(QDate(2025, 1, 1), QTime(13, 0, 0), Qt::UTC).toLocalTime();
     StartupRecoveryResult result = db.recoverStartupCheckpoints(now);
 
@@ -1475,6 +1490,46 @@ void IntegrationTest::test_M4_tracker_reports_policy_dropped_count_for_cross_day
     QCOMPARE(tracker.getStartupPolicyDroppedCount(), 1);
 }
 
+/**
+ * C1/C3 step 4: same tracker-boundary shape as the M4 cross-day case above,
+ * but for an orphan whose endTime is strictly older than History retention
+ * (retention = 7 days, orphan is 10 days old) rather than cross-day.
+ */
+void IntegrationTest::test_M4_tracker_reports_policy_dropped_count_for_expired_orphan()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore db(settings);
+
+    QVERIFY(db.ensureOpen_dbg());
+
+    const QDateTime fixedNowUtc = QDateTime(QDate(2025, 6, 10), QTime(12, 0, 0), Qt::UTC);
+    const QDateTime expiredStart = fixedNowUtc.addDays(-10);
+    const QDateTime expiredEnd   = expiredStart.addSecs(30);
+    {
+        QSqlQuery q(db.rawDb_dbg());
+        q.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                  "VALUES (:seg, 0, :s, :e, 0)");
+        q.bindValue(":seg", SegmentId::mint().toString());
+        q.bindValue(":s", expiredStart.toString(Qt::ISODateWithMs));
+        q.bindValue(":e", expiredEnd.toString(Qt::ISODateWithMs));
+        QVERIFY(q.exec());
+    }
+    db.closeConnection_dbg();
+
+    FakeClock clock(fixedNowUtc);
+    TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.initializeFromStore();
+
+    QCOMPARE(tracker.getStartupRecoveredMsec(), static_cast<qint64>(0));
+    QVERIFY(!tracker.shouldShowStartupRecoveryNotification());
+    QCOMPARE(tracker.getStartupPolicyDroppedCount(), 1);
+}
+
 // D2/HIGH-A (round-2 review): a backward wall-clock step must drop only the
 // closing interval, never the already-checkpointed prefix of the same live
 // segment -- that prefix is valid, positive, same-day, truthfully recorded
@@ -1533,9 +1588,9 @@ void IntegrationTest::test_D2_real_sqlite_backward_clock_stop_preserves_checkpoi
         QVERIFY(!tracker.hasPendingDiscards_dbg());
     }
 
-    // Session 2: real reopen, shortly after (within the 24h staleness
-    // window) so ordinary policy does not drop it. Startup recovery must
-    // finalize the surviving checkpoint as real recovered time.
+    // Session 2: real reopen, shortly after (well within History retention)
+    // so ordinary policy does not drop it. Startup recovery must finalize
+    // the surviving checkpoint as real recovered time.
     Settings settings(settingsPath);
     SqliteSessionStore db2(settings);
     // FakeClock declared before TimeTracker: see outlives-tracker note above
