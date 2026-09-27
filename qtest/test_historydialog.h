@@ -145,6 +145,15 @@ private slots:
     void test_H5_revoke_during_merge_prompt_never_saves();
     void test_H5_today_after_stop_saves();
     void test_H5_today_while_running_is_read_only();
+
+    // ====================================================================
+    // WP7c (step6_plan_revised.md): revoke History on any real mode
+    // change (U1), exercised through the real HistoryDialog.
+    // ====================================================================
+    void test_WP7c_queued_start_with_pending_edits_ends_rejected_no_save();
+    void test_WP7c_start_and_accept_same_turn_ends_rejected_no_write();
+    void test_WP7c_merge_prompt_hook_real_mode_change_refuses_save();
+    void test_WP7c_editable_today_dialog_then_start_revokes_and_start_proceeds();
 };
 
 #endif // TEST_HISTORYDIALOG_H

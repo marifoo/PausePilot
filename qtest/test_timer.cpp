@@ -6161,3 +6161,464 @@ void TimerTest::test_WP3_saveHistoryEdit_after_revoke_is_conflict_no_store_call(
     QCOMPARE(result.category, SessionStoreResult::Conflict);
     QCOMPARE(fakeDb.callLog.count("saveHistoryDays"), saveCallsBefore);
 }
+
+// Carry-forward (step6_plan_revised.md WP7c): saveHistoryEdit()'s check 3
+// catches a forward local-date change even when no tick/watchdog ever ran
+// to revoke the edit first -- opened.today no longer matches now_provider_()
+// on its own is enough for Conflict, with no store call.
+void TimerTest::test_WP3_saveHistoryEdit_forward_clock_date_change_before_tick_is_conflict_no_store_call()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    const QDate today(2025, 6, 15);
+    const QDate pastDate(2025, 6, 10);
+    fakeDb.storedDurations.push_back(TimeDuration::fromPersistedRow(
+        DurationType::Activity, QDateTime(pastDate, QTime(9, 0, 0), Qt::LocalTime),
+        QDateTime(pastDate, QTime(10, 0, 0), Qt::LocalTime)));
+    FakeClock clock(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    QVERIFY(tracker.isStopped());
+
+    const HistoryEditContext ctx = tracker.beginExclusiveEdit();
+    QVERIFY(ctx.isEditable(pastDate));
+
+    HistoryDayChange day;
+    day.date = pastDate;
+    day.dayStartUtc = DayValidity::localDayStart(pastDate).toUTC();
+    day.dayEndUtc = DayValidity::localDayEnd(pastDate).toUTC();
+    const std::vector<HistoryDayChange> days{day};
+
+    // Act: the wall clock steps forward past midnight with no onTick() call
+    // in between -- the DayBoundaryWatcher's forward-date revoke never runs,
+    // so dialog_open_ is still true when Save is attempted.
+    clock.setNow(QDateTime(today.addDays(1), QTime(0, 0, 5), Qt::LocalTime));
+    QVERIFY(tracker.isDialogOpen_dbg());
+    const int saveCallsBefore = fakeDb.callLog.count("saveHistoryDays");
+    const SessionStoreResult result = tracker.saveHistoryEdit(ctx, days);
+    tracker.endExclusiveEdit();
+
+    // Assert
+    QCOMPARE(result.category, SessionStoreResult::Conflict);
+    QCOMPARE(fakeDb.callLog.count("saveHistoryDays"), saveCallsBefore);
+}
+
+// ============================================================================
+// WP7c (step6_plan_revised.md): revoke History on any real mode change (U1).
+// emitTransition() is the one function every real mode change passes
+// through, so it is the one backstop revoke site; it never double-revokes
+// because the lock/midnight/shutdown paths already clear dialog_open_ before
+// reaching it. A refused or no-op request never reaches emitTransition() and
+// never revokes.
+// ============================================================================
+
+void TimerTest::test_WP7c_button_start_from_none_revokes_once()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    QVERIFY(tracker.isStopped());
+
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
+
+    // Act: a plain button Start with History open.
+    tracker.useTimerViaButton(Button::Start);
+
+    // Assert
+    QVERIFY(tracker.isActive());
+    QCOMPARE(revokedSpy.count(), 1);
+    QCOMPARE(warnSpy.count(), 1);
+    QCOMPARE(warnSpy.first().first().toString(), kWP2RevokedNotice);
+    QVERIFY(!tracker.isDialogOpen_dbg());
+}
+
+void TimerTest::test_WP7c_button_start_from_pause_revokes_once()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    FakeClock clock(fixedNow());
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    tracker.useTimerViaButton(Button::Pause);
+    QVERIFY(tracker.isPaused());
+
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
+
+    // Act: unpause (Start from Pause) with History open.
+    clock.advance(1000);
+    tracker.useTimerViaButton(Button::Start);
+
+    // Assert
+    QVERIFY(tracker.isActive());
+    QCOMPARE(revokedSpy.count(), 1);
+    QCOMPARE(warnSpy.count(), 1);
+    QVERIFY(!tracker.isDialogOpen_dbg());
+}
+
+void TimerTest::test_WP7c_button_pause_revokes_once()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    FakeClock clock(fixedNow());
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    QVERIFY(tracker.isActive());
+
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
+
+    // Act
+    clock.advance(1000);
+    tracker.useTimerViaButton(Button::Pause);
+
+    // Assert
+    QVERIFY(tracker.isPaused());
+    QCOMPARE(revokedSpy.count(), 1);
+    QCOMPARE(warnSpy.count(), 1);
+    QVERIFY(!tracker.isDialogOpen_dbg());
+}
+
+void TimerTest::test_WP7c_button_stop_revokes_once()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    FakeClock clock(fixedNow());
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    QVERIFY(tracker.isActive());
+
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
+
+    // Act
+    tracker.useTimerViaButton(Button::Stop);
+
+    // Assert
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(revokedSpy.count(), 1);
+    QCOMPARE(warnSpy.count(), 1);
+    QVERIFY(!tracker.isDialogOpen_dbg());
+}
+
+void TimerTest::test_WP7c_onStartPausePressed_revokes_once()
+{
+    // Arrange: onStartPausePressed() dispatches to useTimerViaButton() but
+    // the revoke lives inside emitTransition(), so the toggle slot must
+    // revoke exactly like the button call it wraps.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    QVERIFY(tracker.isStopped());
+
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+
+    // Act
+    tracker.onStartPausePressed();
+
+    // Assert
+    QVERIFY(tracker.isActive());
+    QCOMPARE(revokedSpy.count(), 1);
+    QVERIFY(!tracker.isDialogOpen_dbg());
+}
+
+void TimerTest::test_WP7c_onStopPressed_revokes_once()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    FakeClock clock(fixedNow());
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    QVERIFY(tracker.isActive());
+
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+
+    // Act
+    tracker.onStopPressed();
+
+    // Assert
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(revokedSpy.count(), 1);
+    QVERIFY(!tracker.isDialogOpen_dbg());
+}
+
+void TimerTest::test_WP7c_stop_with_failed_commit_still_revokes()
+{
+    // Arrange: a Stop whose commitSession fails still runs mode_ = None and
+    // emitTransition() -- History must still be revoked even though the
+    // session durations are retained for retry rather than persisted.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    FakeClock clock(fixedNow());
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    QVERIFY(tracker.isActive());
+
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+    QSignalSpy warnSpy(&tracker, &TimeTracker::userWarning);
+
+    // Act
+    tracker.useTimerViaButton(Button::Stop);
+
+    // Assert: stopped, pending commit retained, but History was still revoked.
+    QVERIFY(tracker.isStopped());
+    QVERIFY(tracker.hasPendingCommit_dbg());
+    QCOMPARE(revokedSpy.count(), 1);
+    QCOMPARE(warnSpy.count(), 1);
+    QCOMPARE(warnSpy.first().first().toString(), kWP2RevokedNotice);
+    QVERIFY(!tracker.isDialogOpen_dbg());
+
+    // Cleanup: resolve the payload so destruction finds no unresolved commit.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(tracker.drainForShutdown().clean());
+}
+
+void TimerTest::test_WP7c_fatal_latch_stop_revokes_history()
+{
+    // Arrange: until WP10, a fatal-latch stop is still a mode change (it
+    // reaches emitTransition() via stopTimer()), so it revokes History like
+    // any other Stop under U1 -- this is not the skipped fatal-latch "WP8":
+    // the revoke comes from the resulting stop, not from the FatalError
+    // itself. Trigger it via a fatal checkpoint write while running.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    FakeClock clock(fixedNow());
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    QVERIFY(tracker.isActive());
+
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    fakeDb.saveCheckpointResult = SessionStoreResult::fatal("injected fatal checkpoint failure");
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+
+    // Act: a checkpoint save fails Fatal, latching and stopping the engine.
+    tracker.triggerCheckpoint_dbg();
+
+    // Assert
+    QVERIFY(tracker.isFatalLatched());
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(revokedSpy.count(), 1);
+    QVERIFY(!tracker.isDialogOpen_dbg());
+}
+
+void TimerTest::test_WP7c_start_while_active_does_not_revoke()
+{
+    // Arrange: Start while already Activity is a no-op (never reaches
+    // emitTransition()) -- History must stay open.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+
+    tracker.useTimerViaButton(Button::Start);
+    QVERIFY(tracker.isActive());
+
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+
+    // Act
+    tracker.useTimerViaButton(Button::Start);
+
+    // Assert
+    QCOMPARE(revokedSpy.count(), 0);
+    QVERIFY(tracker.isDialogOpen_dbg());
+    tracker.endExclusiveEdit();
+}
+
+void TimerTest::test_WP7c_stop_while_stopped_does_not_revoke()
+{
+    // Arrange: Stop while already stopped is a no-op.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    QVERIFY(tracker.isStopped());
+
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+
+    // Act
+    tracker.useTimerViaButton(Button::Stop);
+
+    // Assert
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(revokedSpy.count(), 0);
+    QVERIFY(tracker.isDialogOpen_dbg());
+    tracker.endExclusiveEdit();
+}
+
+void TimerTest::test_WP7c_backward_clock_pause_refusal_does_not_revoke()
+{
+    // Arrange: a backward wall-clock step makes Pause refuse the whole
+    // transition (touches no state) -- never reaches emitTransition().
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    FakeClock clock(fixedNow());
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    QVERIFY(tracker.isActive());
+
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    // Step the clock backward before the segment start.
+    clock.advance(-120ll * 1000ll);
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+
+    // Act
+    tracker.useTimerViaButton(Button::Pause);
+
+    // Assert: still Activity (Pause refused), History still open.
+    QVERIFY(tracker.isActive());
+    QCOMPARE(revokedSpy.count(), 0);
+    QVERIFY(tracker.isDialogOpen_dbg());
+    tracker.endExclusiveEdit();
+}
+
+void TimerTest::test_WP7c_failed_pending_commit_retry_start_does_not_revoke()
+{
+    // Arrange: a Stop-time commit failure leaves a pending payload; a
+    // subsequent Start whose retry also fails is refused before touching
+    // mode_ -- never reaches emitTransition().
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    FakeClock clock(fixedNow());
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    tracker.useTimerViaButton(Button::Start);
+    clock.advance(60ll * 1000ll);
+    fakeDb.commitSessionResult = SessionStoreResult::transient("injected failure");
+    tracker.useTimerViaButton(Button::Stop);
+    QVERIFY(tracker.hasPendingCommit_dbg());
+    QVERIFY(tracker.isStopped());
+
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+
+    // Act: Start retries the pending commit, which still fails -- Start is refused.
+    tracker.useTimerViaButton(Button::Start);
+
+    // Assert
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(revokedSpy.count(), 0);
+    QVERIFY(tracker.isDialogOpen_dbg());
+    tracker.endExclusiveEdit();
+
+    // Cleanup: resolve the payload so destruction finds no unresolved commit.
+    fakeDb.commitSessionResult = SessionStoreResult::success();
+    QVERIFY(tracker.drainForShutdown().clean());
+}
+
+void TimerTest::test_WP7c_start_refused_after_shutdown_does_not_revoke()
+{
+    // Arrange: shutdown_called_ refuses Start up front, before any state
+    // change -- never reaches emitTransition(). shutdown() itself already
+    // revoked History as part of its own explicit revoke-then-stop, so
+    // reopen it afterward to isolate the refused-Start behavior.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    QVERIFY(tracker.isStopped());
+
+    tracker.shutdown();
+    QVERIFY(tracker.wasShutDown());
+
+    tracker.beginExclusiveEdit();
+    QVERIFY(tracker.isDialogOpen_dbg());
+
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+
+    // Act
+    tracker.useTimerViaButton(Button::Start);
+
+    // Assert
+    QVERIFY(tracker.isStopped());
+    QCOMPARE(revokedSpy.count(), 0);
+    QVERIFY(tracker.isDialogOpen_dbg());
+    tracker.endExclusiveEdit();
+}

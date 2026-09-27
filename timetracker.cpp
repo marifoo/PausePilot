@@ -808,8 +808,23 @@ bool TimeTracker::stopIfLatched(const QDateTime& now, std::optional<Mode> observ
     return false;
 }
 
+// H5/WP7c: every real mode change passes through this one function --
+// Start from None, unpause, Pause, backpause, and every stop (including the
+// nested fatal-latch stop until WP10) -- so this is the one place that
+// revokes an open History edit for U1 ("any mode change revokes History").
+// The lock/midnight/shutdown paths already revoke before reaching here
+// (their own revoke clears dialog_open_ first), so this is a backstop for
+// every other mode change and never double-revokes. A refused or no-op
+// request (Start while active, Stop while stopped, a backward-clock Pause
+// refusal, a failed pending-commit retry, Start refused after shutdown)
+// never calls emitTransition() and never revokes. The revoke runs after
+// this transition's own state change and persistence, but before
+// transitioned()/stopped() are emitted -- see exclusiveEditRevoked()'s
+// contract that a slot on it must not call back into TimeTracker.
 void TimeTracker::emitTransition(Mode from, Mode to, TransitionCause cause)
 {
+    if (dialog_open_) revokeExclusiveEdit();
+
     emit transitioned(Transition{from, to, cause});
 
     // stopped() is kept as the one explicitly separate terminal event
@@ -1010,8 +1025,8 @@ std::optional<TimeDuration> TimeTracker::getOngoingDuration_locked(const QDateTi
         // A8: the wall clock jumped backward (NTP/DST step-back), so the running
         // segment appears to start in the "future". The engine is NOT stopped —
         // expose a zero-length ongoing capped at the start rather than nullopt,
-        // so a history-edit save re-anchors the live segment instead of ending
-        // the session and dropping the in-flight time. (Cross-midnight, handled
+        // so callers see a live segment instead of the session appearing ended
+        // and the in-flight time dropped. (Cross-midnight, handled
         // below, stays hidden — the watchdog owns force-stopping it.)
         return TimeDuration::fromLiveSession(type, session_.segment_start_time,
                                              session_.segment_start_time, session_.segment_id);

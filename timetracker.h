@@ -88,7 +88,7 @@ public:
     enum class Mode {Activity, Pause, None};
 
     /// D10 (R10-001/R10-002): the one cause vocabulary for every real mode
-    /// transition, button/lock/midnight/edit/shutdown-driven alike. Carried
+    /// transition, button/lock/midnight/shutdown-driven alike. Carried
     /// by transitioned() together with the mode change itself, so a single
     /// event is sufficient for a UI reducer -- no pairing/exclusion rules to
     /// reconstruct from separate started()/paused()/stopped()/modeChanged()
@@ -224,7 +224,7 @@ private:
     Mode mode_;
     bool autopause_pending_resume_;
     bool is_locked_;     // Track if desktop is currently locked (to prevent checkpoints while locked)
-    bool dialog_open_;   // True while HistoryDialog is open. Checkpoints keep running (WP6); lock-watcher events, a forward date change, the midnight stop/discard and shutdown revoke it first (revokeExclusiveEdit()).
+    bool dialog_open_;   // True while HistoryDialog is open. Checkpoints keep running (WP6); lock-watcher events, a forward date change, the midnight stop/discard and shutdown revoke it first (revokeExclusiveEdit()); any other real mode change revokes it from inside emitTransition() (H5/WP7c).
     QDate exclusive_edit_date_;  // WP4: the date when beginExclusiveEdit() was called.
                                  // Used to detect when the date moves forward (>) and revoke the edit.
     bool shutdown_called_ = false;  // Set once shutdown() has torn down the engine.
@@ -241,19 +241,18 @@ private:
     /// restart, i.e. constructing a new instance) -- there is no in-memory-
     /// only tracking mode and no unlatch path. See enterFatalState().
     ///
-    /// C4 fix round 3 (F4): post-C4, SqliteSessionStore::replaceAll()'s
-    /// post-backup reopen failure (sqlitesessionstore.cpp, ensureOpen()
-    /// after the backup) is the ONLY production path that can produce a
-    /// FatalError today -- commitSession, saveCheckpoint, discardCheckpoint,
-    /// loadDurations, flushToDisc, setLastCleanShutdownMarker, and
-    /// recoverStartupCheckpoints have all been consolidated onto
-    /// TransientError/CallerBug (see sessionstore.h). The other
-    /// stopIfLatched()/latch-check call sites in this class (saveCheckpoint_
-    /// locked, startTimer's Pause and None branches, finalizePauseTransition)
-    /// are therefore defence-in-depth
-    /// against a future SessionStore implementation, not currently
-    /// reachable from SqliteSessionStore, and are exercised in tests only
-    /// via FakeSessionStore injecting FatalError from those operations.
+    /// C4 fix round 3 (F4): post-C4, no production path in SqliteSessionStore
+    /// produces a FatalError any more -- commitSession, saveCheckpoint,
+    /// discardCheckpoint, loadDurations, flushToDisc,
+    /// setLastCleanShutdownMarker, and recoverStartupCheckpoints have all
+    /// been consolidated onto TransientError/CallerBug (see sessionstore.h).
+    /// The stopIfLatched()/latch-check call sites in this class
+    /// (saveCheckpoint_locked, startTimer's Pause and None branches,
+    /// finalizePauseTransition) are therefore defence-in-depth against a
+    /// future SessionStore implementation, not currently reachable from
+    /// SqliteSessionStore, and are exercised in tests only via
+    /// FakeSessionStore injecting FatalError from those operations. (The
+    /// engine no longer calls replaceAll; WP10 removes the latch entirely.)
     bool fatal_state_latched_ = false;
     SessionStore& db_;
     mutable QRecursiveMutex mutex_;  // Protects state transitions from concurrent access
@@ -468,8 +467,8 @@ public:
     /// whole call and checks, in order:
     ///   1. the edit was revoked (dialog_open_ is now false) -> Conflict;
     ///   2. any day's date was not editable in `opened` -> CallerBug;
-    ///   3. the current local date differs from opened.today (backward
-    ///      clock) -> Conflict;
+    ///   3. the current local date differs from opened.today (local date
+    ///      changed, backward, or forward before the revoke tick) -> Conflict;
     ///   4. any day's captured UTC span no longer matches its local day's
     ///      span (timezone change) -> Conflict;
     ///   5. otherwise, db_.saveHistoryDays(opened.stored.rows, days).
@@ -527,12 +526,17 @@ public slots:
 
 signals:
     void userWarning(const QString& text);
-    /// WP1: the edit has been revoked (at lock, sleep, midnight, shutdown, or
-    /// when the date moves forward). HistoryDialog's onExclusiveEditRevoked()
+    /// WP1: the edit has been revoked (at lock, sleep, midnight, shutdown, when
+    /// the date moves forward, or on any other real mode change -- Start,
+    /// Pause, unpause or Stop; H5/WP7c). HistoryDialog's onExclusiveEditRevoked()
     /// slot receives this synchronously (direct connection) to set editRevoked_,
     /// then queues closeRevoked() to run on the next event-loop turn so nested
     /// modals (QMessageBox::question, QMenu::exec) can unwind first. If the
     /// dialog is destroyed before that turn, the queued call is dropped with it.
+    /// Contract: a slot on this signal must not call back into TimeTracker.
+    /// The WP7c mode-change revoke fires mid-transition, inside
+    /// emitTransition(), before transitioned() and stopped() are emitted, so
+    /// the engine's own state for this transition is not yet fully published.
     void exclusiveEditRevoked();
     /// C4 fix round 2 (HIGH-1): the ONE modal error C4/R05-006 requires.
     /// Emitted by enterFatalState() on the first latch only, in place of

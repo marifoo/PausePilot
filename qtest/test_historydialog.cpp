@@ -2435,3 +2435,191 @@ void HistoryDialogTest::test_H5_today_while_running_is_read_only()
     QVERIFY(!session.setPageTimeline(today, session.pendingTimelines()[today].withSegmentType(0, DurationType::Pause)));
     QVERIFY(!session.hasEdits());
 }
+
+// ============================================================================
+// WP7c (step6_plan_revised.md): revoke History on any real mode change (U1),
+// exercised through the real HistoryDialog rather than a manually emitted
+// exclusiveEditRevoked() signal.
+// ============================================================================
+
+// A queued programmatic Start (e.g. a lock/session-restore path calling
+// straight into TimeTracker while the modal dialog is up) revokes History
+// via emitTransition(); the dialog's own queued close still lands Rejected
+// and saveHistoryDays() is never called for the pending edits.
+void HistoryDialogTest::test_WP7c_queued_start_with_pending_edits_ends_rejected_no_save()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 30));
+    FakeSessionStore fakeDb;
+
+    const QDate yesterday = QDate::currentDate().addDays(-1);
+    fakeDb.loadDurationsResult.durations.push_back(TimeDuration::fromPersistedRow(
+        DurationType::Activity, QDateTime(yesterday, QTime(9, 0, 0)), QDateTime(yesterday, QTime(9, 30, 0))));
+
+    TimeTracker tracker(settings, fakeDb);
+    QVERIFY(tracker.isStopped());
+
+    HistoryDialog dialog(tracker, settings);
+    const int page = pageIndexFor(dialog.editSession_dbg(), yesterday);
+    QVERIFY(page >= 0);
+    dialog.editSession_dbg().setCompletedType(page,
+        dialog.editSession_dbg().pendingTimelines()[page].completed()[0].segment_id, DurationType::Pause);
+    QVERIFY(dialog.editSession_dbg().hasEdits());
+
+    QSignalSpy finished(&dialog, &QDialog::finished);
+    fakeDb.callLog.clear();
+
+    // Act: a real mode change while the dialog is open, not a manual emit.
+    tracker.useTimerViaButton(Button::Start);
+
+    // Assert: revoked, and the dialog's queued close lands Rejected.
+    QVERIFY(!tracker.isDialogOpen_dbg());
+    QTRY_COMPARE(finished.count(), 1);
+    QCOMPARE(finished.last().at(0).toInt(), int(QDialog::Rejected));
+    QCOMPARE(dialog.result(), int(QDialog::Rejected));
+    QCOMPARE(fakeDb.callLog.count("saveHistoryDays"), 0);
+}
+
+// H1-style: useTimerViaButton(Start) and accept() land in the same event
+// turn, before the queued closeRevoked() runs. The synchronous
+// exclusiveEditRevoked() connection must still have set editRevoked_ in
+// time for saveChanges()'s early check to refuse accept() outright.
+void HistoryDialogTest::test_WP7c_start_and_accept_same_turn_ends_rejected_no_write()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 30));
+    FakeSessionStore fakeDb;
+
+    const QDate yesterday = QDate::currentDate().addDays(-1);
+    fakeDb.loadDurationsResult.durations.push_back(TimeDuration::fromPersistedRow(
+        DurationType::Activity, QDateTime(yesterday, QTime(9, 0, 0)), QDateTime(yesterday, QTime(9, 30, 0))));
+
+    TimeTracker tracker(settings, fakeDb);
+    QVERIFY(tracker.isStopped());
+
+    HistoryDialog dialog(tracker, settings);
+    const int page = pageIndexFor(dialog.editSession_dbg(), yesterday);
+    QVERIFY(page >= 0);
+    dialog.editSession_dbg().setCompletedType(page,
+        dialog.editSession_dbg().pendingTimelines()[page].completed()[0].segment_id, DurationType::Pause);
+    QVERIFY(dialog.editSession_dbg().hasEdits());
+
+    QSignalSpy finished(&dialog, &QDialog::finished);
+    fakeDb.callLog.clear();
+
+    // Act: revoke (via a real Start) and accept() in the same turn.
+    tracker.useTimerViaButton(Button::Start);
+    dialog.accept();
+
+    // Assert immediately: accept() must not have finished Accepted.
+    QCOMPARE(finished.count(), 0);
+    QVERIFY(dialog.result() != QDialog::Accepted);
+    QCOMPARE(fakeDb.callLog.count("saveHistoryDays"), 0);
+
+    // Process the queued close: final state is Rejected, still no write.
+    QTRY_COMPARE(finished.count(), 1);
+    QCOMPARE(finished.last().at(0).toInt(), int(QDialog::Rejected));
+    QCOMPARE(dialog.result(), int(QDialog::Rejected));
+    QCOMPARE(fakeDb.callLog.count("saveHistoryDays"), 0);
+}
+
+// Same acceptance as test_H5_revoke_during_merge_prompt_never_saves, but the
+// hook fires a real mode change (a button Start) instead of manually
+// emitting exclusiveEditRevoked() -- proving the emitTransition() revoke
+// itself reaches the nested merge-prompt event loop's late editRevoked_
+// check.
+void HistoryDialogTest::test_WP7c_merge_prompt_hook_real_mode_change_refuses_save()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 30));
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    QVERIFY(tracker.isStopped());
+
+    const QDate yesterday = QDate::currentDate().addDays(-1);
+    const TimeDuration splitSource = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(yesterday, QTime(10, 0, 0)), QDateTime(yesterday, QTime(10, 30, 0)));
+    const TimeDuration neighbour = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(yesterday, QTime(10, 30, 0)), QDateTime(yesterday, QTime(10, 45, 0)));
+    TestCommon::seedStoredRows(fakeDb, {splitSource, neighbour}, true);
+
+    HistoryDialog dialog(tracker, settings);
+    const int page = pageIndexFor(dialog.editSession_dbg(), yesterday);
+    QVERIFY(page >= 0);
+    dialog.applySplit_dbg(0, page, DurationType::Pause, DurationType::Activity);
+    QCOMPARE(dialog.editSession_dbg().pendingTimelines()[page].completed().size(), static_cast<size_t>(3));
+    QVERIFY(dialog.editSession_dbg().hasEdits());
+    QVERIFY(dialog.editSession_dbg().buildScopedSave().needsMergeConfirmation);
+
+    int promptShown = 0;
+    dialog.debugOnMergePromptShown_ = [&]() {
+        ++promptShown;
+        tracker.useTimerViaButton(Button::Start);
+    };
+    dialog.debugOverlapAnswer_ = QMessageBox::Yes;
+    QSignalSpy finished(&dialog, &QDialog::finished);
+    fakeDb.callLog.clear();
+
+    // Act
+    dialog.accept();
+
+    QCOMPARE(promptShown, 1);
+    QVERIFY(tracker.isActive());
+    QVERIFY(dialog.result() != QDialog::Accepted);
+    QTRY_COMPARE(finished.count(), 1);
+    QCOMPARE(finished.last().at(0).toInt(), int(QDialog::Rejected));
+    QCOMPARE(dialog.result(), int(QDialog::Rejected));
+    QCOMPARE(fakeDb.callLog.count("saveHistoryDays"), 0);
+    QCOMPARE(dialog.debugConflictShownCount_, 0);
+    QCOMPARE(dialog.debugCriticalShownCount_, 0);
+}
+
+// An editable-Today dialog (opened while stopped) followed by a Start:
+// History is revoked (discarding the pending edit) and the Start proceeds
+// normally.
+void HistoryDialogTest::test_WP7c_editable_today_dialog_then_start_revokes_and_start_proceeds()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 30));
+    SqliteSessionStore db(settings);
+    // FakeClock declared before TimeTracker so it outlives it.
+    FakeClock clock(fixedNow());
+    TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    QVERIFY(tracker.isStopped());
+
+    const QDate todayDate = QDate::currentDate();
+    const TimeDuration stored = TimeDuration::fromPersistedRow(DurationType::Activity,
+        QDateTime(todayDate, QTime(9, 0, 0)), QDateTime(todayDate, QTime(9, 30, 0)));
+    TestCommon::seedStoredRows(db, {stored}, true);
+
+    HistoryDialog dialog(tracker, settings);
+    auto& session = dialog.editSession_dbg();
+    const int today = currentPageIndex(session);
+    QVERIFY(today >= 0);
+    QVERIFY(session.pageEditable(today));
+    QVERIFY(session.setCompletedType(today, stored.segment_id, DurationType::Pause));
+    QVERIFY(session.hasEdits());
+
+    QSignalSpy finished(&dialog, &QDialog::finished);
+    QSignalSpy revokedSpy(&tracker, &TimeTracker::exclusiveEditRevoked);
+
+    // Act
+    tracker.useTimerViaButton(Button::Start);
+
+    // Assert: revoked once, dialog closes Rejected, and Start proceeded.
+    QCOMPARE(revokedSpy.count(), 1);
+    QVERIFY(!tracker.isDialogOpen_dbg());
+    QVERIFY(tracker.isActive());
+    QTRY_COMPARE(finished.count(), 1);
+    QCOMPARE(finished.last().at(0).toInt(), int(QDialog::Rejected));
+
+    // The pending edit was discarded: the stored row is still Activity.
+    QCOMPARE(rowFingerprint(db_path_, stored.segment_id.toString()).section('|', 0, 0).toInt(),
+             static_cast<int>(DurationType::Activity));
+}

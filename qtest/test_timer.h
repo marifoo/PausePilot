@@ -505,6 +505,27 @@ private slots:
     void test_WP3_saveHistoryEdit_timezone_change_is_conflict_no_store_call();
     void test_WP3_saveHistoryEdit_after_endExclusiveEdit_is_conflict_no_store_call();
     void test_WP3_saveHistoryEdit_after_revoke_is_conflict_no_store_call();
+    void test_WP3_saveHistoryEdit_forward_clock_date_change_before_tick_is_conflict_no_store_call();
+
+    // ====================================================================
+    // WP7c (step6_plan_revised.md): revoke History on any real mode
+    // change (U1). emitTransition() is the one place every real mode
+    // change passes through, so this is the backstop that fires whenever
+    // none of the lock/midnight/shutdown paths has already revoked.
+    // ====================================================================
+    void test_WP7c_button_start_from_none_revokes_once();
+    void test_WP7c_button_start_from_pause_revokes_once();
+    void test_WP7c_button_pause_revokes_once();
+    void test_WP7c_button_stop_revokes_once();
+    void test_WP7c_onStartPausePressed_revokes_once();
+    void test_WP7c_onStopPressed_revokes_once();
+    void test_WP7c_stop_with_failed_commit_still_revokes();
+    void test_WP7c_fatal_latch_stop_revokes_history();
+    void test_WP7c_start_while_active_does_not_revoke();
+    void test_WP7c_stop_while_stopped_does_not_revoke();
+    void test_WP7c_backward_clock_pause_refusal_does_not_revoke();
+    void test_WP7c_failed_pending_commit_retry_start_does_not_revoke();
+    void test_WP7c_start_refused_after_shutdown_does_not_revoke();
 };
 
 #endif // TEST_TIMER_H

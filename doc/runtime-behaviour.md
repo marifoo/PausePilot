@@ -28,7 +28,7 @@ stateDiagram-v2
 itself, so the GUI can react without keeping its own state:
 
 - `TimeTracker::transitioned(Transition)` — the one cause-carrying event for
-  every real mode change, button/lock/midnight/edit/shutdown-driven alike.
+  every real mode change, button/lock/midnight/shutdown-driven alike.
   `Transition` holds `from`, `to`, and a `TransitionCause` (`ButtonStart`,
   `ButtonPause`, `ButtonStop`, `LockAutopause`, `LockResume`,
   `MidnightScheduled`, `MidnightWatchdog`, `Shutdown`,
@@ -169,9 +169,21 @@ revokes History's edit, closes the dialog, and discards any unsaved changes:
   it.
 - **Shutdown/logout/SIGTERM/end-session:** the shutdown sequence revokes
   History before stopping the live segment.
+- **Any other real mode change (H5/WP7c):** Start, Pause, unpause, or Stop --
+  whether via button, toggle, or the fatal-latch stop -- revokes History as
+  the first statement of `TimeTracker::emitTransition()`, the one place every
+  real mode change passes through. This is a backstop: production only
+  reaches it when none of the paths above has already revoked first. A
+  refused or no-op request (Start while already active, Stop while stopped,
+  a backward-clock Pause refusal, a failed pending-commit retry, Start
+  refused after shutdown) never reaches `emitTransition()` and never revokes.
 
-The revoke mechanism runs **before** the engine makes any state change for the
-event. `TimeTracker::revokeExclusiveEdit()` emits `exclusiveEditRevoked()`,
+For the lock/midnight/shutdown paths, the revoke runs **before** the engine
+makes any other state change for the event. For the `emitTransition()`
+backstop, the revoke runs after the transition's own state change and
+persistence, but always before `transitioned()` is emitted -- so a slot on
+`exclusiveEditRevoked()` must not call back into `TimeTracker`. Either way,
+`TimeTracker::revokeExclusiveEdit()` emits `exclusiveEditRevoked()`,
 which synchronously sets a flag on `HistoryDialog`, then queues `closeRevoked()`
 to close any open child dialogs and menus, then closes History itself with
 `reject()`. `HistoryDialog::saveChanges()` checks the flag and refuses all

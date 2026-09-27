@@ -282,7 +282,8 @@ No backup and no `*.durations.txt` export -- this path never creates either.
 
 ### Revoked edits
 
-When the engine revokes History's edit (at lock, sleep, midnight or shutdown),
+When the engine revokes History's edit (at lock, sleep, midnight, shutdown,
+or any other real mode change -- Start, Pause, unpause or Stop; H5/WP7c),
 the dialog is flagged (`editRevoked_`) immediately. A revoke is never followed
 by a new save: `saveChanges()` checks `editRevoked_` right after the
 `result()` guard, and again immediately before calling `saveHistoryEdit()`,

@@ -99,8 +99,8 @@ void clearDataDirOverride();
 /// bypassing commitSession/replaceAll, in canonical toUtcIso text
 /// (UTC, ISODateWithMs). Does not normalize or merge -- each row is
 /// inserted exactly as given. `finalized` sets is_finalized for every row.
-/// Tests use this instead of TimeTracker::replaceAll to seed store rows
-/// (see B7/WP4b in the H5 plan).
+/// Tests use this instead of SqliteSessionStore::replaceAll to seed store
+/// rows (see B7/WP4b in the H5 plan).
 void seedStoredRows(SqliteSessionStore& db, const std::deque<TimeDuration>& rows, bool finalized);
 
 /// Fake counterpart of seedStoredRows(): appends to loadDurationsResult.durations
