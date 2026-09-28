@@ -133,7 +133,7 @@ void ContractMatrixTest::test_commitSession_disabled_returns_Disabled()
     const SessionStoreResult r = db.commitSession(Timeline(oneRow(), std::nullopt));
     QCOMPARE(r.category, SessionStoreResult::Disabled);
     QVERIFY(!r.ok());
-    // transient/fatal: cannot be injected without closing the connection externally
+    // transient: cannot be injected without closing the connection externally
 }
 
 void ContractMatrixTest::test_commitSession_callerBug_duplicate_segmentId_data()
@@ -184,7 +184,7 @@ void ContractMatrixTest::test_loadDurations_success_returns_rows()
     QCOMPARE(r.status, SessionStoreResult::Success);
     QVERIFY(!r.empty());
     // CallerBug: N/A — loadDurations takes no parameters
-    // transient/fatal: ensureOpen() or transaction failure sets TransientError (C4/R07-003)
+    // transient: ensureOpen() or transaction failure sets TransientError (C4/R07-003)
 }
 
 // Disabled: status == Disabled, durations is empty.
@@ -623,7 +623,7 @@ void ContractMatrixTest::test_hasEntriesForDate_disabled_returns_Unknown()
 
     const EntriesForDateResult r = db.hasEntriesForDate(QDate::currentDate());
     QCOMPARE(r, EntriesForDateResult::Unknown);
-    // transient/fatal: both also map to Unknown (ensureOpen failure path)
+    // transient: both also map to Unknown (ensureOpen failure path)
 }
 
 // ── saveCheckpoint ───────────────────────────────────────────────────────────
@@ -694,7 +694,7 @@ void ContractMatrixTest::test_saveCheckpoint_callerBug_empty_segmentId()
         fixedNowUtc(), fixedNowUtc().addSecs(60),
         SegmentId{});
     QCOMPARE(r.category, SessionStoreResult::CallerBug);
-    // transient/fatal: ensureOpen() failure returns TransientError (C4/R07-003)
+    // transient: ensureOpen() failure returns TransientError (C4/R07-003)
 }
 
 // C4 fix round 2 (MEDIUM-6): CallerBug wins over Disabled for an invalid
@@ -854,7 +854,7 @@ void ContractMatrixTest::test_flushToDisc_success()
     QVERIFY(r.ok());
     // CallerBug: N/A — flushToDisc takes no parameters
     // transient: PRAGMA or transaction failure, or ensureOpen() failure, both
-    // return TransientError; fatal: not distinctly returned (C4/R07-003)
+    // return TransientError (C4/R07-003)
 }
 
 // Disabled: returns Disabled.
@@ -884,7 +884,7 @@ void ContractMatrixTest::test_setLastCleanShutdownMarker_success()
     QVERIFY(r.ok());
     // CallerBug: N/A — no caller-supplied unique keys that can violate constraints
     // transient: commit/write failure, or ensureOpen() failure, both return
-    // TransientError; fatal: not distinctly returned (C4/R07-003)
+    // TransientError (C4/R07-003)
 }
 
 // Disabled: returns Disabled.
@@ -958,7 +958,7 @@ void ContractMatrixTest::test_recoverStartupCheckpoints_disabled_returns_Disable
     QCOMPARE(r.policy_dropped_count, 0);
     QCOMPARE(r.discard_dropped_count, 0);
     QVERIFY(!r.notify_user);
-    // transient/fatal: marker read failure sets status to TransientError (tested in DatabaseTest)
+    // transient: marker read failure sets status to TransientError (tested in DatabaseTest)
     // CallerBug: N/A — recoverStartupCheckpoints takes only a timestamp (cannot be wrong)
 }
 

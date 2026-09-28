@@ -6262,3 +6262,180 @@ void DatabaseTest::test_H5_WP9_old_sidecars_untouched_by_startup_and_saveHistory
     }
     QCOMPARE(dbDir.entryList(QDir::Files).size(), fileCountBefore);
 }
+
+/**
+ * WP-D: proof that a failed first checkpoint COMMIT (via setForceCommitFailure_dbg),
+ * followed by a real close and reopen, yields no recoverable row. This
+ * extends test_C2_saveCheckpoint_insert_rolls_back_on_commit_failure with
+ * the reopen and recovery verification.
+ */
+void DatabaseTest::test_D_WP_D_first_checkpoint_commit_fails_reopen_recovery_yields_nothing()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+
+    const SegmentId segId = SegmentId::mint();
+    const QDateTime start = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime end   = QDateTime(QDate(2025, 6, 1), QTime(10, 5, 0), Qt::UTC);
+
+    // Session 1: commit failure on first checkpoint insert
+    {
+        SqliteSessionStore manager(settings);
+        QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Created);
+
+        // Arrange: inject a COMMIT failure
+        manager.setForceCommitFailure_dbg(true);
+        QCOMPARE(manager.saveCheckpoint(DurationType::Activity, start, end, segId).category,
+                 SessionStoreResult::TransientError);
+
+        // Assert: no row was written (transaction rolled back)
+        QVERIFY(manager.ensureOpen_dbg());
+        QCOMPARE(countDurationsForSegment(manager, segId), 0);
+
+        manager.closeConnection_dbg();
+        // manager destructed here -- genuine close of the database file
+    }
+
+    // Session 2: reopen and recover
+    SqliteSessionStore manager2(settings);
+    QCOMPARE(manager2.checkSchemaOnStartup(), SchemaStatus::Ready);
+
+    const QDateTime now = QDateTime(QDate(2025, 6, 1), QTime(10, 10, 0), Qt::UTC);
+    const StartupRecoveryResult res = manager2.recoverStartupCheckpoints(now);
+
+    // Assert: recovery finds nothing
+    QVERIFY(res.ok());
+    QCOMPARE(res.finalized_count, 0);
+    QCOMPARE(res.recovered_msec, qint64(0));
+    QVERIFY(!res.notify_user);
+
+    QVERIFY(manager2.ensureOpen_dbg());
+    QCOMPARE(countDurationsForSegment(manager2, segId), 0);
+
+    manager2.closeConnection_dbg();
+}
+
+/**
+ * WP-D: proof that a failed COMMIT followed by a failed ROLLBACK (the
+ * ambiguous compound-failure case) closes the connection, and a fresh
+ * recovery finds no rows. After reconnect, the transaction was never
+ * persisted.
+ */
+void DatabaseTest::test_D_WP_D_first_checkpoint_commit_and_rollback_fail_connection_closed()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    SqliteSessionStore manager(settings);
+
+    // Arrange: ensure schema is initialized
+    QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Created);
+
+    const SegmentId segId = SegmentId::mint();
+    const QDateTime start = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime end   = QDateTime(QDate(2025, 6, 1), QTime(10, 5, 0), Qt::UTC);
+
+    // Arrange: set both commit and rollback to fail
+    manager.setForceCommitFailure_dbg(true);
+    manager.setForceRollbackFailure_dbg(true);
+
+    // Act: the first checkpoint attempt fails (compound failure: commit and rollback both fail)
+    QCOMPARE(manager.saveCheckpoint(DurationType::Activity, start, end, segId).category,
+             SessionStoreResult::TransientError);
+
+    // Assert: after the compound failure, the connection is closed and will need reconnect.
+    QVERIFY(!manager.rawDb_dbg().isOpen());
+    // ensureOpen_dbg() will handle the reconnect, and then no row should exist
+    // (the failed transaction was never persisted due to the rollback failure).
+    QVERIFY(manager.ensureOpen_dbg());
+    QCOMPARE(countDurationsForSegment(manager, segId), 0);
+
+    manager.closeConnection_dbg();
+
+    // Act 2: create a fresh store and recover
+    SqliteSessionStore manager2(settings);
+    QCOMPARE(manager2.checkSchemaOnStartup(), SchemaStatus::Ready);
+
+    const QDateTime now = QDateTime(QDate(2025, 6, 1), QTime(10, 10, 0), Qt::UTC);
+    const StartupRecoveryResult res = manager2.recoverStartupCheckpoints(now);
+
+    // Assert: recovery finds nothing to finalize - the transaction was never persisted
+    QVERIFY(res.ok());
+    QCOMPARE(res.finalized_count, 0);
+    QCOMPARE(res.recovered_msec, qint64(0));
+
+    manager2.closeConnection_dbg();
+}
+
+/**
+ * WP-D: proof that a failed first checkpoint with a real BEFORE INSERT trigger
+ * leaves no recoverable row. The trigger blocks the INSERT, the transaction
+ * rolls back, and after reopening with a fresh store instance and running
+ * recovery, no rows remain and recovery yields nothing.
+ */
+void DatabaseTest::test_D_WP_D_first_checkpoint_trigger_blocks_insert_recovery_yields_nothing()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+
+    const SegmentId segId = SegmentId::mint();
+    const QDateTime start = QDateTime(QDate(2025, 6, 1), QTime(10, 0, 0), Qt::UTC);
+    const QDateTime end   = QDateTime(QDate(2025, 6, 1), QTime(10, 5, 0), Qt::UTC);
+
+    // Session 1: trigger blocks the first checkpoint insert
+    {
+        SqliteSessionStore manager(settings);
+        QCOMPARE(manager.checkSchemaOnStartup(), SchemaStatus::Created);
+
+        // Arrange: create a BEFORE INSERT trigger that raises ABORT
+        QVERIFY(manager.ensureOpen_dbg());
+        QSqlQuery trig(manager.rawDb_dbg());
+        // Use RAISE(ABORT) in a BEFORE INSERT trigger to block the INSERT.
+        // This matches the pattern at test_database.cpp:1829 (BEFORE UPDATE trigger).
+        QVERIFY(trig.exec(
+            "CREATE TRIGGER block_first_checkpoint_insert BEFORE INSERT ON durations "
+            "BEGIN SELECT RAISE(ABORT, 'WP-D test: blocked insert'); END"
+        ));
+
+        // Act: attempt first checkpoint insert -- trigger blocks it
+        // Note: a BEFORE INSERT trigger raising ABORT returns SQLite error code 19
+        // (SQLITE_CONSTRAINT), which the code interprets as a caller bug.
+        QCOMPARE(manager.saveCheckpoint(DurationType::Activity, start, end, segId).category,
+                 SessionStoreResult::CallerBug);
+
+        // Assert: no row was written (transaction rolled back by trigger)
+        QCOMPARE(countDurationsForSegment(manager, segId), 0);
+
+        // Clean up: drop the trigger
+        QVERIFY(trig.exec("DROP TRIGGER block_first_checkpoint_insert"));
+
+        manager.closeConnection_dbg();
+        // manager destructed here -- genuine close of the database file
+    }
+
+    // Session 2: reopen with fresh store instance and recover
+    SqliteSessionStore manager2(settings);
+    QCOMPARE(manager2.checkSchemaOnStartup(), SchemaStatus::Ready);
+
+    // Assert: before recovery, still no rows
+    QCOMPARE(countDurationsForSegment(manager2, segId), 0);
+
+    const QDateTime now = QDateTime(QDate(2025, 6, 1), QTime(10, 10, 0), Qt::UTC);
+    const StartupRecoveryResult res = manager2.recoverStartupCheckpoints(now);
+
+    // Assert: recovery finds nothing
+    QVERIFY(res.ok());
+    QCOMPARE(res.finalized_count, 0);
+    QCOMPARE(res.recovered_msec, qint64(0));
+
+    // Assert: after recovery, still no rows
+    QVERIFY(manager2.ensureOpen_dbg());
+    QCOMPARE(countDurationsForSegment(manager2, segId), 0);
+
+    manager2.closeConnection_dbg();
+}

@@ -49,7 +49,7 @@ private slots:
     // (precedence rule in sessionstore.h), not just checked first by luck.
     void test_commitSession_callerBug_duplicate_segmentId_data();
     void test_commitSession_callerBug_duplicate_segmentId();
-    // transient/fatal: ensureOpen failure now consistently returns TransientError
+    // transient: ensureOpen failure now consistently returns TransientError
     // (C4/R07-003, see test_C4_ensureOpen_failure_classified_consistently).
 
     // ── loadDurations ────────────────────────────────────────────────
@@ -57,7 +57,6 @@ private slots:
     void test_loadDurations_disabled_returns_Disabled_and_empty();
     // transient: query/transaction failure, or ensureOpen() failure (C4/R07-003),
     // sets TransientError (see test_C4_ensureOpen_failure_classified_consistently)
-    // fatal: not distinctly returned; see C4/R07-003
     // CallerBug: N/A — loadDurations takes no caller-supplied parameters
 
     // ── loadHistoryRows (H5/WP1) ─────────────────────────────────────
@@ -83,7 +82,7 @@ private slots:
     void test_hasEntriesForDate_returns_Yes_when_entry_exists();
     void test_hasEntriesForDate_returns_No_when_no_entry();
     void test_hasEntriesForDate_disabled_returns_Unknown();
-    // transient/fatal: both map to Unknown (ensureOpen failure → Unknown)
+    // transient: both map to Unknown (ensureOpen failure → Unknown)
     // CallerBug: N/A — no session-specific keys
 
     // ── saveCheckpoint ──────────────────────────────────────────────
@@ -101,7 +100,6 @@ private slots:
     void test_saveCheckpoint_callerBug_invalid_interval_data();
     void test_saveCheckpoint_callerBug_invalid_interval();
     // transient: ensureOpen() failure (C4/R07-003) or other SQL failure
-    // fatal: not distinctly returned; see C4/R07-003
 
     // ── discardCheckpoint (C4/R05-005/R02-003: was entirely missing) ──
     void test_discardCheckpoint_success_removes_row();
@@ -110,7 +108,7 @@ private slots:
     // enabled AND disabled so the ordering is actually asserted.
     void test_discardCheckpoint_callerBug_empty_segmentId_data();
     void test_discardCheckpoint_callerBug_empty_segmentId();
-    // transient/fatal: ensureOpen() failure returns TransientError (already
+    // transient: ensureOpen() failure returns TransientError (already
     // covered by the concrete implementation's ensureOpen()-consistency, see below)
 
     // ── checkSchemaOnStartup (C4/R05-005/R02-003: was entirely missing) ──
@@ -124,7 +122,6 @@ private slots:
     void test_flushToDisc_disabled_returns_Disabled();
     // transient: PRAGMA/transaction failure, or ensureOpen() failure (C4/R07-003),
     // returns TransientError (see test_C4_ensureOpen_failure_classified_consistently)
-    // fatal: not distinctly returned; see C4/R07-003
     // CallerBug: N/A — flushToDisc takes no parameters
 
     // ── setLastCleanShutdownMarker ───────────────────────────────────
@@ -132,7 +129,6 @@ private slots:
     void test_setLastCleanShutdownMarker_disabled_returns_Disabled();
     // transient: commit/write failure, or ensureOpen() failure (C4/R07-003),
     // returns TransientError (see test_C4_ensureOpen_failure_classified_consistently)
-    // fatal: not distinctly returned; see C4/R07-003
     // CallerBug: N/A — no keys that can violate constraints
 
     // ── markCleanShutdown (D6/R05-002/R15-004) ────────────────────────
@@ -143,14 +139,13 @@ private slots:
     // transient: covered by ShutdownCoordinatorTest (injected marker/flush
     // failure via FakeSessionStore) and DatabaseTest's real-store marker
     // reopen test; not duplicated here.
-    // fatal: not distinctly returned; see C4/R07-003
     // CallerBug: N/A — markCleanShutdown takes no caller-supplied parameters
 
     // ── recoverStartupCheckpoints ────────────────────────────────────
     // success (no orphans): already covered by DatabaseTest
     // disabled: returns status == Disabled with zero counts (B2)
     void test_recoverStartupCheckpoints_disabled_returns_Disabled();
-    // transient/fatal/CallerBug: marker read failure sets status to
+    // transient/CallerBug: marker read failure sets status to
     // TransientError (covered by DatabaseTest, and by this matrix's
     // "recoverStartupCheckpoints_via_marker_read" row below, which is what
     // that row actually exercises). The SEPARATE dedicated ensureOpen()

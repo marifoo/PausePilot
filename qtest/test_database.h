@@ -308,6 +308,11 @@ private slots:
     // must be untouched (same size and mtime) and no new one may appear,
     // across both checkSchemaOnStartup() and a successful saveHistoryDays().
     void test_H5_WP9_old_sidecars_untouched_by_startup_and_saveHistoryDays();
+
+    // WP-D: proofs that a failed first checkpoint leaves no recoverable row
+    void test_D_WP_D_first_checkpoint_commit_fails_reopen_recovery_yields_nothing();
+    void test_D_WP_D_first_checkpoint_commit_and_rollback_fail_connection_closed();
+    void test_D_WP_D_first_checkpoint_trigger_blocks_insert_recovery_yields_nothing();
 };
 
 #endif // TEST_DATABASE_H

@@ -115,7 +115,7 @@ subsystem: `DayBoundaryWatcher`. Both checks below run purely from the
    later failed or `Disabled` checkpoint attempt never erases an earlier
    confirmed prefix; segment rotation (Pause/unpause/Stop) always clears it.
    With no usable prefix, the whole segment is discarded exactly as before,
-   with a durable discard intent (`PendingDiscards`/`discard_intents`). The
+   with a discard intent recorded durably once its database insert commits (`PendingDiscards`/`discard_intents`). The
    same prefix-or-discard rule applies to a Shutdown or Button-driven close
    that finds a missed midnight, not only the watchdog tick.
 
@@ -227,7 +227,7 @@ the gap since the last confirmed prefix.
   unverified tail after it. If the lock-instant write failed (or History
   persistence is `Disabled`), there is no confirmed prefix and the overnight
   tick discards the **whole segment**, including the evening's Activity, with
-  a durable discard intent.
+  a discard intent recorded durably once its database insert commits.
 - **Sleep across midnight without a lock:** the tick revokes any open History,
   then keeps the last successfully checkpointed same-day prefix of the
   segment (the periodic 5-minute Activity checkpoint) if one exists, else
