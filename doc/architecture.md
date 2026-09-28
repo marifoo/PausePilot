@@ -83,7 +83,7 @@ Each box in one or two lines:
 - **`HistoryDialog`** — modal editor for the persisted timeline; opens
   lazily from `ContentWidget`. Listens for `TimeTracker::exclusiveEditRevoked()`
   and closes, discarding unsaved edits, when the engine closes History due to
-  lock, sleep, midnight, or shutdown. Builds its model
+  lock, sleep, midnight, shutdown, or any mode change. Builds its model
   (`HistoryEditSession::buildFromContext()`) from the open-time
   `HistoryEditContext` `TimeTracker::beginExclusiveEdit()` captures, and saves
   a per-date diff (`buildScopedSave()`) via `TimeTracker::saveHistoryEdit()`

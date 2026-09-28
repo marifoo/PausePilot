@@ -129,6 +129,16 @@ private slots:
     // HistoryDialog immediately, so lock bookkeeping runs exactly as it
     // would with no dialog open.
     void test_history_closes_on_lock_while_idle();
+
+    // M1 (final adversarial review): mainwin.cpp's connect(health_monitor_,
+    // &HealthMonitor::warningTriggered, this, &MainWin::showMsgBox) must be
+    // Qt::QueuedConnection, or the health-warning modal's nested
+    // QMessageBox::exec() runs INSIDE the single heartbeat QTimer's own
+    // onTick() slot, and Qt will not re-fire that same timer while its slot
+    // is still on the stack -- stalling TimeTracker::onTick (scheduled stop,
+    // watchdog, forward-date History revoke) for as long as the modal stays
+    // open.
+    void test_heartbeat_keeps_ticking_while_health_warning_modal_is_open();
 };
 
 #endif // TEST_APPSHELL_H

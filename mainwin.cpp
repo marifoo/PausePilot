@@ -41,7 +41,14 @@ MainWin::MainWin(Settings& settings, TimeTracker& timetracker, SessionStore& db,
 	setWindowTitle("µTimer");
 	setWindowFlags(windowFlags() &(~Qt::WindowMaximizeButtonHint));
 
-	connect(health_monitor_, &HealthMonitor::warningTriggered, this, &MainWin::showMsgBox);
+	// Queued: showMsgBox's QMessageBox::exec() opens a nested event loop. If
+	// this ran as a direct connection inside the 100ms heartbeat's onTick()
+	// slot, Qt would not re-fire that same timer while its slot is still on
+	// the stack, so TimeTracker::onTick (scheduled stop, watchdog, forward-
+	// date History revoke) and LockStateWatcher::update would stall for as
+	// long as the modal is open.
+	connect(health_monitor_, &HealthMonitor::warningTriggered, this, &MainWin::showMsgBox,
+	        Qt::QueuedConnection);
 
 	// Re-arm the health warnings when a session ends so they can fire again in
 	// the next session (at most once per session, not once per app lifetime).

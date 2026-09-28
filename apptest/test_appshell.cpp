@@ -1492,6 +1492,103 @@ void AppShellTest::test_mainwin_stopped_rearms_health_monitor_through_real_wirin
 }
 
 // ============================================================================
+// M1 (final adversarial review, C5 regression): reproduces main.cpp's real
+// wiring -- a single QTimer connected first to MainWin::onTick, then to a
+// lambda mirroring main.cpp's TimeTracker::onTick(now) connection -- and
+// proves the heartbeat keeps delivering TimeTracker::onTick while a real
+// health-warning modal is open. Before the fix, HealthMonitor::
+// warningTriggered -> MainWin::showMsgBox was a direct connection, so
+// showMsgBox's QMessageBox::exec() ran INSIDE onTick(), which is itself
+// running as the timer's own slot; Qt does not re-fire a timer while its own
+// slot is still on the stack, so the second connection (the TimeTracker
+// lambda) never got dispatched for as long as the modal stayed open.
+// ============================================================================
+
+void AppShellTest::test_heartbeat_keeps_ticking_while_health_warning_modal_is_open()
+{
+    // Arrange: same baseline as the rearm test above -- only the
+    // too-much-activity warning enabled, threshold crossed via FakeClock
+    // before the heartbeat starts so the very first tick triggers it.
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("uTimer/show_warning_after_9h45min_activity", true);
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(0, 30, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, fakeDb);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+    MainWin mainWin(settings, tracker, fakeDb, coordinator);
+
+    HealthMonitor* healthMonitor = mainWin.findChild<HealthMonitor*>();
+    QVERIFY2(healthMonitor, "MainWin's HealthMonitor child must be reachable via findChild");
+    healthMonitor->reset();
+
+    // Unlike the rearm test, the modal-showing connection is left intact --
+    // it is exactly what this test exercises.
+    tracker.useTimerViaButton(Button::Start);
+    constexpr qint64 kThresholdMsec = (9 * 60 + 45) * 60000LL; // 9h45m, fixed in Settings.
+    clock.advance(kThresholdMsec + 60000);
+
+    // Act: wire a single real QTimer exactly as main.cpp does -- MainWin::
+    // onTick connected first, then a lambda standing in for main.cpp's
+    // `time_tracker.onTick(QDateTime::currentDateTime())` connection -- and
+    // count how many times the TimeTracker side fires.
+    QTimer heartbeat;
+    QObject::connect(&heartbeat, &QTimer::timeout, &mainWin, &MainWin::onTick);
+    int tickCount = 0;
+    QObject::connect(&heartbeat, &QTimer::timeout, [&]() {
+        tracker.onTick(clock.now());
+        ++tickCount;
+    });
+    heartbeat.start(15);
+
+    // Auto-close the modal like other apptest modal tests, but only after it
+    // has stayed open for several heartbeat intervals -- long enough that,
+    // if the heartbeat were stalled, no extra ticks would have landed by
+    // then. A watchdog bounds the whole wait so a regression that never
+    // shows the modal fails the test instead of hanging the suite.
+    int tickAtModalOpen = -1;
+    QElapsedTimer sinceModalOpen;
+    QTimer closePoller;
+    closePoller.setInterval(5);
+    QObject::connect(&closePoller, &QTimer::timeout, [&]() {
+        QMessageBox* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+        if (!box) return;
+        if (tickAtModalOpen < 0) {
+            tickAtModalOpen = tickCount;
+            sinceModalOpen.start();
+            return;
+        }
+        if (sinceModalOpen.elapsed() < 150) return; // ~10 heartbeat intervals.
+        closePoller.stop();
+        box->accept();
+    });
+    closePoller.start();
+
+    QElapsedTimer watchdog;
+    watchdog.start();
+    while (closePoller.isActive() && watchdog.elapsed() < 5000) {
+        QTest::qWait(5);
+    }
+    heartbeat.stop();
+
+    // Assert: the modal appeared, and the heartbeat-driven TimeTracker side
+    // kept firing while it was open.
+    QVERIFY2(tickAtModalOpen >= 0,
+              "the health-warning modal never appeared within the watchdog window");
+    QVERIFY2(tickCount - tickAtModalOpen >= 2,
+              "TimeTracker::onTick did not fire while the health-warning modal was open -- "
+              "the heartbeat is stalled (see mainwin.cpp's warningTriggered connection)");
+
+    // Cleanup
+    tracker.useTimerViaButton(Button::Stop);
+}
+
+// ============================================================================
 // WP3 (midnight_close_plan.md): the midnight revoke must close a real
 // HistoryDialog even while a nested QMessageBox::question() is the active
 // modal on top of it -- HistoryDialog::closeRevoked() rejects every visible

@@ -398,7 +398,7 @@ void HistoryDialog::setupUI()
 }
 
 /**
- * Builds the banner message shown when loadDurations encountered corrupt rows.
+ * Builds the banner message shown when loadHistoryRows encountered corrupt rows.
  */
 QString HistoryDialog::buildLoadReconciliationMessage() const
 {

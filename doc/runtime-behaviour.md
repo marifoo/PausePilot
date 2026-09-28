@@ -53,10 +53,12 @@ its `timeout()` signal:
 
 1. **`MainWin::onTick`** — refreshes the time labels and tooltips by reading
    the current snapshot from `TimeTracker`.
-2. **`TimeTracker::onTick`** — calls `DayBoundaryWatcher::tick` (the cross-midnight
-   watchdog). This is the *only* path that runs `TimeTracker` code from the
-   heartbeat; mode transitions are still driven exclusively by buttons and
-   lock events.
+2. **`TimeTracker::onTick`** — calls `DayBoundaryWatcher::tick`, which owns the
+   forward-date History revoke, the 23:59:59.500 scheduled stop, and the
+   cross-midnight watchdog for a segment that started on a prior local date.
+   This is the *only* path that runs `TimeTracker` code from the heartbeat;
+   mode transitions are otherwise driven exclusively by buttons and lock
+   events.
 3. **`LockStateWatcher::update`** — polls the OS lock state, pushes the
    boolean through the 5-tick debounce buffer, and emits at most one
    `desktopLockEvent` per tick.

@@ -29,9 +29,9 @@ public:
     /// the save path. Atomically re-arms the coordinator's own guard so a
     /// later run() executes the full save path again, AND clears
     /// TimeTracker's terminal shutdown_called_ flag so the application
-    /// returns to an ordinary, fully usable stopped state (History can save
-    /// immediately, with no new Start required). Does not reconstruct or
-    /// resume the ended session -- pending persistence stays governed by
+    /// returns to an ordinary, fully usable stopped state, with no new Start
+    /// required. Does not reconstruct or resume the ended session -- pending
+    /// persistence stays governed by
     /// A2/A3 and is retried at the next Start, not here.
     void cancelShutdown();
 

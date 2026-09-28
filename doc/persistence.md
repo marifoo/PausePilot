@@ -70,11 +70,15 @@ treats this as an upsert keyed by `segment_id`:
   and `is_finalized` is forced to `0` so the row remains "in-progress".
 - Otherwise, a new row is inserted with `is_finalized = 0`.
 
-When the segment closes (the user stops, autopause kicks in, or the
-day-boundary watcher fires), `TimeTracker` calls `commitSession`, which goes
-through `updateDurationsById`. That path writes `is_finalized = 1` for the
-same `segment_id`, atomically promoting the checkpoint row to a finalized
-entry — no second row is created, no orphan is left behind.
+When the segment closes normally (the user stops, autopause kicks in, or the
+scheduled midnight stop fires on the same local day it started), `TimeTracker`
+calls `commitSession`, which goes through `updateDurationsById`. That path
+writes `is_finalized = 1` for the same `segment_id`, atomically promoting the
+checkpoint row to a finalized entry — no second row is created. A segment
+that is still open from a *prior* local date instead reaches the
+cross-midnight watchdog (`discardCrossMidnightOngoingAndStop`), which closes
+at the confirmed checkpoint prefix if any, else discards the segment under a
+durable discard intent (see "Orphan reconciliation on startup" and C3).
 
 Checkpoints exist for crash recovery: if the process dies between
 checkpoint-and-finalize, the next startup can recover most of the
@@ -330,7 +334,8 @@ owner of writing the clean-shutdown marker) are called only by
 itself. `loadHistoryRows` is a separate read-only seam: it returns every row
 exactly as stored (finalized, unfinalized, multi-boundary, and malformed
 alike), never deletes or repairs anything, and is used by History's
-date-scoped editor rather than by `TimeTracker`. `saveHistoryDays` (H5/WP2,
+date-scoped editor as well as by `TimeTracker::beginExclusiveEdit`/
+`saveHistoryEdit`. `saveHistoryDays` (H5/WP2,
 see "Scoped History save" above) is the date-scoped write counterpart to
 `loadHistoryRows`; `HistoryDialog` saves through it exclusively (H5/WP5).
 That is what makes `FakeSessionStore` in `qtest/` viable: it can
