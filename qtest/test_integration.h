@@ -75,6 +75,19 @@ private slots:
     // as credited history.
     void test_A4_watchdog_discard_failure_survives_reopen_never_credited();
 
+    // WP-C 1: a confirmed prefix whose final same-ID close write fails (a
+    // real, persistent SQLite trigger blocks the finalizing UPDATE) is
+    // retained as a pending commit; after Exit Anyway and a real reopen,
+    // startup recovery finalizes exactly that persisted prefix.
+    void test_C3_failed_prefix_finalization_then_crash_recovers_prefix();
+
+    // WP-C 2: with no confirmed prefix, a real, persistent trigger blocks
+    // the discard-intent INSERT itself (before it can commit). After Exit
+    // Anyway and a real reopen, the possibly-persisted orphan row is
+    // finalized by ordinary startup recovery -- the accepted, rare overcount
+    // from the C3 compound-failure decision, not a startup warning.
+    void test_C3_intent_insert_failure_then_crash_recovers_row_overcount_accepted();
+
     // M4: a real SqliteSessionStore + TimeTracker over a seeded cross-day
     // orphan (no discard intent) reports the non-discard policy-drop count
     // at the tracker boundary mainwin.cpp reads, while the old recovered-time

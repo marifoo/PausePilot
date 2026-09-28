@@ -32,6 +32,13 @@ private slots:
     // (needs the logger's one-time file open already done) and before Test E
     // (which permanently disables logging).
     void test_settings_repair_diagnostics_reach_the_log();
+    // C3: a discard-intent INSERT failure must synchronously log the "NOT
+    // recorded / possible overcount" line before discardCheckpoint()
+    // returns, and a post-intent row-delete failure must log a distinct
+    // "intent recorded / row delete failed" line. Must run after Test A1
+    // (needs the logger's one-time file open already done) and before Test E
+    // (which permanently disables logging).
+    void test_c3_discard_intent_insert_failure_is_logged_and_flushed();
     // Test E: the first write/flush failure disables file logging for the
     // rest of the process. Must run LAST -- it permanently disables Logger.
     void test_e_forced_write_failure_disables_logging_permanently();

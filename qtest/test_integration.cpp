@@ -1209,7 +1209,7 @@ void IntegrationTest::test_bootCredit_suppressed_by_legacy_cross_midnight_row_on
         SqliteSessionStore db(settings);
         // D11: this row deliberately crosses local midnight (the legacy,
         // out-of-contract shape under test), so it would be rejected by
-        // commitSession()'s/replaceAll()'s day-validity guard. Seed it via
+        // commitSession()'s day-validity guard. Seed it via
         // scoped raw SQL (the established fixture pattern for legacy
         // cross-midnight rows) instead of a dbg wrapper.
         QVERIFY(db.ensureOpen_dbg());
@@ -1457,6 +1457,214 @@ void IntegrationTest::test_A4_watchdog_discard_failure_survives_reopen_never_cre
     SqliteSessionStore db3(settings);
     auto loaded = db3.loadDurations();
     QVERIFY(loaded.empty());
+}
+
+// WP-C 1 (C3 compound-failure decision): a confirmed same-day prefix whose
+// final same-ID close write fails must not be lost. A persistent SQLite
+// trigger (unlike the one-shot commit-failure seam) blocks the finalizing
+// UPDATE, so the watchdog tick leaves the prefix as a retained pending
+// commit. Exit Anyway ends the process with the fault still in place; a
+// real reopen with the trigger dropped must let ordinary startup recovery
+// finalize exactly that persisted prefix -- no more, no less, and no
+// cross-day row.
+void IntegrationTest::test_C3_failed_prefix_finalization_then_crash_recovers_prefix()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    SegmentId segId;
+    const QDateTime start(QDate(2025, 6, 1), QTime(23, 40, 0), Qt::LocalTime);
+    const QDateTime checkpointEnd(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+
+    {
+        Settings settings(settingsPath);
+        SqliteSessionStore db(settings);
+        // FakeClock declared before TimeTracker: see outlives-tracker note above
+        FakeClock clock(start);
+        TimeTracker tracker(settings, db);
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+        tracker.useTimerViaButton(Button::Start);
+        clock.setNow(checkpointEnd);
+        tracker.triggerCheckpoint_dbg();
+        QVERIFY(tracker.getOngoingDuration().has_value());
+        segId = tracker.getOngoingDuration()->segment_id;
+        {
+            auto orphans = db.loadUnfinalizedCheckpoints_dbg();
+            QCOMPARE(orphans.size(), static_cast<size_t>(1));
+            QCOMPARE(orphans[0].segment_id, segId);
+        }
+
+        // Block the finalizing UPDATE with a persistent trigger.
+        QVERIFY(db.ensureOpen_dbg());
+        QSqlQuery trig(db.rawDb_dbg());
+        QVERIFY(trig.exec(
+            "CREATE TRIGGER block_finalize_c3_test BEFORE UPDATE ON durations "
+            "BEGIN SELECT RAISE(ABORT, 'c3 test: blocked finalize'); END"
+        ));
+
+        const QDateTime nextTick(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime);
+        clock.setNow(nextTick);
+        tracker.onTick(nextTick);
+
+        QVERIFY(tracker.isStopped());
+        QVERIFY(tracker.hasPendingCommit_dbg());
+
+        ShutdownCoordinator coordinator(tracker, db);
+        const DrainResult result = coordinator.run();
+        QVERIFY(!result.clean());
+        // tracker/db destruct here with the finalizing UPDATE still blocked
+        // -- the destructor's own last-resort drain re-attempts and also
+        // fails (shutdown_called_ is already true from run(), so no
+        // orchestration-bug assert fires). The confirmed prefix is
+        // genuinely not yet finalized in-process, only durably checkpointed.
+    }
+
+    {
+        // Drop the trigger via a fresh connection before the real reopen.
+        Settings settings(settingsPath);
+        SqliteSessionStore dbFix(settings);
+        QVERIFY(dbFix.ensureOpen_dbg());
+        QSqlQuery drop(dbFix.rawDb_dbg());
+        QVERIFY(drop.exec("DROP TRIGGER block_finalize_c3_test"));
+        dbFix.closeConnection_dbg();
+    }
+
+    {
+        // Session 2: real reopen. Startup recovery must finalize exactly the
+        // persisted 10-minute prefix -- nothing from the unverified tail,
+        // and no cross-day row.
+        Settings settings(settingsPath);
+        SqliteSessionStore db(settings);
+        const QDateTime reopenNow(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime);
+        FakeClock clock(reopenNow);
+        TimeTracker tracker(settings, db);
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+        tracker.initializeFromStore();
+
+        QCOMPARE(tracker.getStartupRecoveredMsec(), static_cast<qint64>(10 * 60 * 1000));
+        QVERIFY(tracker.shouldShowStartupRecoveryNotification());
+
+        SqliteSessionStore db2(settings);
+        auto loaded = db2.loadDurations();
+        QCOMPARE(loaded.size(), static_cast<size_t>(1));
+        QCOMPARE(loaded[0].segment_id.toString(), segId.toString());
+        QCOMPARE(loaded[0].startTime, start);
+        QCOMPARE(loaded[0].endTime, checkpointEnd);
+    }
+}
+
+// WP-C 2 (C3 compound-failure decision): with no confirmed prefix, the
+// engine takes the discard path. A persistent trigger blocks the
+// discard-intent INSERT itself, so neither this call nor the destructor's
+// last-resort retry ever commits the tombstone before the process ends
+// (Exit Anyway). A real reopen with the trigger dropped finds only a
+// possibly-persisted, unfinalized, positive, same-day, non-overlapping row
+// with no discard intent -- ordinary startup recovery cannot distinguish it
+// from a genuine crash orphan, so it finalizes it. This is the accepted,
+// rare overcount from the C3 compound-failure decision: no discard-safety
+// guarantee is claimed before the intent commits, and startup gives only
+// its ordinary recovered-work notice, not a special warning.
+void IntegrationTest::test_C3_intent_insert_failure_then_crash_recovers_row_overcount_accepted()
+{
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    SegmentId segId;
+    const QDateTime start(QDate(2025, 6, 1), QTime(23, 40, 0), Qt::LocalTime);
+    const QDateTime orphanEnd(QDate(2025, 6, 1), QTime(23, 50, 0), Qt::LocalTime);
+
+    {
+        Settings settings(settingsPath);
+        SqliteSessionStore db(settings);
+        // FakeClock declared before TimeTracker: see outlives-tracker note above
+        FakeClock clock(start);
+        TimeTracker tracker(settings, db);
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+        tracker.useTimerViaButton(Button::Start);
+        clock.setNow(orphanEnd);
+        QVERIFY(tracker.getOngoingDuration().has_value());
+        segId = tracker.getOngoingDuration()->segment_id;
+
+        // C3: no successful checkpoint -- raw-seed a same-ID unfinalized
+        // orphan row directly, modeling a "possibly persisted" write (e.g.
+        // an earlier ambiguous I/O) rather than an engine-confirmed one.
+        QVERIFY(db.ensureOpen_dbg());
+        {
+            QSqlQuery q(db.rawDb_dbg());
+            q.prepare("INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+                      "VALUES (:seg, 0, :s, :e, 0)");
+            q.bindValue(":seg", segId.toString());
+            q.bindValue(":s", start.toUTC().toString(Qt::ISODateWithMs));
+            q.bindValue(":e", orphanEnd.toUTC().toString(Qt::ISODateWithMs));
+            QVERIFY(q.exec());
+        }
+
+        // Block the discard-intent INSERT itself with a persistent trigger.
+        QSqlQuery trig(db.rawDb_dbg());
+        QVERIFY(trig.exec(
+            "CREATE TRIGGER block_intent_insert_c3_test BEFORE INSERT ON discard_intents "
+            "BEGIN SELECT RAISE(ABORT, 'c3 test: blocked intent insert'); END"
+        ));
+
+        const QDateTime nextTick(QDate(2025, 6, 2), QTime(0, 5, 0), Qt::LocalTime);
+        clock.setNow(nextTick);
+        tracker.onTick(nextTick);
+
+        QVERIFY(tracker.hasPendingDiscards_dbg());
+
+        ShutdownCoordinator coordinator(tracker, db);
+        const DrainResult result = coordinator.run();
+        QVERIFY(!result.clean());
+        // tracker/db destruct here with the intent INSERT still blocked --
+        // the destructor's own last-resort drain re-attempts and also
+        // fails. No discard intent was ever durably recorded for this
+        // segment; only its unfinalized row is on disk.
+    }
+
+    {
+        // Drop the trigger via a fresh connection before the real reopen.
+        Settings settings(settingsPath);
+        SqliteSessionStore dbFix(settings);
+        QVERIFY(dbFix.ensureOpen_dbg());
+        QSqlQuery drop(dbFix.rawDb_dbg());
+        QVERIFY(drop.exec("DROP TRIGGER block_intent_insert_c3_test"));
+        dbFix.closeConnection_dbg();
+    }
+
+    {
+        // Session 2: real reopen. With no discard intent on record, ordinary
+        // startup recovery cannot tell this row apart from a genuine crash
+        // orphan, so it finalizes it -- the accepted overcount.
+        Settings settings(settingsPath);
+        SqliteSessionStore db(settings);
+        const QDateTime reopenNow(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime);
+        FakeClock clock(reopenNow);
+        TimeTracker tracker(settings, db);
+        tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+        tracker.initializeFromStore();
+
+        QCOMPARE(tracker.getStartupRecoveredMsec(), static_cast<qint64>(10 * 60 * 1000));
+        QVERIFY(tracker.shouldShowStartupRecoveryNotification());
+        QCOMPARE(tracker.getStartupPolicyDroppedCount(), 0);
+
+        SqliteSessionStore db2(settings);
+        auto loaded = db2.loadDurations();
+        QCOMPARE(loaded.size(), static_cast<size_t>(1));
+        QCOMPARE(loaded[0].segment_id.toString(), segId.toString());
+        QCOMPARE(loaded[0].startTime, start);
+        QCOMPARE(loaded[0].endTime, orphanEnd);
+
+        QVERIFY(db.ensureOpen_dbg());
+        QSqlQuery countIntents(db.rawDb_dbg());
+        QVERIFY(countIntents.exec("SELECT COUNT(*) FROM discard_intents"));
+        QVERIFY(countIntents.next());
+        QCOMPARE(countIntents.value(0).toInt(), 0);
+        db.closeConnection_dbg();
+    }
 }
 
 /**

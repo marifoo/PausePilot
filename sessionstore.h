@@ -479,8 +479,14 @@ public:
     /// (R05-001): implementations own recording it (e.g. a store-owned tombstone)
     /// before attempting the physical row delete, and startup recovery must honor
     /// any unresolved intent it finds -- deleting only a matching unfinalized row,
-    /// never a finalized one. Returning TransientError therefore does
-    /// not mean the intent was lost; the caller retains the segment id and may
+    /// never a finalized one. Returning TransientError does not tell you which
+    /// side of the intent write it came from: it may be returned before the
+    /// intent was recorded at all, or after the intent committed but the row
+    /// delete failed. Only once the intent has committed is a later crash
+    /// safe -- before that, the caller's in-memory retry is the only
+    /// protection, and a crash may let startup recovery restore the row (an
+    /// accepted, rare overcount; see the C3 logging contract on the SQLite
+    /// implementation). The caller retains the segment id and may
     /// call this again -- both the tombstone write and the row delete are
     /// idempotent, so repeated calls are safe.
     /// Returns Disabled when history storage is off (no-op, not an error).

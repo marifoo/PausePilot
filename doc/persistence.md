@@ -117,7 +117,24 @@ does all of the reconciliation internally (see `sqlitesessionstore.cpp`
    the cross-midnight watchdog — see `discardCheckpoint` in
    `sessionstore.h`) is force-dropped outright, bypassing all of the above,
    and never contributes to `recovered_msec` or to either notification
-   (neither the recovered-time one nor the drop one below).
+   (neither the recovered-time one nor the drop one below). This tombstone
+   protects the discard only once its own `INSERT` has committed. A failed
+   intent insert is only pending in memory, so it cannot protect a surviving
+   row after a crash: if the process ends before a retry succeeds, the row
+   still on disk is indistinguishable from a genuine crash orphan, and
+   ordinary recovery finalizes it — an accepted, rare overcount, not a
+   startup-recovery bug (the C3 compound-failure decision). When file
+   logging is enabled, `SqliteSessionStore::discardCheckpoint` calls
+   `Logger::Log` synchronously, before returning, for every pre-intent
+   failure (`ensureOpen`, table creation, or the intent `INSERT` itself),
+   naming the segment id and stating that the intent was not recorded and
+   the row may be recovered/overcounted after a crash; a distinct line
+   covers a post-intent row-delete failure, where the tombstone is durable
+   and a retry or recovery will still remove the row. This diagnostic goes
+   to the log file only when logging is enabled and the write itself
+   succeeds — it gives no guarantee against OS or power loss, and startup
+   cannot specifically identify the earlier failed intent, so it gives only
+   its ordinary recovered-work notice.
 3. **Apply** — malformed-row deletes, policy drops, discard-intent
    resolution, marker consumption, and each remaining orphan's
    finalize-or-delete-on-overlap all run as steps inside **one** transaction

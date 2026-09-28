@@ -212,6 +212,105 @@ void LoggerTest::test_settings_repair_diagnostics_reach_the_log()
     QCOMPARE(s.getHistoryDays(), 0);
 }
 
+// C3 (compound-failure logging decision, simplification_plan.md): a
+// discard-intent INSERT failure leaves the intent unrecorded, so
+// discardCheckpoint() must synchronously log the "NOT recorded / possible
+// overcount" line, with the segment id, before returning TransientError. A
+// separate, later failure after the intent has committed (the row delete)
+// must log a distinct "intent recorded / row delete failed" line. Falsified
+// by moving either Logger::Log() call after its return, or by collapsing
+// both lines into the same text.
+void LoggerTest::test_c3_discard_intent_insert_failure_is_logged_and_flushed()
+{
+    Logger::configure(settingsOn_->logToFile());
+
+    const QString dbPath = settingsDir_.filePath("uTimer.sqlite");
+    QFile::remove(dbPath);
+
+    Settings storeSettings(TestCommon::createSettingsFile(settingsDir_.path(), 7));
+    SqliteSessionStore db(storeSettings);
+    QCOMPARE(db.checkSchemaOnStartup(), SchemaStatus::Created);
+
+    const SegmentId id1 = SegmentId::mint();
+    QVERIFY(db.ensureOpen_dbg());
+    QSqlQuery insertTrigger(db.rawDb_dbg());
+    QVERIFY(insertTrigger.exec(
+        "CREATE TRIGGER block_intent_insert_c3_test BEFORE INSERT ON discard_intents "
+        "BEGIN SELECT RAISE(ABORT, 'c3 test: blocked intent insert'); END"
+    ));
+
+    const QString logPath = Logger::logFilePath();
+    QFile before(logPath);
+    QVERIFY(before.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QString contentBefore = QString::fromUtf8(before.readAll());
+    before.close();
+
+    const SessionStoreResult result1 = db.discardCheckpoint(id1);
+    QCOMPARE(result1.category, SessionStoreResult::TransientError);
+
+    // Read via a fresh QFile handle (not Logger's own) -- the proxy for
+    // "readable after a simulated process end": the line must already be
+    // flushed to disc by the time discardCheckpoint() returned above.
+    QFile after1(logPath);
+    QVERIFY(after1.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QString contentAfter1 = QString::fromUtf8(after1.readAll());
+    after1.close();
+    const QString appended1 = contentAfter1.mid(contentBefore.size());
+
+    QVERIFY2(appended1.contains(id1.toString()), qPrintable(appended1));
+    QVERIFY2(appended1.contains("intent NOT recorded"), qPrintable(appended1));
+    QVERIFY2(!appended1.contains("intent recorded for"), qPrintable(appended1));
+
+    QVERIFY(db.ensureOpen_dbg());
+    QSqlQuery dropTrigger(db.rawDb_dbg());
+    QVERIFY(dropTrigger.exec("DROP TRIGGER block_intent_insert_c3_test"));
+
+    // Second act: a same-ID unfinalized row exists, the intent INSERT can
+    // now commit, but the row DELETE fails -- a distinct, post-intent line.
+    const SegmentId id2 = SegmentId::mint();
+    QSqlQuery seedRow(db.rawDb_dbg());
+    seedRow.prepare(
+        "INSERT INTO durations (segment_id, type, start_utc, end_utc, is_finalized) "
+        "VALUES (:segment_id, :type, :start_utc, :end_utc, 0)");
+    seedRow.bindValue(":segment_id", id2.toString());
+    seedRow.bindValue(":type", static_cast<int>(DurationType::Activity));
+    seedRow.bindValue(":start_utc", QDateTime(QDate(2025, 6, 1), QTime(9, 0, 0), Qt::UTC).toString(Qt::ISODateWithMs));
+    seedRow.bindValue(":end_utc", QDateTime(QDate(2025, 6, 1), QTime(9, 30, 0), Qt::UTC).toString(Qt::ISODateWithMs));
+    QVERIFY(seedRow.exec());
+
+    QSqlQuery deleteTrigger(db.rawDb_dbg());
+    QVERIFY(deleteTrigger.exec(
+        "CREATE TRIGGER block_row_delete_c3_test BEFORE DELETE ON durations "
+        "BEGIN SELECT RAISE(ABORT, 'c3 test: blocked row delete'); END"
+    ));
+
+    QFile before2(logPath);
+    QVERIFY(before2.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QString contentBefore2 = QString::fromUtf8(before2.readAll());
+    before2.close();
+
+    const SessionStoreResult result2 = db.discardCheckpoint(id2);
+    QCOMPARE(result2.category, SessionStoreResult::TransientError);
+
+    QFile after2(logPath);
+    QVERIFY(after2.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QString contentAfter2 = QString::fromUtf8(after2.readAll());
+    after2.close();
+    const QString appended2 = contentAfter2.mid(contentBefore2.size());
+
+    QVERIFY2(appended2.contains(id2.toString()), qPrintable(appended2));
+    QVERIFY2(appended2.contains("intent recorded"), qPrintable(appended2));
+    QVERIFY2(appended2.contains("row delete failed"), qPrintable(appended2));
+    QVERIFY2(!appended2.contains("NOT recorded"), qPrintable(appended2));
+
+    QVERIFY(db.ensureOpen_dbg());
+    QSqlQuery dropDeleteTrigger(db.rawDb_dbg());
+    QVERIFY(dropDeleteTrigger.exec("DROP TRIGGER block_row_delete_c3_test"));
+    db.closeConnection_dbg();
+
+    Logger::configure(settingsOff_->logToFile());
+}
+
 // Test E: the process's first write failure must disable file logging
 // permanently and quietly. MUST run last in this suite: Logger's file handle
 // is a process-wide singleton (a function-local static), so once this test

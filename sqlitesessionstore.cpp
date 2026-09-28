@@ -1541,6 +1541,15 @@ SessionStoreResult SqliteSessionStore::saveCheckpoint(DurationType type, const Q
  * Both the tombstone write (INSERT OR IGNORE) and the row delete (DELETE ...
  * WHERE, a no-op if already gone) are idempotent, so repeated calls for the
  * same segment_id are always safe.
+ *
+ * Logging (C3 compound-failure decision): every pre-intent TransientError
+ * return (ensureOpen, ensureDiscardIntentsTable, the intent INSERT) leaves
+ * the intent unrecorded, so each synchronously calls Logger::Log, before
+ * returning, with the segment_id and explicit text that the intent was NOT
+ * recorded and that startup recovery may restore (overcount) this segment
+ * if the process ends before a retry succeeds. A post-intent row-delete
+ * failure gets a distinct line: the intent is durably recorded, so a retry
+ * or startup recovery will still delete the row.
  */
 SessionStoreResult SqliteSessionStore::discardCheckpoint(const SegmentId& segmentId)
 {
@@ -1559,6 +1568,9 @@ SessionStoreResult SqliteSessionStore::discardCheckpoint(const SegmentId& segmen
         // C4 (R07-003): ensureOpen() failure is TransientError consistently
         // everywhere it is checked -- see updateDurationsById for the rationale.
         Logger::Log("[DB] Could not open DB to discard checkpoint");
+        Logger::Log("[DB] discardCheckpoint: discard intent NOT recorded for segment_id " + segmentId.toString()
+            + " (DB connection could not be opened); if the process ends before a retry succeeds, "
+              "startup recovery may restore this segment (possible overcount)");
         return SessionStoreResult::transient("DB connection could not be opened");
     }
 
@@ -1566,6 +1578,9 @@ SessionStoreResult SqliteSessionStore::discardCheckpoint(const SegmentId& segmen
     // before checkSchemaOnStartup() has run its additive DDL (e.g. an
     // existing pre-A4 DB in a test that seeds/exercises this call directly).
     if (!ensureDiscardIntentsTable()) {
+        Logger::Log("[DB] discardCheckpoint: discard intent NOT recorded for segment_id " + segmentId.toString()
+            + " (failed to prepare discard-intent storage); if the process ends before a retry succeeds, "
+              "startup recovery may restore this segment (possible overcount)");
         return SessionStoreResult::transient("Failed to prepare discard-intent storage");
     }
 
@@ -1574,12 +1589,17 @@ SessionStoreResult SqliteSessionStore::discardCheckpoint(const SegmentId& segmen
     intentQuery.bindValue(":id", segmentId.toString());
     if (!intentQuery.exec()) {
         Logger::Log("[DB] Error recording discard intent: " + intentQuery.lastError().text());
+        Logger::Log("[DB] discardCheckpoint: discard intent NOT recorded for segment_id " + segmentId.toString()
+            + " (" + intentQuery.lastError().text() + "); if the process ends before a retry succeeds, "
+              "startup recovery may restore this segment (possible overcount)");
         return SessionStoreResult::transient("Failed to record discard intent: " + intentQuery.lastError().text());
     }
 
 #ifndef QT_NO_DEBUG
     if (force_discard_row_delete_failure_dbg_) {
         Logger::Log("[DB] discardCheckpoint: injected row-delete failure (test) — intent remains durable");
+        Logger::Log("[DB] discardCheckpoint: discard intent recorded for segment_id " + segmentId.toString()
+            + "; row delete failed (injected failure); a retry or startup recovery will delete it");
         return SessionStoreResult::transient("Injected discard-delete failure (test)");
     }
 #endif
@@ -1590,6 +1610,8 @@ SessionStoreResult SqliteSessionStore::discardCheckpoint(const SegmentId& segmen
     query.bindValue(":segment_id", segmentId.toString());
     if (!query.exec()) {
         Logger::Log("[DB] Error discarding checkpoint: " + query.lastError().text());
+        Logger::Log("[DB] discardCheckpoint: discard intent recorded for segment_id " + segmentId.toString()
+            + "; row delete failed (" + query.lastError().text() + "); a retry or startup recovery will delete it");
         return SessionStoreResult::transient("Failed to discard checkpoint: " + query.lastError().text());
     }
 
