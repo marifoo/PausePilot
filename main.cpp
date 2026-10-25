@@ -145,12 +145,13 @@ int main(int argc, char *argv[])
 		signalNotifier = new QSocketNotifier(signal_bridge.notifierFd(), QSocketNotifier::Read, &application);
 		// Disconnect when main_win is destroyed. signal_bridge was constructed
 		// before QApplication and outlives both the window and the notifier.
-		QObject::connect(signalNotifier, &QSocketNotifier::activated, &main_win, [&signal_bridge, &main_win](int) {
-			if (signal_bridge.drainPending()) {
+		QObject::connect(signalNotifier, &QSocketNotifier::activated, &main_win,
+		                 [bridge = &signal_bridge, window = &main_win](int) {
+			if (bridge->drainPending()) {
 				Logger::Log("[SIGNAL] Received Unix signal - initiating shutdown");
 
 				// Trigger graceful shutdown
-				main_win.onAboutToQuit();
+				window->onAboutToQuit();
 				QCoreApplication::quit();
 			}
 		});
