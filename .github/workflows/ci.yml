@@ -26,9 +26,19 @@ jobs:
         run: python3 scripts/check_vcxproj_parity.py
 
   linux-tests:
-    name: Linux build and tests
+    name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux build and tests
+            script: scripts/ci-linux.sh
+            sanitizers: false
+          - name: Linux ASan and UBSan
+            script: scripts/ci-linux-sanitizers.sh
+            sanitizers: true
     steps:
       - uses: actions/checkout@v6
         with:
@@ -40,5 +50,13 @@ jobs:
           sudo apt-get install --no-install-recommends -y \
             build-essential qtbase5-dev qt5-qmake libqt5sql5-sqlite tzdata
 
+      - name: Install Clang and sanitizer runtimes
+        if: matrix.sanitizers
+        run: |
+          sudo apt-get install --no-install-recommends -y \
+            clang-18 libclang-rt-18-dev llvm-18
+
       - name: Build and run both test suites
-        run: bash scripts/ci-linux.sh
+        env:
+          CI_SCRIPT: ${{ matrix.script }}
+        run: bash "$CI_SCRIPT"

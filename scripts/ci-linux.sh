@@ -4,7 +4,7 @@
 set -euo pipefail
 
 repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-build_dir="$repo_dir/build/ci"
+build_dir="${UTIMER_CI_BUILD_DIR:-$repo_dir/build/ci}"
 
 export QT_QPA_PLATFORM=offscreen
 export XDG_RUNTIME_DIR="${RUNNER_TEMP:-$build_dir}/utimer-runtime"

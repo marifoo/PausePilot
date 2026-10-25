@@ -104,6 +104,19 @@ A separate CI job checks that the source and header lists in all three
 qmake projects match their Visual Studio counterparts. Run it locally with
 `python3 scripts/check_vcxproj_parity.py` (or `python` on Windows).
 
+Both test suites also run in a separate Clang 18 build with AddressSanitizer
+and UndefinedBehaviorSanitizer. To reproduce it, install `clang-18`,
+`libclang-rt-18-dev`, and `llvm-18`, then run:
+
+```sh
+bash scripts/ci-linux-sanitizers.sh
+```
+
+This uses `build/ci-sanitizers/` and fails on sanitizer reports from the
+test runners and their child processes. Leak detection is disabled for
+Qt's offscreen plugin allocations; invalid memory access and undefined
+behavior checks remain enabled.
+
 ## Credits
 
 - Icon by [Icons8](https://icons8.com/icon/63253/clock).
