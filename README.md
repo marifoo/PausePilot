@@ -117,6 +117,13 @@ test runners and their child processes. Leak detection is disabled for
 Qt's offscreen plugin allocations; invalid memory access and undefined
 behavior checks remain enabled.
 
+Clazy analyzes the production application with its conservative `level0`
+checks. Incorrect signal connections, temporary iterators, invalid event
+casts, and writes to temporaries fail CI; other findings remain warnings.
+On Ubuntu 24.04, install `clazy` and `clang-15`, then run
+`bash scripts/ci-linux-clazy.sh`. It uses `build/ci-clazy/` and explicitly
+selects Clang 15 to match Ubuntu's Clazy plugin.
+
 ## Credits
 
 - Icon by [Icons8](https://icons8.com/icon/63253/clock).

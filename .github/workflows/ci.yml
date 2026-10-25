@@ -13,6 +13,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  clazy:
+    name: Clazy Qt analysis
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Qt and Clazy
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential qtbase5-dev qt5-qmake clazy clang-15
+
+      - name: Analyze the production application
+        run: bash scripts/ci-linux-clazy.sh
+
   project-parity:
     name: qmake and Visual Studio project parity
     runs-on: ubuntu-24.04
