@@ -1,0 +1,2 @@
+# Linux CI scripts must also work from Windows checkouts using Git Bash.
+*.sh text eol=lf

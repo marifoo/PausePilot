@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-tests:
+    name: Linux build and tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Qt and build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential qtbase5-dev qt5-qmake libqt5sql5-sqlite tzdata
+
+      - name: Build and run both test suites
+        run: bash scripts/ci-linux.sh

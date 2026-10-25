@@ -88,6 +88,18 @@ binary. The interesting keys:
 If you are looking at the source rather than just running the app, see
 [`doc/`](doc/README.md) for architecture and design documentation.
 
+GitHub Actions builds the application and runs both `qtest` and `apptest`
+on Ubuntu 24.04 for pushes and pull requests. The runners enforce their
+existing warning policies under Qt's offscreen platform plugin. To run
+the same checks locally on Linux with Qt 5 and its SQLite plugin installed:
+
+```sh
+bash scripts/ci-linux.sh
+```
+
+The script uses `build/ci/` for build output and builds the production
+binary before the app-shell suite that launches it.
+
 ## Credits
 
 - Icon by [Icons8](https://icons8.com/icon/63253/clock).
