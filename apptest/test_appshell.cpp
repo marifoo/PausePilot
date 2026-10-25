@@ -98,6 +98,24 @@ bool waitForFile(const QString& path, int timeoutMsec)
     return QFileInfo::exists(path);
 }
 
+// Database creation precedes schema setup and recovery. Wait for the owner's
+// final startup diagnostic before taking a byte snapshot: a fixed delay can
+// otherwise blame the owner's initialization writes on the losing process.
+bool waitForProductionReady(const QString& dataDirectory, int timeoutMsec)
+{
+    const QString logPath = QDir(dataDirectory).filePath("uTimer.log");
+    QElapsedTimer elapsed;
+    elapsed.start();
+    do {
+        QFile logFile(logPath);
+        if (logFile.open(QIODevice::ReadOnly)
+                && logFile.readAll().contains("[STARTUP] Application ready"))
+            return true;
+        QTest::qWait(20);
+    } while (elapsed.elapsed() < timeoutMsec);
+    return false;
+}
+
 // Polls a QLockFile's first line (its PID field) until it names `pid`. Used
 // to prove a stale lock was actually reclaimed and rewritten by the new
 // owner, as opposed to merely still existing on disk (true from the very
@@ -731,13 +749,14 @@ void AppShellTest::test_production_active_owner_survives_old_lock_timestamp()
     const QString dbPath = QDir(tempDir.path()).filePath("uTimer.sqlite");
     QSettings ownerSettings(createSettingsFile(tempDir.path(), 7), QSettings::IniFormat);
     ownerSettings.setValue("uTimer/press_start_button_on_app_start", false);
+    ownerSettings.setValue("uTimer/debug_log_to_file", true);
     ownerSettings.sync();
 
     ProcessGuard owner;
     QVERIFY2(startProduction(owner.process, tempDir.path()), qPrintable(startFailureMessage(owner.process)));
     QVERIFY2(waitForFile(lockPath, 5000), "production owner did not acquire the lock");
     QVERIFY2(waitForFile(dbPath, 5000), "production owner did not initialize the database");
-    QTest::qWait(150);
+    QVERIFY2(waitForProductionReady(tempDir.path(), 5000), "production owner did not finish startup");
     QFile dbBeforeFile(dbPath);
     QVERIFY(dbBeforeFile.open(QIODevice::ReadOnly));
     const QByteArray dbBefore = dbBeforeFile.readAll();
@@ -783,6 +802,7 @@ void AppShellTest::test_production_loser_cannot_mutate_database_with_active_owne
     const QString dbPath = QDir(tempDir.path()).filePath("uTimer.sqlite");
     QSettings ownerSettings(createSettingsFile(tempDir.path(), 7), QSettings::IniFormat);
     ownerSettings.setValue("uTimer/press_start_button_on_app_start", false);
+    ownerSettings.setValue("uTimer/debug_log_to_file", true);
     ownerSettings.sync();
 
     ProcessGuard owner;
@@ -790,7 +810,7 @@ void AppShellTest::test_production_loser_cannot_mutate_database_with_active_owne
     QVERIFY2(waitForFile(QDir(tempDir.path()).filePath("uTimer.lock"), 5000),
              "production owner did not acquire the lock");
     QVERIFY2(waitForFile(dbPath, 5000), "production owner did not initialize the database");
-    QTest::qWait(150);
+    QVERIFY2(waitForProductionReady(tempDir.path(), 5000), "production owner did not finish startup");
     QFile dbBeforeFile(dbPath);
     QVERIFY(dbBeforeFile.open(QIODevice::ReadOnly));
     const QByteArray dbBefore = dbBeforeFile.readAll();

@@ -173,6 +173,7 @@ int main(int argc, char *argv[])
 	timer.start();
 
 	main_win.start();
+	Logger::Log("[STARTUP] Application ready");
 
 	return application.exec();
 }
