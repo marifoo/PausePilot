@@ -100,6 +100,10 @@ bash scripts/ci-linux.sh
 The script uses `build/ci/` for build output and builds the production
 binary before the app-shell suite that launches it.
 
+A separate CI job checks that the source and header lists in all three
+qmake projects match their Visual Studio counterparts. Run it locally with
+`python3 scripts/check_vcxproj_parity.py` (or `python` on Windows).
+
 ## Credits
 
 - Icon by [Icons8](https://icons8.com/icon/63253/clock).

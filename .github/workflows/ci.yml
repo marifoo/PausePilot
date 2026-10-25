@@ -13,6 +13,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  project-parity:
+    name: qmake and Visual Studio project parity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Compare source and header lists
+        run: python3 scripts/check_vcxproj_parity.py
+
   linux-tests:
     name: Linux build and tests
     runs-on: ubuntu-24.04
