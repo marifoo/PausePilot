@@ -103,7 +103,7 @@ bool waitForFile(const QString& path, int timeoutMsec)
 // otherwise blame the owner's initialization writes on the losing process.
 bool waitForProductionReady(const QString& dataDirectory, int timeoutMsec)
 {
-    const QString logPath = QDir(dataDirectory).filePath("uTimer.log");
+    const QString logPath = QDir(dataDirectory).filePath("PausePilot.log");
     QElapsedTimer elapsed;
     elapsed.start();
     do {
@@ -615,8 +615,8 @@ void AppShellTest::test_production_permission_failure_fails_closed()
     QCOMPARE(denied.process.exitStatus(), QProcess::NormalExit);
     QCOMPARE(denied.process.exitCode(), 3);
     QVERIFY2(diagnostics.contains("exclusive ownership"), output.constData());
-    QVERIFY(!QFileInfo::exists(QDir(tempDir.path()).filePath("uTimer.lock")));
-    QVERIFY(!QFileInfo::exists(QDir(tempDir.path()).filePath("uTimer.sqlite")));
+    QVERIFY(!QFileInfo::exists(QDir(tempDir.path()).filePath("PausePilot.lock")));
+    QVERIFY(!QFileInfo::exists(QDir(tempDir.path()).filePath("PausePilot.sqlite")));
     QVERIFY(!QFileInfo::exists(QDir(tempDir.path()).filePath("user-settings.ini")));
 #endif
 }
@@ -633,9 +633,9 @@ void AppShellTest::test_production_unwritable_log_path_disables_logging_once()
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     QSettings settings(createSettingsFile(tempDir.path(), 7), QSettings::IniFormat);
-    settings.setValue("uTimer/debug_log_to_file", true);
+    settings.setValue("PausePilot/debug_log_to_file", true);
     settings.sync();
-    QVERIFY(QDir(tempDir.path()).mkdir("uTimer.log"));
+    QVERIFY(QDir(tempDir.path()).mkdir("PausePilot.log"));
 
     // Act
     ProcessGuard production;
@@ -645,7 +645,7 @@ void AppShellTest::test_production_unwritable_log_path_disables_logging_once()
     // this process whenever logging is on; the database is opened right
     // after it, so its appearance proves that first call (and Logger's
     // open() failure) has already happened.
-    QVERIFY2(waitForFile(QDir(tempDir.path()).filePath("uTimer.sqlite"), 5000),
+    QVERIFY2(waitForFile(QDir(tempDir.path()).filePath("PausePilot.sqlite"), 5000),
              "production did not get past Settings' startup log call");
     QTest::qWait(100);
 
@@ -654,7 +654,7 @@ void AppShellTest::test_production_unwritable_log_path_disables_logging_once()
     QCOMPARE(production.process.state(), QProcess::Running);
     QVERIFY2(diagnostics.contains("[Logger]"), diagnostics.constData());
     QCOMPARE(diagnostics.count(QByteArray("[Logger]")), 1);
-    QVERIFY2(QFileInfo(QDir(tempDir.path()).filePath("uTimer.log")).isDir(),
+    QVERIFY2(QFileInfo(QDir(tempDir.path()).filePath("PausePilot.log")).isDir(),
              "the unwritable log path must be left untouched");
 #endif
 }
@@ -668,25 +668,25 @@ void AppShellTest::test_production_logs_settings_repairs_from_the_first_line()
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     QSettings settings(createSettingsFile(tempDir.path(), 7), QSettings::IniFormat);
-    settings.setValue("uTimer/debug_log_to_file", true);
-    settings.setValue("uTimer/autopause_threshold_minutes", "notanumber");
+    settings.setValue("PausePilot/debug_log_to_file", true);
+    settings.setValue("PausePilot/autopause_threshold_minutes", "notanumber");
     settings.sync();
 
     // Act
     ProcessGuard production;
     QVERIFY2(startProduction(production.process, tempDir.path()),
              qPrintable(startFailureMessage(production.process)));
-    QVERIFY2(waitForFile(QDir(tempDir.path()).filePath("uTimer.sqlite"), 5000),
+    QVERIFY2(waitForFile(QDir(tempDir.path()).filePath("PausePilot.sqlite"), 5000),
              "production did not reach database creation");
 
     // Assert
-    const QString logPath = QDir(tempDir.path()).filePath("uTimer.log");
-    QVERIFY2(QFileInfo::exists(logPath), "uTimer.log must exist");
+    const QString logPath = QDir(tempDir.path()).filePath("PausePilot.log");
+    QVERIFY2(QFileInfo::exists(logPath), "PausePilot.log must exist");
     QFile logFile(logPath);
     QVERIFY(logFile.open(QIODevice::ReadOnly | QIODevice::Text));
     const QString content = QString::fromUtf8(logFile.readAll());
     logFile.close();
-    QVERIFY2(content.contains("malformed integer for uTimer/autopause_threshold_minutes"),
+    QVERIFY2(content.contains("malformed integer for PausePilot/autopause_threshold_minutes"),
              qPrintable(content));
 }
 
@@ -695,7 +695,7 @@ void AppShellTest::test_production_start_reclaims_stale_lock()
     // Arrange
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
-    const QString lockPath = QDir(tempDir.path()).filePath("uTimer.lock");
+    const QString lockPath = QDir(tempDir.path()).filePath("PausePilot.lock");
     // unlock() removes the seed file, so write a valid-looking stale payload
     // directly instead of trying to read it after releasing the seed lock.
     const QByteArray staleLockData =
@@ -710,7 +710,7 @@ void AppShellTest::test_production_start_reclaims_stale_lock()
     // Act
     ProcessGuard owner;
     QVERIFY2(startProduction(owner.process, tempDir.path()), qPrintable(startFailureMessage(owner.process)));
-    const bool databaseReady = waitForFile(QDir(tempDir.path()).filePath("uTimer.sqlite"), 5000);
+    const bool databaseReady = waitForFile(QDir(tempDir.path()).filePath("PausePilot.sqlite"), 5000);
     const QByteArray ownerDiagnostics = owner.process.readAllStandardError()
         + owner.process.readAllStandardOutput();
     QVERIFY2(databaseReady, ownerDiagnostics.constData());
@@ -745,11 +745,11 @@ void AppShellTest::test_production_active_owner_survives_old_lock_timestamp()
     // Arrange
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
-    const QString lockPath = QDir(tempDir.path()).filePath("uTimer.lock");
-    const QString dbPath = QDir(tempDir.path()).filePath("uTimer.sqlite");
+    const QString lockPath = QDir(tempDir.path()).filePath("PausePilot.lock");
+    const QString dbPath = QDir(tempDir.path()).filePath("PausePilot.sqlite");
     QSettings ownerSettings(createSettingsFile(tempDir.path(), 7), QSettings::IniFormat);
-    ownerSettings.setValue("uTimer/press_start_button_on_app_start", false);
-    ownerSettings.setValue("uTimer/debug_log_to_file", true);
+    ownerSettings.setValue("PausePilot/press_start_button_on_app_start", false);
+    ownerSettings.setValue("PausePilot/debug_log_to_file", true);
     ownerSettings.sync();
 
     ProcessGuard owner;
@@ -799,15 +799,15 @@ void AppShellTest::test_production_loser_cannot_mutate_database_with_active_owne
     // owner's database static so the byte comparison below is meaningful.
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
-    const QString dbPath = QDir(tempDir.path()).filePath("uTimer.sqlite");
+    const QString dbPath = QDir(tempDir.path()).filePath("PausePilot.sqlite");
     QSettings ownerSettings(createSettingsFile(tempDir.path(), 7), QSettings::IniFormat);
-    ownerSettings.setValue("uTimer/press_start_button_on_app_start", false);
-    ownerSettings.setValue("uTimer/debug_log_to_file", true);
+    ownerSettings.setValue("PausePilot/press_start_button_on_app_start", false);
+    ownerSettings.setValue("PausePilot/debug_log_to_file", true);
     ownerSettings.sync();
 
     ProcessGuard owner;
     QVERIFY2(startProduction(owner.process, tempDir.path()), qPrintable(startFailureMessage(owner.process)));
-    QVERIFY2(waitForFile(QDir(tempDir.path()).filePath("uTimer.lock"), 5000),
+    QVERIFY2(waitForFile(QDir(tempDir.path()).filePath("PausePilot.lock"), 5000),
              "production owner did not acquire the lock");
     QVERIFY2(waitForFile(dbPath, 5000), "production owner did not initialize the database");
     QVERIFY2(waitForProductionReady(tempDir.path(), 5000), "production owner did not finish startup");
@@ -1255,8 +1255,8 @@ void AppShellTest::test_D10_lock_resume_updates_button_exactly_once()
     QVERIFY(tempDir.isValid());
     const QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
-    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.setValue("PausePilot/autopause_enabled", true);
+    writer.setValue("PausePilot/autopause_threshold_minutes", 15);
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
@@ -1404,9 +1404,9 @@ void AppShellTest::test_production_sigterm_drains_and_writes_clean_shutdown_mark
     // dependent on the host's desktop-lock state.
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
-    const QString dbPath = QDir(tempDir.path()).filePath("uTimer.sqlite");
+    const QString dbPath = QDir(tempDir.path()).filePath("PausePilot.sqlite");
     QSettings ownerSettings(createSettingsFile(tempDir.path(), 7), QSettings::IniFormat);
-    ownerSettings.setValue("uTimer/press_start_button_on_app_start", false);
+    ownerSettings.setValue("PausePilot/press_start_button_on_app_start", false);
     ownerSettings.sync();
 
     ProcessGuard production;
@@ -1469,7 +1469,7 @@ void AppShellTest::test_mainwin_stopped_rearms_health_monitor_through_real_wirin
     QVERIFY(tempDir.isValid());
     const QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/show_warning_after_9h45min_activity", true);
+    writer.setValue("PausePilot/show_warning_after_9h45min_activity", true);
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
@@ -1554,7 +1554,7 @@ void AppShellTest::test_heartbeat_keeps_ticking_while_health_warning_modal_is_op
     QVERIFY(tempDir.isValid());
     const QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/show_warning_after_9h45min_activity", true);
+    writer.setValue("PausePilot/show_warning_after_9h45min_activity", true);
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;

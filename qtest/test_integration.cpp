@@ -18,7 +18,7 @@ void IntegrationTest::initTestCase()
 {
     QVERIFY(data_dir_.isValid());
     TestCommon::setDataDirOverride(data_dir_.path());
-    db_path_ = QDir(data_dir_.path()).filePath("uTimer.sqlite");
+    db_path_ = QDir(data_dir_.path()).filePath("PausePilot.sqlite");
 }
 
 void IntegrationTest::cleanupTestCase()
@@ -704,8 +704,8 @@ void IntegrationTest::test_C12b_watcher_propagates_lockTime_to_backpause_anchor(
     QVERIFY(tempDir.isValid());
     const QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
-    writer.setValue("uTimer/autopause_threshold_minutes", 1); // 60s
+    writer.setValue("PausePilot/autopause_enabled", true);
+    writer.setValue("PausePilot/autopause_threshold_minutes", 1); // 60s
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
@@ -1197,7 +1197,7 @@ void IntegrationTest::test_bootCredit_suppressed_by_legacy_cross_midnight_row_on
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 30);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/boot_time_seconds", 30);
+    writer.setValue("PausePilot/boot_time_seconds", 30);
     writer.sync();
     Settings settings(settingsPath);
 

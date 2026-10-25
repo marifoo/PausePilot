@@ -25,8 +25,8 @@ void HealthMonitorTest::test_J_activity_warning_fires_once()
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     QSettings seed(QDir(tempDir.path()).filePath("user-settings.ini"), QSettings::IniFormat);
-    seed.setValue("uTimer/show_warning_after_9h45min_activity", true);
-    seed.setValue("uTimer/show_warning_when_not_30min_pause_after_6h_activity", false);
+    seed.setValue("PausePilot/show_warning_after_9h45min_activity", true);
+    seed.setValue("PausePilot/show_warning_when_not_30min_pause_after_6h_activity", false);
     seed.sync();
     Settings settings(QDir(tempDir.path()).filePath("user-settings.ini"));
 
@@ -77,8 +77,8 @@ void HealthMonitorTest::test_K_nopause_warning_condition()
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     QSettings seed(QDir(tempDir.path()).filePath("user-settings.ini"), QSettings::IniFormat);
-    seed.setValue("uTimer/show_warning_after_9h45min_activity", false);
-    seed.setValue("uTimer/show_warning_when_not_30min_pause_after_6h_activity", true);
+    seed.setValue("PausePilot/show_warning_after_9h45min_activity", false);
+    seed.setValue("PausePilot/show_warning_when_not_30min_pause_after_6h_activity", true);
     seed.sync();
     Settings settings(QDir(tempDir.path()).filePath("user-settings.ini"));
     HealthMonitor monitor(settings);
@@ -101,8 +101,8 @@ void HealthMonitorTest::test_L_reset_rearms_warnings()
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     QSettings seed(QDir(tempDir.path()).filePath("user-settings.ini"), QSettings::IniFormat);
-    seed.setValue("uTimer/show_warning_after_9h45min_activity", true);
-    seed.setValue("uTimer/show_warning_when_not_30min_pause_after_6h_activity", true);
+    seed.setValue("PausePilot/show_warning_after_9h45min_activity", true);
+    seed.setValue("PausePilot/show_warning_when_not_30min_pause_after_6h_activity", true);
     seed.sync();
     Settings settings(QDir(tempDir.path()).filePath("user-settings.ini"));
 
@@ -139,8 +139,8 @@ void HealthMonitorTest::test_M_warning_refires_per_session()
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
     QSettings seed(QDir(tempDir.path()).filePath("user-settings.ini"), QSettings::IniFormat);
-    seed.setValue("uTimer/show_warning_after_9h45min_activity", true);
-    seed.setValue("uTimer/show_warning_when_not_30min_pause_after_6h_activity", false);
+    seed.setValue("PausePilot/show_warning_after_9h45min_activity", true);
+    seed.setValue("PausePilot/show_warning_when_not_30min_pause_after_6h_activity", false);
     seed.sync();
     Settings settings(QDir(tempDir.path()).filePath("user-settings.ini"));
 

@@ -10,7 +10,7 @@ void LoggerTest::initTestCase()
     // D13a: point AppPaths::logFile() (and thus Logger's process-wide
     // singleton, opened lazily on the first enabled Log() call below) at our
     // own temp dir instead of applicationDirPath() -- otherwise this suite
-    // leaves a uTimer.log artifact next to the qtest binary.
+    // leaves a PausePilot.log artifact next to the qtest binary.
     TestCommon::setDataDirOverride(settingsDir_.path());
 
     // settingsOff_: defaults — logToFile is false by default (verified in test_settings)
@@ -20,7 +20,7 @@ void LoggerTest::initTestCase()
     // settingsOn_: write debug_log_to_file = true before constructing
     {
         QSettings ini(settingsDir_.filePath("on.ini"), QSettings::IniFormat);
-        ini.setValue("uTimer/debug_log_to_file", true);
+        ini.setValue("PausePilot/debug_log_to_file", true);
         ini.sync();
     }
     settingsOn_ = new Settings(settingsDir_.filePath("on.ini"));
@@ -179,9 +179,9 @@ void LoggerTest::test_d_settings_lifetime_survives_settings_destruction()
 void LoggerTest::test_settings_repair_diagnostics_reach_the_log()
 {
     QSettings ini(settingsDir_.filePath("repair.ini"), QSettings::IniFormat);
-    ini.setValue("uTimer/debug_log_to_file", true);
-    ini.setValue("uTimer/autopause_threshold_minutes", "notanumber");
-    ini.setValue("uTimer/history_days_to_keep", -5);
+    ini.setValue("PausePilot/debug_log_to_file", true);
+    ini.setValue("PausePilot/autopause_threshold_minutes", "notanumber");
+    ini.setValue("PausePilot/history_days_to_keep", -5);
     ini.sync();
 
     const QString path = settingsDir_.filePath("repair.ini");
@@ -203,9 +203,9 @@ void LoggerTest::test_settings_repair_diagnostics_reach_the_log()
     after.close();
     const QString appended = contentAfter.mid(contentBefore.size());
 
-    QVERIFY2(appended.contains("malformed integer for uTimer/autopause_threshold_minutes"),
+    QVERIFY2(appended.contains("malformed integer for PausePilot/autopause_threshold_minutes"),
              qPrintable(appended));
-    QVERIFY2(appended.contains("out-of-range value for uTimer/history_days_to_keep"),
+    QVERIFY2(appended.contains("out-of-range value for PausePilot/history_days_to_keep"),
              qPrintable(appended));
     QVERIFY2(appended.contains("Autopause is enabled with Threshold"),
              qPrintable(appended));
@@ -224,7 +224,7 @@ void LoggerTest::test_c3_discard_intent_insert_failure_is_logged_and_flushed()
 {
     Logger::configure(settingsOn_->logToFile());
 
-    const QString dbPath = settingsDir_.filePath("uTimer.sqlite");
+    const QString dbPath = settingsDir_.filePath("PausePilot.sqlite");
     QFile::remove(dbPath);
 
     Settings storeSettings(TestCommon::createSettingsFile(settingsDir_.path(), 7));

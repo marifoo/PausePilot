@@ -1,7 +1,10 @@
 # Timer files
+PausePilot.log
 utimer.log
 user-settings.ini
 PausePilot
+PausePilot.sqlite
+PausePilot.lock
 uTimer.sqlite
 uTimer.lock
 *.sqlite.*.backup

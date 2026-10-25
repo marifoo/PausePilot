@@ -13,7 +13,7 @@ void TimerTest::initTestCase()
 {
     QVERIFY(data_dir_.isValid());
     TestCommon::setDataDirOverride(data_dir_.path());
-    db_path_ = QDir(data_dir_.path()).filePath("uTimer.sqlite");
+    db_path_ = QDir(data_dir_.path()).filePath("PausePilot.sqlite");
 }
 
 void TimerTest::cleanupTestCase()
@@ -139,8 +139,8 @@ void TimerTest::test_timer_backpause_resets_checkpoint_and_splits()
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
 
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
-    writer.setValue("uTimer/autopause_threshold_minutes", 1); // 60s
+    writer.setValue("PausePilot/autopause_enabled", true);
+    writer.setValue("PausePilot/autopause_threshold_minutes", 1); // 60s
     writer.sync();
 
     Settings settings(settingsPath);
@@ -213,7 +213,7 @@ void TimerTest::test_C12c_legacy_zero_interval_setting_no_longer_disables_checkp
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/checkpoint_interval_minutes", 0);
+    writer.setValue("PausePilot/checkpoint_interval_minutes", 0);
     writer.sync();
 
     Settings settings(settingsPath);
@@ -227,7 +227,7 @@ void TimerTest::test_C12c_legacy_zero_interval_setting_no_longer_disables_checkp
 
     // Settings' constructor must have removed the obsolete key from the ini.
     QSettings verify(settingsPath, QSettings::IniFormat);
-    QVERIFY(!verify.contains("uTimer/checkpoint_interval_minutes"));
+    QVERIFY(!verify.contains("PausePilot/checkpoint_interval_minutes"));
 
     // A legacy non-zero value (e.g. 60) must likewise have no effect on the
     // fixed cadence, and must also be removed from the ini.
@@ -235,7 +235,7 @@ void TimerTest::test_C12c_legacy_zero_interval_setting_no_longer_disables_checkp
     QVERIFY(tempDir2.isValid());
     QString settingsPath2 = createSettingsFile(tempDir2.path(), 7);
     QSettings writer2(settingsPath2, QSettings::IniFormat);
-    writer2.setValue("uTimer/checkpoint_interval_minutes", 60);
+    writer2.setValue("PausePilot/checkpoint_interval_minutes", 60);
     writer2.sync();
 
     Settings settings2(settingsPath2);
@@ -247,7 +247,7 @@ void TimerTest::test_C12c_legacy_zero_interval_setting_no_longer_disables_checkp
     QVERIFY(tracker2.isCheckpointTimerActive_dbg());
 
     QSettings verify2(settingsPath2, QSettings::IniFormat);
-    QVERIFY(!verify2.contains("uTimer/checkpoint_interval_minutes"));
+    QVERIFY(!verify2.contains("PausePilot/checkpoint_interval_minutes"));
 }
 
 // C12c: the periodic checkpoint timer must not run outside Activity -- it
@@ -607,7 +607,7 @@ void TimerTest::test_boot_time_not_added_when_history_disabled()
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 0);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/boot_time_seconds", 30);
+    writer.setValue("PausePilot/boot_time_seconds", 30);
     writer.sync();
 
     Settings settings(settingsPath);
@@ -646,7 +646,7 @@ void TimerTest::test_boot_time_added_once_on_empty_db()
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/boot_time_seconds", 30);
+    writer.setValue("PausePilot/boot_time_seconds", 30);
     writer.sync();
 
     Settings settings(settingsPath);
@@ -685,7 +685,7 @@ void TimerTest::test_boot_time_not_added_when_db_has_entries_for_today()
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/boot_time_seconds", 30);
+    writer.setValue("PausePilot/boot_time_seconds", 30);
     writer.sync();
 
     Settings settings(settingsPath);
@@ -958,7 +958,7 @@ void TimerTest::test_useTimerViaLockEvent_unlock_does_not_restart_after_cross_mi
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
+    writer.setValue("PausePilot/autopause_enabled", true);
     writer.sync();
 
     Settings settings(settingsPath);
@@ -1055,7 +1055,7 @@ void TimerTest::test_startTimer_drops_cross_midnight_boot_time_entry()
     QSettings writer(settingsPath, QSettings::IniFormat);
     // Boot time at the (post-A14) cap; combined with "now" just after midnight
     // below, bootStart still lands on the previous day.
-    writer.setValue("uTimer/boot_time_seconds", 3600); // 1 hour (capped max)
+    writer.setValue("PausePilot/boot_time_seconds", 3600); // 1 hour (capped max)
     writer.sync();
 
     Settings settings(settingsPath);
@@ -1171,7 +1171,7 @@ void TimerTest::test_E_boot_time_gate_entries_yes_skips_boot_time()
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/boot_time_seconds", 30);
+    writer.setValue("PausePilot/boot_time_seconds", 30);
     writer.sync();
 
     Settings settings(settingsPath);
@@ -1205,7 +1205,7 @@ void TimerTest::test_E_boot_time_gate_entries_no_adds_boot_time()
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/boot_time_seconds", 30);
+    writer.setValue("PausePilot/boot_time_seconds", 30);
     writer.sync();
 
     Settings settings(settingsPath);
@@ -1245,7 +1245,7 @@ void TimerTest::test_E_boot_time_gate_entries_unknown_skips_boot_time()
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/boot_time_seconds", 30);
+    writer.setValue("PausePilot/boot_time_seconds", 30);
     writer.sync();
 
     Settings settings(settingsPath);
@@ -1281,7 +1281,7 @@ void TimerTest::test_E_boot_time_inmemory_start_date_skips_boot_time()
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/boot_time_seconds", 30);
+    writer.setValue("PausePilot/boot_time_seconds", 30);
     writer.sync();
 
     Settings settings(settingsPath);
@@ -1374,8 +1374,8 @@ void TimerTest::test_lock_with_history_open_revokes_then_backpauses_normally()
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
-    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.setValue("PausePilot/autopause_enabled", true);
+    writer.setValue("PausePilot/autopause_threshold_minutes", 15);
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
@@ -1490,8 +1490,8 @@ void TimerTest::test_unlock_with_history_open_revokes_and_resumes_pending_autopa
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
-    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.setValue("PausePilot/autopause_enabled", true);
+    writer.setValue("PausePilot/autopause_threshold_minutes", 15);
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
@@ -1551,8 +1551,8 @@ void TimerTest::test_lock_interval_with_history_open_is_recorded_at_true_timesta
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
-    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.setValue("PausePilot/autopause_enabled", true);
+    writer.setValue("PausePilot/autopause_threshold_minutes", 15);
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
@@ -1995,8 +1995,8 @@ void TimerTest::test_A2_backpause_anchors_at_lock_time_across_suspend()
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
-    writer.setValue("uTimer/autopause_threshold_minutes", 15); // 900s backpause
+    writer.setValue("PausePilot/autopause_enabled", true);
+    writer.setValue("PausePilot/autopause_threshold_minutes", 15); // 900s backpause
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore db;
@@ -2712,7 +2712,7 @@ void TimerTest::test_C9b_lock_resume_refused_after_shutdown()
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
+    writer.setValue("PausePilot/autopause_enabled", true);
     writer.sync();
 
     Settings settings(settingsPath);
@@ -3006,8 +3006,8 @@ void TimerTest::test_N5_scheduled_stop_after_autopause_revokes_and_credits_all_s
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
-    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.setValue("PausePilot/autopause_enabled", true);
+    writer.setValue("PausePilot/autopause_threshold_minutes", 15);
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
@@ -3073,8 +3073,8 @@ void TimerTest::test_N5b_scheduled_stop_while_still_locked_revokes_and_stops_pau
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
-    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.setValue("PausePilot/autopause_enabled", true);
+    writer.setValue("PausePilot/autopause_threshold_minutes", 15);
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
@@ -3138,8 +3138,8 @@ void TimerTest::test_N6_watchdog_tick_before_unlock_discards_unconfirmed_pause_s
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
-    writer.setValue("uTimer/autopause_threshold_minutes", 15);
+    writer.setValue("PausePilot/autopause_enabled", true);
+    writer.setValue("PausePilot/autopause_threshold_minutes", 15);
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
@@ -4652,8 +4652,8 @@ void TimerTest::test_C12b_backpause_anchors_at_lockTime_for_threshold_boundaries
         QVERIFY(tempDir.isValid());
         const QString settingsPath = createSettingsFile(tempDir.path(), 7);
         QSettings writer(settingsPath, QSettings::IniFormat);
-        writer.setValue("uTimer/autopause_enabled", true);
-        writer.setValue("uTimer/autopause_threshold_minutes", thresholdMinutes);
+        writer.setValue("PausePilot/autopause_enabled", true);
+        writer.setValue("PausePilot/autopause_threshold_minutes", thresholdMinutes);
         writer.sync();
         Settings settings(settingsPath);
         FakeSessionStore fakeDb;
@@ -5312,8 +5312,8 @@ void TimerTest::test_D10_transitioned_emits_one_event_per_real_transition()
     const QString settingsPath = createSettingsFile(tempDir.path(), 7);
     if (scenario == 5 || scenario == 6) {
         QSettings writer(settingsPath, QSettings::IniFormat);
-        writer.setValue("uTimer/autopause_enabled", true);
-        writer.setValue("uTimer/autopause_threshold_minutes", 15);
+        writer.setValue("PausePilot/autopause_enabled", true);
+        writer.setValue("PausePilot/autopause_threshold_minutes", 15);
         writer.sync();
     }
     Settings settings(settingsPath);
@@ -5487,7 +5487,7 @@ void TimerTest::test_D10_longlock_disabled_autopause_dialog_open_is_dropped_not_
     QVERIFY(tempDir.isValid());
     const QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", false);
+    writer.setValue("PausePilot/autopause_enabled", false);
     writer.sync();
     Settings settings(settingsPath);
     QVERIFY(!settings.isAutopauseEnabled());
@@ -5525,7 +5525,7 @@ void TimerTest::test_C12b_invalid_longlock_no_timestamp_is_ignored_no_revoke()
     QVERIFY(tempDir.isValid());
     const QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_enabled", true);
+    writer.setValue("PausePilot/autopause_enabled", true);
     writer.sync();
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;

@@ -20,8 +20,6 @@
 /// started with different PAUSEPILOT_DATA_DIR values may run concurrently:
 /// different data directories mean different lock files, so there is no
 /// shared state to race on.
-// Keep the legacy filenames stable across the PausePilot rebrand: history
-// and logs remain available, and old/new binaries share one instance lock.
 namespace AppPaths {
 
 inline QString dataDirectory()
@@ -34,12 +32,12 @@ inline QString dataDirectory()
 
 inline QString databaseFile()
 {
-    return QDir(dataDirectory()).filePath("uTimer.sqlite");
+    return QDir(dataDirectory()).filePath("PausePilot.sqlite");
 }
 
 inline QString logFile()
 {
-    return QDir(dataDirectory()).filePath("uTimer.log");
+    return QDir(dataDirectory()).filePath("PausePilot.log");
 }
 
 inline QString settingsFile()
@@ -50,7 +48,7 @@ inline QString settingsFile()
 /// Single-instance guard file (see QLockFile in main()).
 inline QString instanceLockFile()
 {
-    return QDir(dataDirectory()).filePath("uTimer.lock");
+    return QDir(dataDirectory()).filePath("PausePilot.lock");
 }
 
 } // namespace AppPaths

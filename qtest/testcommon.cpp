@@ -22,8 +22,8 @@ QString createSettingsFile(const QString& dirPath, int historyDays)
 {
     QString settingsPath = QDir(dirPath).filePath("user-settings.ini");
     QSettings seed(settingsPath, QSettings::IniFormat);
-    seed.setValue("uTimer/history_days_to_keep", historyDays);
-    seed.setValue("uTimer/debug_log_to_file", false);
+    seed.setValue("PausePilot/history_days_to_keep", historyDays);
+    seed.setValue("PausePilot/debug_log_to_file", false);
     seed.sync();
     return settingsPath;
 }

@@ -1,6 +1,6 @@
 # Persistence
 
-PausePilot stores its history in a single SQLite file, `uTimer.sqlite`, that
+PausePilot stores its history in a single SQLite file, `PausePilot.sqlite`, that
 lives next to the binary. There is no server, no migration tooling, and no
 external client — `SqliteSessionStore` is the only thing that reads or
 writes it. The schema is checked at startup via `checkSchemaOnStartup()`,
@@ -14,12 +14,6 @@ checkpoints.
 
 This document is the storage model. For the seam it sits behind, see the
 `SessionStore` section in `architecture.md`.
-
-The PausePilot rebrand preserves the legacy `uTimer.sqlite`, `uTimer.log`,
-`uTimer.lock`, and `uTimer/` settings identifiers. Replacing the executable
-in the same directory retains existing data and preferences. Sharing the
-lock filename also prevents old and new binaries from using that data
-concurrently.
 
 ## Tables
 

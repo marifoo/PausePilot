@@ -17,21 +17,20 @@
 #include "logger.h"
 
 namespace {
-// Keep the legacy INI group so existing preferences survive the rebrand.
-static const QString kKeyPressStart        = "uTimer/press_start_button_on_app_start";
-static const QString kKeyAutopause         = "uTimer/autopause_enabled";
-static const QString kKeyAutopauseThresh   = "uTimer/autopause_threshold_minutes";
-static const QString kKeyStartMinimized    = "uTimer/start_minimized_to_tray";
-static const QString kKeyStartPinned       = "uTimer/start_pinned_to_top";
-static const QString kKeyWarnNoPause       = "uTimer/show_warning_when_not_30min_pause_after_6h_activity";
-static const QString kKeyWarnActivity      = "uTimer/show_warning_after_9h45min_activity";
-static const QString kKeyLogToFile         = "uTimer/debug_log_to_file";
-static const QString kKeyHistoryDays       = "uTimer/history_days_to_keep";
-static const QString kKeyBootTimeSec       = "uTimer/boot_time_seconds";
+static const QString kKeyPressStart        = "PausePilot/press_start_button_on_app_start";
+static const QString kKeyAutopause         = "PausePilot/autopause_enabled";
+static const QString kKeyAutopauseThresh   = "PausePilot/autopause_threshold_minutes";
+static const QString kKeyStartMinimized    = "PausePilot/start_minimized_to_tray";
+static const QString kKeyStartPinned       = "PausePilot/start_pinned_to_top";
+static const QString kKeyWarnNoPause       = "PausePilot/show_warning_when_not_30min_pause_after_6h_activity";
+static const QString kKeyWarnActivity      = "PausePilot/show_warning_after_9h45min_activity";
+static const QString kKeyLogToFile         = "PausePilot/debug_log_to_file";
+static const QString kKeyHistoryDays       = "PausePilot/history_days_to_keep";
+static const QString kKeyBootTimeSec       = "PausePilot/boot_time_seconds";
 /// Obsolete: the checkpoint cadence is now fixed at the engine
 /// (TimeTracker::kCheckpointIntervalMsec) and no longer a setting. Kept only
 /// so writeAndSync() can remove it from pre-existing user-settings.ini files.
-static const QString kObsoleteKeyCheckpointMin = "uTimer/checkpoint_interval_minutes";
+static const QString kObsoleteKeyCheckpointMin = "PausePilot/checkpoint_interval_minutes";
 
 /// Reads an int setting, falling back to default_val (with a Logger note,
 /// no UI) if the key is present but not a valid integer. Range clamping is

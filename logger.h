@@ -31,7 +31,7 @@ public:
 	/// Pass false to disable all logging (safe to call from test cleanup).
 	static void configure(bool logToFile);
 	static void Log(const QString & text);
-	/// Returns the absolute path to the log file (applicationDir/uTimer.log).
+	/// Returns the absolute path to the log file (applicationDir/PausePilot.log).
 	/// This is a pure path computation — does not check if the file exists.
 	static QString logFilePath();
 #ifndef QT_NO_DEBUG

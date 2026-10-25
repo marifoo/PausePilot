@@ -16,7 +16,7 @@ void HistoryCommitTest::initTestCase()
 {
     QVERIFY(data_dir_.isValid());
     TestCommon::setDataDirOverride(data_dir_.path());
-    db_path_ = QDir(data_dir_.path()).filePath("uTimer.sqlite");
+    db_path_ = QDir(data_dir_.path()).filePath("PausePilot.sqlite");
 }
 
 void HistoryCommitTest::cleanupTestCase()

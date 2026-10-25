@@ -28,10 +28,6 @@ to the executable. Run it from a folder you can write to (your user profile,
 Desktop, a USB stick, etc.) — **not** `Program Files`, `/usr/bin`, or another
 admin-protected location, or it will fail to start.
 
-Upgrading from uTimer: put the PausePilot executable in your existing app
-folder. The data filenames and settings keys retain their original names
-so your history and preferences carry over automatically.
-
 ### Windows
 
 Grab the latest pre-built release from the

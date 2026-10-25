@@ -13,8 +13,8 @@ void SettingsTest::test_settings_unknown_key_survives_roundtrip()
     // Seed an unknown key into the file before Settings reads it.
     {
         QSettings seed(settingsPath, QSettings::IniFormat);
-        seed.setValue("uTimer/history_days_to_keep", 30);
-        seed.setValue("uTimer/unknown_future_key", "preserve_me");
+        seed.setValue("PausePilot/history_days_to_keep", 30);
+        seed.setValue("PausePilot/unknown_future_key", "preserve_me");
         seed.sync();
     }
 
@@ -24,9 +24,9 @@ void SettingsTest::test_settings_unknown_key_survives_roundtrip()
 
     // Re-read the file directly and verify the unknown key survived.
     QSettings verify(settingsPath, QSettings::IniFormat);
-    QVERIFY2(verify.contains("uTimer/unknown_future_key"),
+    QVERIFY2(verify.contains("PausePilot/unknown_future_key"),
              "Unknown key must survive a Settings load/save round-trip");
-    QCOMPARE(verify.value("uTimer/unknown_future_key").toString(), QString("preserve_me"));
+    QCOMPARE(verify.value("PausePilot/unknown_future_key").toString(), QString("preserve_me"));
 }
 
 // 9.4: a sync failure must be visible via syncStatus().
@@ -73,7 +73,7 @@ void SettingsTest::test_settings_defaults_and_bounds()
 
     // Negative history clamps to 0
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/history_days_to_keep", -5);
+    writer.setValue("PausePilot/history_days_to_keep", -5);
     writer.sync();
     Settings clamped(settingsPath);
     QCOMPARE(clamped.getHistoryDays(), 0);
@@ -89,7 +89,7 @@ void SettingsTest::test_settings_boot_time_sec_bound()
 
     // Arrange: seed a garbage (way-too-large) boot_time_seconds value.
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/boot_time_seconds", 999999u);
+    writer.setValue("PausePilot/boot_time_seconds", 999999u);
     writer.sync();
 
     // Act: red before the fix — getBootTimeSec() returned 999999 unbounded.
@@ -112,19 +112,19 @@ void SettingsTest::test_settings_obsolete_checkpoint_key_removed()
         QString settingsPath = QDir(tempDir.path()).filePath("user-settings.ini");
 
         QSettings writer(settingsPath, QSettings::IniFormat);
-        writer.setValue("uTimer/checkpoint_interval_minutes", value);
-        writer.setValue("uTimer/history_days_to_keep", 30);
-        writer.setValue("uTimer/unknown_future_key", "preserve_me");
+        writer.setValue("PausePilot/checkpoint_interval_minutes", value);
+        writer.setValue("PausePilot/history_days_to_keep", 30);
+        writer.setValue("PausePilot/unknown_future_key", "preserve_me");
         writer.sync();
 
         Settings s(settingsPath);
         QCOMPARE(s.syncStatus(), QSettings::NoError);
 
         QSettings verify(settingsPath, QSettings::IniFormat);
-        QVERIFY2(!verify.contains("uTimer/checkpoint_interval_minutes"),
+        QVERIFY2(!verify.contains("PausePilot/checkpoint_interval_minutes"),
                  qPrintable(QString("obsolete key must be removed for legacy value '%1'").arg(value)));
-        QCOMPARE(verify.value("uTimer/history_days_to_keep").toInt(), 30);
-        QCOMPARE(verify.value("uTimer/unknown_future_key").toString(), QString("preserve_me"));
+        QCOMPARE(verify.value("PausePilot/history_days_to_keep").toInt(), 30);
+        QCOMPARE(verify.value("PausePilot/unknown_future_key").toString(), QString("preserve_me"));
     }
 }
 
@@ -139,7 +139,7 @@ void SettingsTest::test_settings_malformed_int_uses_default()
 
     // Arrange
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/autopause_threshold_minutes", "notanumber");
+    writer.setValue("PausePilot/autopause_threshold_minutes", "notanumber");
     writer.sync();
 
     // Act
@@ -160,7 +160,7 @@ void SettingsTest::test_settings_malformed_bool_uses_default()
     QString settingsPath = QDir(tempDir.path()).filePath("user-settings.ini");
 
     QSettings writer(settingsPath, QSettings::IniFormat);
-    writer.setValue("uTimer/debug_log_to_file", "banana");
+    writer.setValue("PausePilot/debug_log_to_file", "banana");
     writer.sync();
 
     Settings s(settingsPath);
@@ -182,12 +182,12 @@ void SettingsTest::test_settings_readLogToFile_matches_constructor()
 
     {
         QSettings writer(truePath, QSettings::IniFormat);
-        writer.setValue("uTimer/debug_log_to_file", true);
+        writer.setValue("PausePilot/debug_log_to_file", true);
         writer.sync();
     }
     {
         QSettings writer(malformedPath, QSettings::IniFormat);
-        writer.setValue("uTimer/debug_log_to_file", "banana");
+        writer.setValue("PausePilot/debug_log_to_file", "banana");
         writer.sync();
     }
 
