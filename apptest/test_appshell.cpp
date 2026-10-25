@@ -29,6 +29,7 @@
 #include <QTimer>
 #include <functional>
 #include <memory>
+#include <vector>
 #ifdef Q_OS_UNIX
 #include <unistd.h>
 #endif
@@ -868,6 +869,15 @@ struct RlimitGuard {
     ~RlimitGuard() { ::setrlimit(RLIMIT_NOFILE, &original); }
 };
 
+struct DescriptorGuard {
+    std::vector<int> fds;
+    ~DescriptorGuard()
+    {
+        for (int fd : fds)
+            ::close(fd);
+    }
+};
+
 } // namespace
 #endif
 
@@ -1092,34 +1102,45 @@ void AppShellTest::test_full_channel_does_not_block()
 void AppShellTest::test_setup_failure_leaks_no_descriptors()
 {
 #ifdef Q_OS_LINUX
-    // Arrange: lower the descriptor limit to the current usage so the next
-    // socketpair() call fails with EMFILE. RlimitGuard restores the
-    // original limit on scope exit even if an assertion below fails and
-    // returns early -- otherwise a clamped descriptor limit leaks into
-    // every later test (M-1).
+    // Arrange: fill every gap below a bounded soft limit, then leave exactly
+    // one slot free. socketpair() needs two slots and must fail with EMFILE,
+    // including when the runner inherited sparse or high-numbered fds.
+    // Both guards clean up on assertion failures as well as normal exit.
     struct rlimit originalLimit;
     QVERIFY(getrlimit(RLIMIT_NOFILE, &originalLimit) == 0);
     RlimitGuard rlimitGuard{originalLimit};
-    int highestFd = -1;
-    for (int fd = 0; fd < 4096; ++fd) {
-        if (::fcntl(fd, F_GETFD) != -1)
-            highestFd = fd;
-    }
     struct rlimit tightLimit = originalLimit;
-    tightLimit.rlim_cur = static_cast<rlim_t>(highestFd + 1);
+    tightLimit.rlim_cur = qMin<rlim_t>(originalLimit.rlim_cur, 64);
     QVERIFY(setrlimit(RLIMIT_NOFILE, &tightLimit) == 0);
 
-    // Act
     UnixSignalBridge bridge;
-    const bool ok = bridge.setup();
+    {
+        DescriptorGuard reservations;
+        int fd;
+        while ((fd = ::open("/dev/null", O_RDONLY | O_CLOEXEC)) != -1)
+            reservations.fds.push_back(fd);
+        QCOMPARE(errno, EMFILE);
+        QVERIFY(!reservations.fds.empty());
+        const int freeSlot = reservations.fds.back();
+        reservations.fds.pop_back();
+        QVERIFY(::close(freeSlot) == 0);
 
-    // Assert: setup failed and left no descriptor or notifier fd behind.
-    QVERIFY(!ok);
-    QCOMPARE(bridge.notifierFd(), -1);
-    QCOMPARE(bridge.writeFd_dbg(), -1);
+        // Act
+        const bool ok = bridge.setup();
+        const int setupErrno = errno;
 
-    // Restore the limit and prove the bridge (and a fresh one) can still
-    // succeed -- no descriptor was leaked by the failed attempt.
+        // Assert: failed setup released even a partially allocated pair.
+        QVERIFY(!ok);
+        QCOMPARE(setupErrno, EMFILE);
+        QCOMPARE(bridge.notifierFd(), -1);
+        QCOMPARE(bridge.writeFd_dbg(), -1);
+        const int probe = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+        if (probe != -1)
+            reservations.fds.push_back(probe);
+        QCOMPARE(probe, freeSlot);
+    }
+
+    // Restore the limit and prove the same bridge can retry successfully.
     QVERIFY(setrlimit(RLIMIT_NOFILE, &originalLimit) == 0);
     QVERIFY(bridge.setup());
     bridge.teardown();
