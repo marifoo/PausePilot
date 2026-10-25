@@ -124,6 +124,11 @@ On Ubuntu 24.04, install `clazy` and `clang-15`, then run
 `bash scripts/ci-linux-clazy.sh`. It uses `build/ci-clazy/` and explicitly
 selects Clang 15 to match Ubuntu's Clazy plugin.
 
+The actionlint job checks every GitHub Actions workflow, including embedded
+shell commands through ShellCheck. CI downloads actionlint 1.7.12 and
+verifies its SHA-256 checksum before running it. With actionlint and
+ShellCheck installed, run `actionlint -shellcheck=shellcheck` locally.
+
 ## Credits
 
 - Icon by [Icons8](https://icons8.com/icon/63253/clock).
