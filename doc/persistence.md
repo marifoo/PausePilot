@@ -1,6 +1,6 @@
 # Persistence
 
-µTimer stores its history in a single SQLite file, `uTimer.sqlite`, that
+PausePilot stores its history in a single SQLite file, `uTimer.sqlite`, that
 lives next to the binary. There is no server, no migration tooling, and no
 external client — `SqliteSessionStore` is the only thing that reads or
 writes it. The schema is checked at startup via `checkSchemaOnStartup()`,
@@ -14,6 +14,12 @@ checkpoints.
 
 This document is the storage model. For the seam it sits behind, see the
 `SessionStore` section in `architecture.md`.
+
+The PausePilot rebrand preserves the legacy `uTimer.sqlite`, `uTimer.log`,
+`uTimer.lock`, and `uTimer/` settings identifiers. Replacing the executable
+in the same directory retains existing data and preferences. Sharing the
+lock filename also prevents old and new binaries from using that data
+concurrently.
 
 ## Tables
 
@@ -279,12 +285,12 @@ Everything below runs inside **one transaction covering every day** in
    UTC-ISO text via the same `toUtcIso()` every write uses), and compared
    against the `openSnapshot` rows matching the identical text predicate in
    C++, as a multiset of the five raw columns. Any difference rolls back the
-   whole transaction and returns `Conflict`. This assumes every row uTimer
+   whole transaction and returns `Conflict`. This assumes every row PausePilot
    writes stores canonical UTC-ISO text, so text order equals time order; a
    non-canonical (hand-edited) row is judged by the same predicate on both
    sides, so a change to it is still detected -- the only accepted gap is
    such a row whose actual time overlaps the day but whose text does not,
-   which uTimer itself never produces.
+   which PausePilot itself never produces.
 4. **New-conflict check, per day.** Retained rows are the re-read,
    well-formed rows minus this day's deleted/upserted ids. Any upsert
    overlapping a retained row of the other type rolls back and returns

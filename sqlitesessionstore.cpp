@@ -203,7 +203,7 @@ SqliteSessionStore::SqliteSessionStore(const Settings& settings, QObject *parent
 {
     // Mint a unique connection name using a monotonic counter.
     // See s_connection_seq declaration for rationale (avoids address-reuse collisions).
-    QString connectionName = QString("uTimer_connection_%1").arg(s_connection_seq.fetch_add(1, std::memory_order_relaxed));
+    QString connectionName = QString("PausePilot_connection_%1").arg(s_connection_seq.fetch_add(1, std::memory_order_relaxed));
     db = QSqlDatabase::addDatabase("QSQLITE", connectionName);
 
     db.setDatabaseName(AppPaths::databaseFile());
@@ -823,7 +823,7 @@ bool SqliteSessionStore::ensureDiscardIntentsTable()
  * C3 (R13-001/R14-001): the raw payload is validated as a final guard before
  * any mutation (checked before normalizing, since normalization only merges
  * same-type rows and cannot fix or hide any of these violations).
- * commitSession() only ever carries uTimer's own live-session data, which is
+ * commitSession() only ever carries PausePilot's own live-session data, which is
  * always same-day by construction, so cross-day is rejected along with every
  * other violation.
  */
@@ -1363,7 +1363,7 @@ SessionStoreResult SqliteSessionStore::saveHistoryDays(const std::vector<StoredH
  *            "no entries exist" when the answer is actually unknowable.
  *
  * D1 (R08-004): this matches on overlap, not merely on whether the row
- * *started* that day. Every row a current uTimer write path can produce is
+ * *started* that day. Every row a current PausePilot write path can produce is
  * same-day, so overlap and start-date agree for all conforming data; they
  * diverge only for a legacy cross-midnight row already sitting in someone's
  * database (out of contract, but loadable -- see C3). The sole caller,
@@ -1431,7 +1431,7 @@ SessionStoreResult SqliteSessionStore::saveCheckpoint(DurationType type, const Q
     // C4 fix round 2 (MEDIUM-6): checked before the Disabled guard below --
     // see the precedence rule in sessionstore.h (CallerBug wins over
     // Disabled), matching commitSession. A checkpoint is always
-    // uTimer's own live segment, so it must be strictly same-day like every
+    // PausePilot's own live segment, so it must be strictly same-day like every
     // other write boundary (C3/R13-001/R14-001).
     const std::deque<TimeDuration> checkpointRow{
         TimeDuration::fromPersistedRow(type, startTime, endTime, segmentId)};

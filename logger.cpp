@@ -50,7 +50,7 @@ Logger::Logger()
         }
     }
 
-    log("uTimer Startup >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
+    log("PausePilot Startup >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
 }
 
 void Logger::Log(const QString &text)
@@ -108,7 +108,7 @@ void Logger::forceWriteFailure_dbg(bool fail)
 
 Logger::~Logger()
 {
-    log("uTimer Shutdown <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
+    log("PausePilot Shutdown <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
 
     if (logfile_ != nullptr) {
         logfile_->flush();

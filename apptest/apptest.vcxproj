@@ -68,21 +68,21 @@
       <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)qtest</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <!-- Project-relative rather than $(SolutionDir): apptest.vcxproj is a
-           member of uTimer.sln (Debug only; Release is not built there
+           member of PausePilot.sln (Debug only; Release is not built there
            because apptest relies on debug-only seams), but a standalone
            build outside the solution does not reliably define SolutionDir.
            MSBuildProjectDirectory is always defined for any project.
            .Replace('\','/') avoids emitting literal backslash-letter pairs
            (e.g. \U, \u) that MSVC's preprocessor would otherwise parse as
            (possibly invalid) universal-character-name escapes. -->
-      <PreprocessorDefinitions>UTIMER_PRODUCTION_BINARY="$(MSBuildProjectDirectory.Replace('\','/'))/../debug/uTimer.exe";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>PAUSEPILOT_PRODUCTION_BINARY="$(MSBuildProjectDirectory.Replace('\','/'))/../debug/PausePilot.exe";%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
       <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)qtest</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <PreprocessorDefinitions>UTIMER_PRODUCTION_BINARY="$(MSBuildProjectDirectory.Replace('\','/'))/../release/uTimer.exe";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>PAUSEPILOT_PRODUCTION_BINARY="$(MSBuildProjectDirectory.Replace('\','/'))/../release/PausePilot.exe";%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|Win32'" Label="Configuration">

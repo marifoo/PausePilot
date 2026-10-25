@@ -14,7 +14,7 @@
 /// Computes whether a batch of TimeDuration rows is safe to write: every row
 /// must have a valid, positive interval and a non-empty, unique segment_id,
 /// and no Activity interval may overlap a Pause interval. Used as the final
-/// guard at uTimer's write boundaries (SqliteSessionStore's commitSession,
+/// guard at PausePilot's write boundaries (SqliteSessionStore's commitSession,
 /// saveCheckpoint) and by HistoryEditSession's own save-payload
 /// classification, so an invalid payload is rejected before mutation rather
 /// than silently written.
@@ -52,7 +52,7 @@ enum class Violation {
 /// Validates a complete batch of rows before any of them may be written.
 ///
 /// A row spanning local midnight is always a violation, at every write
-/// boundary (commitSession, saveCheckpoint) -- uTimer adds no
+/// boundary (commitSession, saveCheckpoint) -- PausePilot adds no
 /// split, pass-through, or repair mode for manually introduced multi-day
 /// data (plan section 2). HistoryEditSession never routes such a row this
 /// far (a legacy cross-day row is display-only and never enters its scoped

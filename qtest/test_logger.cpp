@@ -96,7 +96,7 @@ void LoggerTest::test_a1_rotation_trims_oldest_lines_on_first_open()
     QVERIFY2(!fileLines.contains("seed_line_75"), "Line beyond the 1024-line window must be trimmed");
     QVERIFY2(fileLines.contains("seed_line_76"), "First line inside the 1024-line window must survive rotation");
     QVERIFY2(fileLines.contains("seed_line_1099"), "Most recent pre-rotation line must survive rotation");
-    QVERIFY2(content.contains("uTimer Startup"), "Startup marker must follow rotation");
+    QVERIFY2(content.contains("PausePilot Startup"), "Startup marker must follow rotation");
     QVERIFY2(content.contains(marker), "The triggering Log() call must still be written");
 }
 

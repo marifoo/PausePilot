@@ -1,7 +1,7 @@
 # Timer files
 utimer.log
 user-settings.ini
-uTimer
+PausePilot
 uTimer.sqlite
 uTimer.lock
 *.sqlite.*.backup
@@ -20,6 +20,7 @@ __pycache__/
 
 # other build fuiles
 build/
+dist/
 
 # VS project files
 .vs/

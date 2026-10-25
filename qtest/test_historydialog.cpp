@@ -44,7 +44,7 @@ bool execRaw(const QString& dbPath, const QString& sql)
     return ok;
 }
 
-/// H5/WP5: inserts one row via raw SQL, bypassing every uTimer write path
+/// H5/WP5: inserts one row via raw SQL, bypassing every PausePilot write path
 /// (for legacy/out-of-contract shapes: cross-midnight, multi-boundary, bad type).
 bool insertRaw(const QString& dbPath, const QString& segmentId, int type,
                const QDateTime& start, const QDateTime& end, bool finalized)
@@ -1976,7 +1976,7 @@ void HistoryDialogTest::test_H5_unrelated_save_keeps_legacy_rows_and_overlap_byt
         QDateTime(yesterday, QTime(10, 15, 0)), QDateTime(yesterday, QTime(10, 45, 0)));
     TestCommon::seedStoredRows(db, {edited, overlapActivity, overlapPause}, true);
 
-    // Legacy shapes no uTimer write path produces, inserted via raw SQL:
+    // Legacy shapes no PausePilot write path produces, inserted via raw SQL:
     // a single-boundary cross-midnight row (yesterday 23:50 -> today 00:10)
     // and a multi-boundary row (three days ago 23:00 -> yesterday 01:00).
     const QString crossMidnightId = SegmentId::mint().toString();

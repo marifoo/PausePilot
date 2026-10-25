@@ -205,7 +205,7 @@ private slots:
     void test_C2_updateDurationsById_rolls_back_on_commit_failure();
 
     // C3 (R13-001/R14-001): the day-validity/overlap payload guard rejects
-    // an invalid payload before mutation at every uTimer write boundary, and
+    // an invalid payload before mutation at every PausePilot write boundary, and
     // ordinary load deletes malformed finalized rows transactionally.
     void test_C3_loadDurations_deletes_all_malformed_row_shapes();
     // Finding 4 (C3 review, Medium): prove commit-or-rollback for the

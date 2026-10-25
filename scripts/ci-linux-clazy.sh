@@ -14,7 +14,7 @@ export CLAZY_CHECKS=level0
 # without requiring an unrelated application-wide cleanup to introduce CI.
 export CLAZY_CHECKS_AS_ERRORS=connect-non-signal,lambda-in-connect,lambda-unique-connection,temporary-iterator,wrong-qevent-cast,writing-to-temporary
 
-qmake "$repo_dir/uTimer.pro" -spec linux-clang \
+qmake "$repo_dir/PausePilot.pro" -spec linux-clang \
     'QMAKE_CC=clang-15' \
     'QMAKE_CXX=clazy' \
     'QMAKE_LINK=clang++-15'

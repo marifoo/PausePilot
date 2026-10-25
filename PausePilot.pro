@@ -1,4 +1,4 @@
-TARGET = uTimer
+TARGET = PausePilot
 
 HEADERS = \
    $$PWD/apppaths.h \

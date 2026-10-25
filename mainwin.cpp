@@ -38,7 +38,7 @@ MainWin::MainWin(Settings& settings, TimeTracker& timetracker, SessionStore& db,
 
 	setupIcon();
 
-	setWindowTitle("µTimer");
+	setWindowTitle("PausePilot");
 	setWindowFlags(windowFlags() &(~Qt::WindowMaximizeButtonHint));
 
 	// Queued: showMsgBox's QMessageBox::exec() opens a nested event loop. If
@@ -100,7 +100,7 @@ void MainWin::showMsgBox(const QString &text)
 	showMainWin();
 
 	QMessageBox msgBox(this);
-	msgBox.setWindowTitle("µTimer Warning");
+	msgBox.setWindowTitle("PausePilot Warning");
 	msgBox.setText(text);
 	msgBox.setIcon(QMessageBox::Warning);
 	msgBox.exec();
@@ -109,7 +109,7 @@ void MainWin::showMsgBox(const QString &text)
 void MainWin::showUserWarning(const QString& text)
 {
 	if (tray_icon_ && tray_icon_->isVisible()) {
-		tray_icon_->showMessage("uTimer Warning", text, QSystemTrayIcon::Warning, 10000);
+		tray_icon_->showMessage("PausePilot Warning", text, QSystemTrayIcon::Warning, 10000);
 	}
 
 	statusBar()->showMessage(text, 10000);
@@ -206,7 +206,7 @@ void MainWin::start()
 	if (!message.isEmpty()) {
 		statusBar()->showMessage(message, 10000);
 		if (tray_icon_ && tray_icon_->isVisible()) {
-			tray_icon_->showMessage("uTimer Recovery", message, QSystemTrayIcon::Information, 10000);
+			tray_icon_->showMessage("PausePilot Recovery", message, QSystemTrayIcon::Information, 10000);
 		}
 	}
 
@@ -251,10 +251,10 @@ void MainWin::shutdown(ShutdownMode mode)
 			// Medium-3 (R05-002 follow-up): the drain itself was Complete --
 			// session data is already saved. Only the clean-shutdown record
 			// failed to write, so this must not be presented as data loss.
-			box.setWindowTitle("uTimer - Shutdown Record Not Written");
-			box.setText("Your session was saved, but uTimer could not write the clean-shutdown record. Retry, or exit anyway?");
+			box.setWindowTitle("PausePilot - Shutdown Record Not Written");
+			box.setText("Your session was saved, but PausePilot could not write the clean-shutdown record. Retry, or exit anyway?");
 		} else {
-			box.setWindowTitle("uTimer - Could Not Save");
+			box.setWindowTitle("PausePilot - Could Not Save");
 			box.setText("Could not save the current session. Retry, or exit and keep only what was already saved?");
 		}
 		QAbstractButton* retryButton = box.addButton("Retry", QMessageBox::AcceptRole);

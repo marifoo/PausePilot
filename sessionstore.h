@@ -446,7 +446,7 @@ public:
     /// consistent and a change to it is still detected; the only accepted
     /// gap is such a row whose actual *time* overlaps a day but whose *text*
     /// does not, which falls outside both the stale check and the
-    /// new-conflict check. uTimer itself never writes such a row.
+    /// new-conflict check. PausePilot itself never writes such a row.
     virtual SessionStoreResult saveHistoryDays(const std::vector<StoredHistoryRow>& openSnapshot,
                                                const std::vector<HistoryDayChange>& days) = 0;
 

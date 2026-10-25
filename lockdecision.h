@@ -33,10 +33,10 @@ inline QString message(Outcome outcome)
 {
     switch (outcome) {
     case Outcome::AnotherInstance:
-        return "Another instance of µTimer is already running.\n\n"
+        return "Another instance of PausePilot is already running.\n\n"
                "Please close it before starting a new one.";
     case Outcome::OwnershipUnknown:
-        return "Could not establish exclusive ownership for µTimer "
+        return "Could not establish exclusive ownership for PausePilot "
                "(the instance lock file could not be created or locked).\n\n"
                "Please check that the application directory is writable and restart.";
     }

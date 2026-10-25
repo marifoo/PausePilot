@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guard against uTimer.pro/qtest.pro/apptest.pro drifting apart from their MSVC
+"""Guard against PausePilot.pro/qtest.pro/apptest.pro drifting apart from their MSVC
 .vcxproj counterparts (see plan4.md A1). Compares the SOURCES/HEADERS file lists
 on each side and fails on any difference.
 
@@ -73,7 +73,7 @@ def check(pro_path, vcxproj_path):
 
 def main():
     problems = []
-    problems += check(ROOT / "uTimer.pro", ROOT / "uTimer.vcxproj")
+    problems += check(ROOT / "PausePilot.pro", ROOT / "PausePilot.vcxproj")
     problems += check(ROOT / "qtest" / "qtest.pro", ROOT / "qtest" / "qtest.vcxproj")
     problems += check(ROOT / "apptest" / "apptest.pro", ROOT / "apptest" / "apptest.vcxproj")
 

@@ -17,6 +17,7 @@
 #include "logger.h"
 
 namespace {
+// Keep the legacy INI group so existing preferences survive the rebrand.
 static const QString kKeyPressStart        = "uTimer/press_start_button_on_app_start";
 static const QString kKeyAutopause         = "uTimer/autopause_enabled";
 static const QString kKeyAutopauseThresh   = "uTimer/autopause_threshold_minutes";

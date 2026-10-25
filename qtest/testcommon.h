@@ -86,7 +86,7 @@ struct DayOverlapRow {
 
 std::vector<DayOverlapRow> dayOverlapRows();
 
-/// D13a: points AppPaths::dataDirectory() (via the UTIMER_DATA_DIR override
+/// D13a: points AppPaths::dataDirectory() (via the PAUSEPILOT_DATA_DIR override
 /// apppaths.h already honors for C1's subprocess tests) at dirPath, so a
 /// suite's SqliteSessionStore/Logger calls use a private database file that
 /// cannot collide with another suite's. Call from initTestCase() with a

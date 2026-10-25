@@ -13,21 +13,21 @@ linux {
 
 INCLUDEPATH += $$PWD/.. $$PWD/../qtest
 
-# Absolute path to the production binary. uTimer.pro is apptest.pro's sibling
+# Absolute path to the production binary. PausePilot.pro is apptest.pro's sibling
 # directory, and qmake places a target's output directly under that target's
 # own build directory, so the production binary lands one directory above
 # apptest's own build directory ($$OUT_PWD) for both an in-tree build
 # ($$OUT_PWD == $$PWD, so this is $$PWD/..) and a whole-project shadow build
 # whose shadow tree mirrors the source tree's apptest/ subdirectory. An
-# apptest-only shadow build (no sibling uTimer build) correctly resolves to a
-# path with no binary present; UTIMER_BIN lets the harness override it at
+# apptest-only shadow build (no sibling PausePilot build) correctly resolves to a
+# path with no binary present; PAUSEPILOT_BIN lets the harness override it at
 # test run time for a binary built elsewhere.
-UTIMER_PRODUCTION_DIR = $$absolute_path($$OUT_PWD/..)
-UTIMER_PRODUCTION_BIN = $$UTIMER_PRODUCTION_DIR/uTimer
-win32: UTIMER_PRODUCTION_BIN = $$UTIMER_PRODUCTION_DIR/uTimer.exe
+PAUSEPILOT_PRODUCTION_DIR = $$absolute_path($$OUT_PWD/..)
+PAUSEPILOT_PRODUCTION_BIN = $$PAUSEPILOT_PRODUCTION_DIR/PausePilot
+win32: PAUSEPILOT_PRODUCTION_BIN = $$PAUSEPILOT_PRODUCTION_DIR/PausePilot.exe
 # shell_quote() is required so a checkout path containing a space still
 # produces a single valid -D switch (a naive \" ... \" is stripped by qmake).
-DEFINES += UTIMER_PRODUCTION_BINARY=$$shell_quote(\"$$UTIMER_PRODUCTION_BIN\")
+DEFINES += PAUSEPILOT_PRODUCTION_BINARY=$$shell_quote(\"$$PAUSEPILOT_PRODUCTION_BIN\")
 
 SOURCES += \
     main.cpp \

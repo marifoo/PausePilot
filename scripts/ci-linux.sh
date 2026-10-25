@@ -4,10 +4,10 @@
 set -euo pipefail
 
 repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-build_dir="${UTIMER_CI_BUILD_DIR:-$repo_dir/build/ci}"
+build_dir="${PAUSEPILOT_CI_BUILD_DIR:-$repo_dir/build/ci}"
 
 export QT_QPA_PLATFORM=offscreen
-export XDG_RUNTIME_DIR="${RUNNER_TEMP:-$build_dir}/utimer-runtime"
+export XDG_RUNTIME_DIR="${RUNNER_TEMP:-$build_dir}/pausepilot-runtime"
 install -d -m 700 "$XDG_RUNTIME_DIR"
 
 build_target() {
@@ -22,7 +22,7 @@ build_target() {
     )
 }
 
-build_target "$build_dir" "$repo_dir/uTimer.pro" "$@"
+build_target "$build_dir" "$repo_dir/PausePilot.pro" "$@"
 build_target "$build_dir/qtest" "$repo_dir/qtest/qtest.pro" "$@"
 "$build_dir/qtest/qtest"
 build_target "$build_dir/apptest" "$repo_dir/apptest/apptest.pro" "$@"

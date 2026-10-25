@@ -1,4 +1,4 @@
-# Working on uTimer
+# Working on PausePilot
 
 ## Architecture and design
 
@@ -42,8 +42,8 @@ Both Qt test runners must pass before a code change is considered verified:
   and `unixsignalbridge.cpp`, which the component runner deliberately omits.
 
 `apptest` requires a built production executable. Its qmake definition embeds
-`UTIMER_PRODUCTION_BINARY` relative to the parent of the test build directory
-(`$$OUT_PWD/..`). Build production first in that parent, or set `UTIMER_BIN`
+`PAUSEPILOT_PRODUCTION_BINARY` relative to the parent of the test build directory
+(`$$OUT_PWD/..`). Build production first in that parent, or set `PAUSEPILOT_BIN`
 at test run time to an executable built elsewhere.
 
 Run GUI tests with `QT_QPA_PLATFORM=offscreen`. On Linux, `qtest` permits no

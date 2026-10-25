@@ -1,21 +1,21 @@
-# µTimer
+# PausePilot
 
 A lightweight desktop timer that tracks your active and pause time and gets
-out of your way. Lock your PC, take a break, come back — µTimer keeps the
+out of your way. Lock your PC, take a break, come back — PausePilot keeps the
 numbers honest without you having to remember to press anything.
 
 ![Screenshot](screenshot.png)
 
 ## Features
 
-- **Lock detection.** When you lock the screen, µTimer pauses automatically.
+- **Lock detection.** When you lock the screen, PausePilot pauses automatically.
   When you come back, it resumes. No manual click needed.
 - **Smart auto-pause.** Short lock-screens (e.g. a quick chat at the door)
   don't count as breaks. Only locks longer than a configurable threshold
   (15 minutes by default) are treated as pauses.
 - **Editable history.** Optionally keep a history of past sessions and
   fix-up entries after the fact if you forgot to start or stop the timer.
-- **Crash-resilient.** µTimer checkpoints the running session every few
+- **Crash-resilient.** PausePilot checkpoints the running session every few
   minutes, so a power cut or unexpected reboot doesn't lose your tracked
   time.
 - **Stays out of the way.** Pin-to-top and minimize-to-tray modes; the app
@@ -23,15 +23,19 @@ numbers honest without you having to remember to press anything.
 
 ## Install
 
-µTimer is portable: its database, log, and settings files always live next
+PausePilot is portable: its database, log, and settings files always live next
 to the executable. Run it from a folder you can write to (your user profile,
 Desktop, a USB stick, etc.) — **not** `Program Files`, `/usr/bin`, or another
 admin-protected location, or it will fail to start.
 
+Upgrading from uTimer: put the PausePilot executable in your existing app
+folder. The data filenames and settings keys retain their original names
+so your history and preferences carry over automatically.
+
 ### Windows
 
 Grab the latest pre-built release from the
-[Releases page](https://github.com/marifoo/uTimer/releases) and run the
+[Releases page](https://github.com/marifoo/PausePilot/releases) and run the
 executable. No installer, no admin rights — just drop it in a folder and
 start it.
 
@@ -41,9 +45,9 @@ There is no pre-built binary for Linux, but the app builds and runs on it.
 You will need Qt 5 (5.14 or later), a recent GCC, and `qmake`:
 
 ```sh
-qmake uTimer.pro
+qmake PausePilot.pro
 make
-./uTimer
+./PausePilot
 ```
 
 Lock detection on Linux uses D-Bus — systemd-logind, the generic freedesktop
@@ -65,7 +69,7 @@ the current day, plus the time you started.
 - **Auto-Pause** — toggles whether long locks count as pauses.
 - **Pin / Tray** — keeps the window on top, or hides it to the system tray.
 
-µTimer resets at midnight and writes each day's totals to its history.
+PausePilot resets at midnight and writes each day's totals to its history.
 
 ## Settings
 

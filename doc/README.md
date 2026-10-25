@@ -1,4 +1,4 @@
-# µTimer developer documentation
+# PausePilot developer documentation
 
 This folder is for **contributors** who have read the top-level `README.md`
 and now want to understand how the application is structured before opening

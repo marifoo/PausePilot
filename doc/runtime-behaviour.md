@@ -1,6 +1,6 @@
 # Runtime behaviour
 
-This document covers what happens *while µTimer is running*: the state
+This document covers what happens *while PausePilot is running*: the state
 machine, the heartbeat that ticks it, how cross-midnight cases are handled,
 and how shutdown is orchestrated. For *what the components are*, see
 `architecture.md`; for *what is stored on disk*, see `persistence.md`.

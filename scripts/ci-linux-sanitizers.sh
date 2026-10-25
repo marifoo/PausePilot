@@ -3,9 +3,9 @@
 set -euo pipefail
 
 repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-export UTIMER_CI_BUILD_DIR="$repo_dir/build/ci-sanitizers"
-mkdir -p "$UTIMER_CI_BUILD_DIR"
-report_dir="$(mktemp -d "$UTIMER_CI_BUILD_DIR/sanitizer-reports.XXXXXX")"
+export PAUSEPILOT_CI_BUILD_DIR="$repo_dir/build/ci-sanitizers"
+mkdir -p "$PAUSEPILOT_CI_BUILD_DIR"
+report_dir="$(mktemp -d "$PAUSEPILOT_CI_BUILD_DIR/sanitizer-reports.XXXXXX")"
 
 # QProcess children can capture diagnostics or intentionally exit nonzero.
 # Fail on their sanitizer reports too, even when the parent suite passes.

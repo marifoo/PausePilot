@@ -10,7 +10,7 @@ bool runStartupRecovery(TimeTracker& tracker)
     StartupRecoveryResult result = tracker.initializeFromStore();
     while (!result.okOrDisabled()) {
         QMessageBox box;
-        box.setWindowTitle("uTimer - Startup Recovery Failed");
+        box.setWindowTitle("PausePilot - Startup Recovery Failed");
         box.setIcon(QMessageBox::Warning);
         box.setText("Could not recover data from the last session. Retry, or quit and leave it for next time?");
         QAbstractButton* retryButton = box.addButton("Retry", QMessageBox::AcceptRole);

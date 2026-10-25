@@ -54,12 +54,12 @@ QDateTime fixedNowUtc()
 
 void setDataDirOverride(const QString& dirPath)
 {
-    qputenv("UTIMER_DATA_DIR", dirPath.toUtf8());
+    qputenv("PAUSEPILOT_DATA_DIR", dirPath.toUtf8());
 }
 
 void clearDataDirOverride()
 {
-    qunsetenv("UTIMER_DATA_DIR");
+    qunsetenv("PAUSEPILOT_DATA_DIR");
 }
 
 void seedStoredRows(SqliteSessionStore& db, const std::deque<TimeDuration>& rows, bool finalized)

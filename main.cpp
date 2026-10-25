@@ -59,7 +59,7 @@ int main(int argc, char *argv[])
 	}
 #endif
 
-	QCoreApplication::setApplicationName("µTimer");
+	QCoreApplication::setApplicationName("PausePilot");
 
 	QApplication application(argc, argv);
 	application.setStyle(QStyleFactory::create("Fusion"));
@@ -91,7 +91,7 @@ int main(int argc, char *argv[])
 		// forever there instead of returning immediately.
 		const QString platform = QGuiApplication::platformName();
 		if (platform != "offscreen" && platform != "minimal")
-			QMessageBox::critical(nullptr, "µTimer", text);
+			QMessageBox::critical(nullptr, "PausePilot", text);
 
 		return LockDecision::exitCode(outcome);
 	}
@@ -112,7 +112,7 @@ int main(int argc, char *argv[])
 	const SchemaStatus schemaStatus = session_store.checkSchemaOnStartup();
 	if (schemaStatus == SchemaStatus::Outdated) {
 		QMessageBox::critical(nullptr, "Database Schema Mismatch",
-			"The database schema is not compatible with this version of µTimer.\n\n"
+			"The database schema is not compatible with this version of PausePilot.\n\n"
 			"Please rename or delete the following file and restart:\n"
 			+ AppPaths::databaseFile());
 		return 1;

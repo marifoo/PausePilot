@@ -48,15 +48,15 @@ namespace {
 // The production binary's location is not derivable from this test binary's
 // own applicationDirPath() in a shadow build (a build directory separate
 // from the checkout): the two targets need not share a parent directory.
-// UTIMER_PRODUCTION_BINARY is injected by apptest.pro/apptest.vcxproj as an
+// PAUSEPILOT_PRODUCTION_BINARY is injected by apptest.pro/apptest.vcxproj as an
 // absolute, checkout-relative path resolved at qmake/project time instead;
-// UTIMER_BIN lets the harness override it for a binary built elsewhere.
+// PAUSEPILOT_BIN lets the harness override it for a binary built elsewhere.
 QString productionExecutable()
 {
-    const QString overridePath = qEnvironmentVariable("UTIMER_BIN");
+    const QString overridePath = qEnvironmentVariable("PAUSEPILOT_BIN");
     if (!overridePath.isEmpty())
         return QDir::fromNativeSeparators(overridePath);
-    return QStringLiteral(UTIMER_PRODUCTION_BINARY);
+    return QStringLiteral(PAUSEPILOT_PRODUCTION_BINARY);
 }
 
 // Names the exact resolved path a failed start attempted, so a bare Qt
@@ -66,7 +66,7 @@ QString productionExecutable()
 QString startFailureMessage(const QProcess& process)
 {
     return QString("could not start production binary \"%1\" (%2); "
-                    "set UTIMER_BIN to override the resolved path")
+                    "set PAUSEPILOT_BIN to override the resolved path")
         .arg(productionExecutable(), process.errorString());
 }
 
@@ -74,7 +74,7 @@ QProcessEnvironment productionEnvironment(const QString& dataDirectory)
 {
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
     environment.insert("QT_QPA_PLATFORM", "offscreen");
-    environment.insert("UTIMER_DATA_DIR", dataDirectory);
+    environment.insert("PAUSEPILOT_DATA_DIR", dataDirectory);
     return environment;
 }
 
@@ -701,7 +701,7 @@ void AppShellTest::test_production_start_reclaims_stale_lock()
     const QByteArray staleLockData =
         // Empty host/host-id/boot-id fields make QLockFile use the local
         // process check, where this deliberately nonexistent PID is stale.
-        "999999999\nuTimer\n\n\n\n";
+        "999999999\nPausePilot\n\n\n\n";
     QFile staleLock(lockPath);
     QVERIFY(staleLock.open(QIODevice::WriteOnly | QIODevice::Truncate));
     QCOMPARE(staleLock.write(staleLockData), qint64(staleLockData.size()));
@@ -1416,7 +1416,7 @@ void AppShellTest::test_production_sigterm_drains_and_writes_clean_shutdown_mark
     QTest::qWait(100);
 
     // Act: a real SIGTERM, delivered by the kernel to the production
-    // process's real signal handler -- not a call to any uTimer function.
+    // process's real signal handler -- not a call to any PausePilot function.
     production.process.terminate();
     const bool finished = production.process.waitForFinished(5000);
 

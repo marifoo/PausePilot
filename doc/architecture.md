@@ -1,6 +1,6 @@
 # Architecture
 
-µTimer is a single-process Qt desktop application. There are **no threads of
+PausePilot is a single-process Qt desktop application. There are **no threads of
 our own** — everything runs on the Qt event loop driven by a 100 ms heartbeat
 `QTimer` constructed in `main.cpp`. The components below are plain C++ objects
 owned on the stack of `main()`; they communicate through Qt signals/slots

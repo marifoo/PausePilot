@@ -916,7 +916,7 @@ void IntegrationTest::test_AA_no_duplicate_stop_signal()
 void IntegrationTest::test_AB_scheduleMidnightStop_is_gone()
 {
     const QString mainwinHPath =
-        QDir(QStringLiteral(UTIMER_SOURCE_DIR)).filePath("mainwin.h");
+        QDir(QStringLiteral(PAUSEPILOT_SOURCE_DIR)).filePath("mainwin.h");
     QFile mainwinH(mainwinHPath);
     QVERIFY2(mainwinH.open(QIODevice::ReadOnly | QIODevice::Text),
              qPrintable("Cannot open mainwin.h: " + mainwinHPath));
@@ -1183,7 +1183,7 @@ void IntegrationTest::test_hasEntriesForDate_timezone()
  * boot-credit gate benefits from hasEntriesForDate()'s overlap semantics, on
  * a Europe/Berlin DST-transition day (2025-03-30, local day is 23h). A
  * legacy row spanning the *previous* local midnight (out-of-contract, only
- * reachable via manual DB modification -- no uTimer write path produces it)
+ * reachable via manual DB modification -- no PausePilot write path produces it)
  * already covers the first half hour of "today"; boot credit must not add a
  * second helping of that time.
  */

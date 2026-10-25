@@ -1187,7 +1187,7 @@ void DatabaseTest::test_hasEntriesForDate_utc_regression()
 void DatabaseTest::test_hasEntriesForDate_overlap_detects_legacy_cross_midnight_row()
 {
     // D1 (R08-004): a legacy row spanning local midnight -- unsupported by any
-    // uTimer write path, but reachable via manual database modification --
+    // PausePilot write path, but reachable via manual database modification --
     // must still suppress boot credit for the day it spills into. A row
     // starting 2025-06-14 23:30 local and ending 2025-06-15 00:30 local
     // overlaps 2025-06-15 even though it did not *start* there; boot credit
@@ -4281,7 +4281,7 @@ void DatabaseTest::test_C2_saveCheckpoint_insert_rolls_back_on_genuine_commit_lo
 // ============================================================================
 // C3 (R13-001/R14-001): the day-validity/overlap payload guard (dayvalidity.h)
 // rejects an invalid payload as a CallerBug before any mutation at every
-// uTimer write boundary, uniformly -- including a legacy cross-midnight row
+// PausePilot write boundary, uniformly -- including a legacy cross-midnight row
 // (MUST-FIX1, review packet C3: HistoryEditSession never carries such a row
 // into its scoped save diff; see historyeditsession.cpp's buildScopedSave()
 // and qtest/test_historyeditsession.cpp's
@@ -4643,7 +4643,7 @@ void DatabaseTest::test_D8_schema_inaccessible_when_directory_not_writable()
 
     // R06-002: a readable, file-permission-writable DB file is not proof
     // that its containing directory can host SQLite's rollback journal.
-    // Uses AppPaths' UTIMER_DATA_DIR override (already relied on by the
+    // Uses AppPaths' PAUSEPILOT_DATA_DIR override (already relied on by the
     // apptest suite) to point a real store at an isolated temp directory
     // instead of the shared applicationDirPath() database.
     QTemporaryDir tempDir;
@@ -4653,11 +4653,11 @@ void DatabaseTest::test_D8_schema_inaccessible_when_directory_not_writable()
         QByteArray orig;
         bool hadOrig;
         ~EnvGuard() {
-            if (hadOrig) qputenv("UTIMER_DATA_DIR", orig);
-            else qunsetenv("UTIMER_DATA_DIR");
+            if (hadOrig) qputenv("PAUSEPILOT_DATA_DIR", orig);
+            else qunsetenv("PAUSEPILOT_DATA_DIR");
         }
-    } envGuard{ qgetenv("UTIMER_DATA_DIR"), qEnvironmentVariableIsSet("UTIMER_DATA_DIR") };
-    qputenv("UTIMER_DATA_DIR", tempDir.path().toUtf8());
+    } envGuard{ qgetenv("PAUSEPILOT_DATA_DIR"), qEnvironmentVariableIsSet("PAUSEPILOT_DATA_DIR") };
+    qputenv("PAUSEPILOT_DATA_DIR", tempDir.path().toUtf8());
 
     Settings settings(createSettingsFile(tempDir.path(), 7));
 
