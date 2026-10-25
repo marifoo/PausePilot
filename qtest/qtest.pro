@@ -13,6 +13,10 @@ linux {
 
 INCLUDEPATH += $$PWD/..
 
+# Source-reading tests must also work from shadow builds and arbitrary CWDs.
+UTIMER_SOURCE_DIR = $$absolute_path($$PWD/..)
+DEFINES += UTIMER_SOURCE_DIR=$$shell_quote(\"$$UTIMER_SOURCE_DIR\")
+
 SOURCES += \
     main.cpp \
     testcommon.cpp \

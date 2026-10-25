@@ -911,12 +911,12 @@ void IntegrationTest::test_AA_no_duplicate_stop_signal()
  * Test AB — scheduleMidnightStop is gone.
  *
  * Verify that the symbol scheduleMidnightStop no longer appears in mainwin.h.
- * The test binary lives in qtest/; mainwin.h is one directory up.
+ * Resolve the source independently of the test binary's build directory.
  */
 void IntegrationTest::test_AB_scheduleMidnightStop_is_gone()
 {
     const QString mainwinHPath =
-        QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("../mainwin.h");
+        QDir(QStringLiteral(UTIMER_SOURCE_DIR)).filePath("mainwin.h");
     QFile mainwinH(mainwinHPath);
     QVERIFY2(mainwinH.open(QIODevice::ReadOnly | QIODevice::Text),
              qPrintable("Cannot open mainwin.h: " + mainwinHPath));

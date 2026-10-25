@@ -13,8 +13,7 @@
  */
 void RenamesTest::test_no_old_names_in_production_headers()
 {
-    const QString srcDir =
-        QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("..");
+    const QString srcDir = QStringLiteral(UTIMER_SOURCE_DIR);
 
     // Production headers to check (excludes design docs and memory files)
     const QStringList headers = {
@@ -77,8 +76,7 @@ void RenamesTest::test_no_old_names_in_production_headers()
  */
 void RenamesTest::test_no_stale_identifiers_in_docs()
 {
-    const QString srcDir =
-        QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("..");
+    const QString srcDir = QStringLiteral(UTIMER_SOURCE_DIR);
 
     const QStringList docFiles = {
         "doc/architecture.md",
