@@ -181,11 +181,13 @@ QString rowFingerprint(const StoredHistoryRow& r)
 // order-independent (the stale check in saveHistoryDays()).
 bool sameRawRows(const std::vector<StoredHistoryRow>& a, const std::vector<StoredHistoryRow>& b)
 {
-    QStringList fpA, fpB;
-    for (const auto& r : a) fpA << rowFingerprint(r);
-    for (const auto& r : b) fpB << rowFingerprint(r);
-    fpA.sort();
-    fpB.sort();
+    std::vector<QString> fpA, fpB;
+    fpA.reserve(a.size());
+    fpB.reserve(b.size());
+    for (const auto& r : a) fpA.push_back(rowFingerprint(r));
+    for (const auto& r : b) fpB.push_back(rowFingerprint(r));
+    std::sort(fpA.begin(), fpA.end());
+    std::sort(fpB.begin(), fpB.end());
     return fpA == fpB;
 }
 
