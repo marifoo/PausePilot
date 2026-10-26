@@ -789,30 +789,10 @@ void HistoryEditSessionTest::test_M3_timezone_change_makes_row_single_boundary_c
     // M3: an ordinary timezone change can turn a valid same-day UTC row into
     // a single-boundary cross-midnight row on reload -- no edit, no DST, no
     // manual DB tampering involved.
-#ifndef Q_OS_UNIX
-    QSKIP("tzset()-based TZ switching is Unix-specific");
-#else
-    // Function-local RAII guard: saves TZ, restores it (and calls tzset())
+    // Scoped RAII guard: restores the local calendar
     // on destruction, so this test cannot leak its timezone into any test
     // that runs after it.
-    struct TzGuard {
-        std::optional<QByteArray> saved;
-        TzGuard() {
-            const char* tz = getenv("TZ");
-            saved = tz ? std::make_optional(QByteArray(tz)) : std::nullopt;
-        }
-        void set(const QByteArray& tz) {
-            qputenv("TZ", tz);
-            tzset();
-        }
-        ~TzGuard() {
-            if (saved)
-                qputenv("TZ", *saved);
-            else
-                qunsetenv("TZ");
-            tzset();
-        }
-    } tzGuard;
+    TestCommon::TzGuard tzGuard;
 
     const SegmentId rowId = SegmentId::mint();
     const QDateTime start(QDate(2025, 6, 14), QTime(22, 30, 0), Qt::UTC);
@@ -858,7 +838,6 @@ void HistoryEditSessionTest::test_M3_timezone_change_makes_row_single_boundary_c
                 if (d.segment_id == rowId) ++pendingCount;
         QCOMPARE(pendingCount, 0);
     }
-#endif
 }
 
 // ---------------------------------------------------------------------------

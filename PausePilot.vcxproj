@@ -228,6 +228,7 @@
     <ClInclude Include="startuprecovery.h" />
     <ClInclude Include="timeformat.h" />
     <ClInclude Include="timeline.h" />
+    <ClInclude Include="localtime.h" />
     <ClInclude Include="types.h" />
   </ItemGroup>
   <ItemGroup>

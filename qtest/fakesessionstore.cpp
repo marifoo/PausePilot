@@ -133,8 +133,8 @@ StoredHistoryRow toStoredHistoryRow(const TimeDuration& d, bool finalized)
         const int typeInt = row.type.toInt();
         if (typeInt == static_cast<int>(DurationType::Activity) ||
             typeInt == static_cast<int>(DurationType::Pause)) {
-            const QDateTime startLocal = QDateTime::fromString(row.startUtc, Qt::ISODateWithMs).toLocalTime();
-            const QDateTime endLocal = QDateTime::fromString(row.endUtc, Qt::ISODateWithMs).toLocalTime();
+            const QDateTime startLocal = LocalTime::fromInstant(QDateTime::fromString(row.startUtc, Qt::ISODateWithMs));
+            const QDateTime endLocal = LocalTime::fromInstant(QDateTime::fromString(row.endUtc, Qt::ISODateWithMs));
             if (startLocal.isValid() && endLocal.isValid() && startLocal <= endLocal && startLocal.msecsTo(endLocal) > 0) {
                 const SegmentId segmentId = SegmentId::fromString(row.segmentId);
                 const DurationType type = static_cast<DurationType>(typeInt);

@@ -929,8 +929,8 @@ std::optional<TimeDuration> SqliteSessionStore::parseHistoryRow(const QString& s
     }
     const DurationType type = static_cast<DurationType>(typeInt);
 
-    const QDateTime startDateTime = QDateTime::fromString(startUtcStr, Qt::ISODateWithMs).toLocalTime();
-    const QDateTime endDateTime   = QDateTime::fromString(endUtcStr, Qt::ISODateWithMs).toLocalTime();
+    const QDateTime startDateTime = LocalTime::fromInstant(QDateTime::fromString(startUtcStr, Qt::ISODateWithMs));
+    const QDateTime endDateTime   = LocalTime::fromInstant(QDateTime::fromString(endUtcStr, Qt::ISODateWithMs));
     if (!startDateTime.isValid() || !endDateTime.isValid()) {
         return std::nullopt;
     }
@@ -1870,8 +1870,8 @@ std::optional<SqliteSessionStore::OrphanLoadResult> SqliteSessionStore::loadUnfi
             continue;
         }
 
-        const QDateTime startTime = QDateTime::fromString(query.value(3).toString(), Qt::ISODateWithMs).toLocalTime();
-        const QDateTime endTime   = QDateTime::fromString(query.value(4).toString(), Qt::ISODateWithMs).toLocalTime();
+        const QDateTime startTime = LocalTime::fromInstant(QDateTime::fromString(query.value(3).toString(), Qt::ISODateWithMs));
+        const QDateTime endTime   = LocalTime::fromInstant(QDateTime::fromString(query.value(4).toString(), Qt::ISODateWithMs));
         if (!startTime.isValid() || !endTime.isValid()) {
             Logger::Log(QString("[DB] loadUnfinalizedCheckpoints: malformed row (invalid timestamp(s)), id=%1 start=%2 end=%3")
                 .arg(rowId).arg(query.value(3).toString()).arg(query.value(4).toString()));
@@ -2150,7 +2150,7 @@ std::optional<SqliteSessionStore::MarkerResult> SqliteSessionStore::readLastClea
             parsed = QDateTime::fromString(value, Qt::ISODate);
         }
         if (parsed.isValid()) {
-            parsedTs = parsed.toLocalTime();
+            parsedTs = LocalTime::fromInstant(parsed);
         }
     }
 

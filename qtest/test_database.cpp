@@ -1043,14 +1043,9 @@ void DatabaseTest::test_hasEntriesForDate_utc_positive_offset()
     // equals local 2025-01-01 00:30:00 +09:00, so it belongs to local date
     // 2025-01-01, not 2024-12-31.
 
-    // RAII guard: restores TZ even if a QVERIFY/QCOMPARE assertion fires return early.
-    struct TzGuard {
-        QByteArray orig;
-        TzGuard() : orig(qgetenv("TZ")) {}
-        ~TzGuard() { orig.isEmpty() ? qunsetenv("TZ") : qputenv("TZ", orig); tzset(); }
-    } tzGuard;
-    qputenv("TZ", "Asia/Tokyo");
-    tzset();
+    // RAII guard: restores the local calendar even if a QVERIFY/QCOMPARE assertion fires return early.
+    TestCommon::TzGuard tzGuard;
+    tzGuard.set("Asia/Tokyo");
 
     resetDatabaseFile();
     QTemporaryDir tempDir;
@@ -1095,13 +1090,8 @@ void DatabaseTest::test_hasEntriesForDate_utc_negative_offset()
     // equals local 2025-01-01 22:00:00 -10:00, so it belongs to local date
     // 2025-01-01, not 2025-01-02.
 
-    struct TzGuard {
-        QByteArray orig;
-        TzGuard() : orig(qgetenv("TZ")) {}
-        ~TzGuard() { orig.isEmpty() ? qunsetenv("TZ") : qputenv("TZ", orig); tzset(); }
-    } tzGuard;
-    qputenv("TZ", "Pacific/Honolulu");
-    tzset();
+    TestCommon::TzGuard tzGuard;
+    tzGuard.set("Pacific/Honolulu");
 
     resetDatabaseFile();
     QTemporaryDir tempDir;
@@ -1142,13 +1132,8 @@ void DatabaseTest::test_hasEntriesForDate_utc_regression()
     // UTC zone, mid-day entry: end_date='2025-06-15' end_time='12:00:00.000'.
     // With TZ=UTC local date == UTC date, so behaviour should be unchanged.
 
-    struct TzGuard {
-        QByteArray orig;
-        TzGuard() : orig(qgetenv("TZ")) {}
-        ~TzGuard() { orig.isEmpty() ? qunsetenv("TZ") : qputenv("TZ", orig); tzset(); }
-    } tzGuard;
-    qputenv("TZ", "UTC");
-    tzset();
+    TestCommon::TzGuard tzGuard;
+    tzGuard.set("UTC");
 
     resetDatabaseFile();
     QTemporaryDir tempDir;
@@ -1193,13 +1178,8 @@ void DatabaseTest::test_hasEntriesForDate_overlap_detects_legacy_cross_midnight_
     // overlaps 2025-06-15 even though it did not *start* there; boot credit
     // must not be added for 2025-06-15 in that case (double-counting the
     // 00:00-00:30 portion already covered by the legacy row).
-    struct TzGuard {
-        QByteArray orig;
-        TzGuard() : orig(qgetenv("TZ")) {}
-        ~TzGuard() { orig.isEmpty() ? qunsetenv("TZ") : qputenv("TZ", orig); tzset(); }
-    } tzGuard;
-    qputenv("TZ", "UTC");
-    tzset();
+    TestCommon::TzGuard tzGuard;
+    tzGuard.set("UTC");
 
     resetDatabaseFile();
     QTemporaryDir tempDir;
@@ -1247,13 +1227,8 @@ void DatabaseTest::test_hasEntriesForDate_exact_midnight_endpoint()
     // either operator to non-strict would make this test fail while every
     // other hasEntriesForDate test (which deliberately sits off both
     // boundaries) keeps passing.
-    struct TzGuard {
-        QByteArray orig;
-        TzGuard() : orig(qgetenv("TZ")) {}
-        ~TzGuard() { orig.isEmpty() ? qunsetenv("TZ") : qputenv("TZ", orig); tzset(); }
-    } tzGuard;
-    qputenv("TZ", "UTC");
-    tzset();
+    TestCommon::TzGuard tzGuard;
+    tzGuard.set("UTC");
 
     const auto rows = TestCommon::dayOverlapRows();
     auto findRow = [&rows](const char* name) -> const TestCommon::DayOverlapRow& {
@@ -1314,6 +1289,7 @@ void DatabaseTest::test_hasEntriesForDate_exact_midnight_endpoint()
     // NOT count as an entry for 2025-06-15. Flipping start_utc < to <= would
     // make this assertion fail while every other case in this test (and the
     // rest of the suite) keeps passing.
+    manager.closeConnection_dbg();
     resetDatabaseFile();
     {
         SqliteSessionStore bootstrap(settings);

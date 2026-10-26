@@ -3,6 +3,7 @@
 
 #include <optional>
 #include <QDateTime>
+#include "localtime.h"
 #include <QString>
 #include <QUuid>
 
@@ -75,9 +76,9 @@ inline bool intervalsOverlap(const QDateTime& aStart, const QDateTime& aEnd,
 /// exactly how localDayEnd() below already gets a valid answer.
 inline QDateTime localDayStart(const QDate& date)
 {
-    QDateTime start(date, QTime(0, 0), Qt::LocalTime);
+    QDateTime start = LocalTime::at(date, QTime(0, 0));
     if (!start.isValid())
-        start = QDateTime(date.addDays(-1), QTime(0, 0), Qt::LocalTime).addDays(1);
+        start = LocalTime::at(date.addDays(-1), QTime(0, 0)).addDays(1);
     return start;
 }
 
@@ -187,7 +188,7 @@ inline TimeDuration::CreateResult TimeDuration::create(DurationType type, QDateT
 // computation as DayValidity::localDayEnd(a's local date), above.
 inline bool isCrossMidnight(const QDateTime& a, const QDateTime& b)
 {
-    return b > DayValidity::localDayEnd(a.toLocalTime().date());
+    return b > DayValidity::localDayEnd(LocalTime::fromInstant(a).date());
 }
 
 /**

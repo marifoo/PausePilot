@@ -4,18 +4,7 @@
 
 namespace {
 
-// RAII guard: restores TZ even if a QVERIFY/QCOMPARE assertion fires return early.
-struct TzGuard {
-    QByteArray orig;
-    TzGuard() : orig(qgetenv("TZ")) {}
-    ~TzGuard() { orig.isEmpty() ? qunsetenv("TZ") : qputenv("TZ", orig); tzset(); }
-};
-
-void setTz(const char* tz)
-{
-    qputenv("TZ", tz);
-    tzset();
-}
+using TestCommon::TzGuard;
 
 void addDayOverlapColumns()
 {
@@ -52,11 +41,10 @@ void DayValidityTest::test_overlapsLocalDate()
     QFETCH(int, queryY); QFETCH(int, queryMo); QFETCH(int, queryD);
     QFETCH(bool, expectedOverlap);
 
-    TzGuard guard;
-    setTz(tz.toUtf8().constData());
+    TzGuard guard(tz.toUtf8().constData());
 
-    const QDateTime start(QDate(startY, startMo, startD), QTime(startH, startMi, startS), Qt::LocalTime);
-    const QDateTime end(QDate(endY, endMo, endD), QTime(endH, endMi, endS), Qt::LocalTime);
+    const QDateTime start = LocalTime::at(QDate(startY, startMo, startD), QTime(startH, startMi, startS));
+    const QDateTime end = LocalTime::at(QDate(endY, endMo, endD), QTime(endH, endMi, endS));
     const QDate queryDate(queryY, queryMo, queryD);
 
     QCOMPARE(DayValidity::overlapsLocalDate(start, end, queryDate), expectedOverlap);
@@ -73,19 +61,17 @@ void DayValidityTest::test_isCrossMidnight()
     QFETCH(int, endH);   QFETCH(int, endMi);   QFETCH(int, endS);
     QFETCH(bool, expectedCrossDay);
 
-    TzGuard guard;
-    setTz(tz.toUtf8().constData());
+    TzGuard guard(tz.toUtf8().constData());
 
-    const QDateTime start(QDate(startY, startMo, startD), QTime(startH, startMi, startS), Qt::LocalTime);
-    const QDateTime end(QDate(endY, endMo, endD), QTime(endH, endMi, endS), Qt::LocalTime);
+    const QDateTime start = LocalTime::at(QDate(startY, startMo, startD), QTime(startH, startMi, startS));
+    const QDateTime end = LocalTime::at(QDate(endY, endMo, endD), QTime(endH, endMi, endS));
 
     QCOMPARE(isCrossMidnight(start, end), expectedCrossDay);
 }
 
 void DayValidityTest::test_localDayEnd_berlin_spring_forward_is_23_hours()
 {
-    TzGuard guard;
-    setTz("Europe/Berlin");
+    TzGuard guard("Europe/Berlin");
     const QDateTime dayStart = DayValidity::localDayStart(QDate(2025, 3, 30));
     const QDateTime dayEnd = DayValidity::localDayEnd(QDate(2025, 3, 30));
     QCOMPARE(dayStart.msecsTo(dayEnd), static_cast<qint64>(23) * 3600 * 1000);
@@ -93,8 +79,7 @@ void DayValidityTest::test_localDayEnd_berlin_spring_forward_is_23_hours()
 
 void DayValidityTest::test_localDayEnd_berlin_fall_back_is_25_hours()
 {
-    TzGuard guard;
-    setTz("Europe/Berlin");
+    TzGuard guard("Europe/Berlin");
     const QDateTime dayStart = DayValidity::localDayStart(QDate(2025, 10, 26));
     const QDateTime dayEnd = DayValidity::localDayEnd(QDate(2025, 10, 26));
     QCOMPARE(dayStart.msecsTo(dayEnd), static_cast<qint64>(25) * 3600 * 1000);
@@ -102,8 +87,7 @@ void DayValidityTest::test_localDayEnd_berlin_fall_back_is_25_hours()
 
 void DayValidityTest::test_localDayEnd_non_dst_zone_is_24_hours()
 {
-    TzGuard guard;
-    setTz("Asia/Kolkata");
+    TzGuard guard("Asia/Kolkata");
     const QDateTime dayStart = DayValidity::localDayStart(QDate(2025, 6, 15));
     const QDateTime dayEnd = DayValidity::localDayEnd(QDate(2025, 6, 15));
     QCOMPARE(dayStart.msecsTo(dayEnd), static_cast<qint64>(24) * 3600 * 1000);
@@ -122,26 +106,24 @@ void DayValidityTest::test_localDayStart_santiago_spring_forward_gap_normalizes_
     // it would act as an unbounded lower edge). 2025-09-07 is the day that
     // opens with the gap, so it is the *short* day: 23 hours from its first
     // valid instant to the following (unaffected) local midnight.
-    TzGuard guard;
-    setTz("America/Santiago");
+    TzGuard guard("America/Santiago");
 
     const QDateTime dayStart = DayValidity::localDayStart(QDate(2025, 9, 7));
     QVERIFY(dayStart.isValid());
-    QCOMPARE(dayStart, QDateTime(QDate(2025, 9, 7), QTime(1, 0, 0), Qt::LocalTime));
+    QCOMPARE(dayStart, LocalTime::at(QDate(2025, 9, 7), QTime(1, 0, 0)));
 
     const QDateTime dayEnd = DayValidity::localDayEnd(QDate(2025, 9, 7));
     QVERIFY(dayEnd.isValid());
-    QCOMPARE(dayEnd, QDateTime(QDate(2025, 9, 8), QTime(0, 0, 0), Qt::LocalTime));
+    QCOMPARE(dayEnd, LocalTime::at(QDate(2025, 9, 8), QTime(0, 0, 0)));
     QCOMPARE(dayStart.msecsTo(dayEnd), static_cast<qint64>(23) * 3600 * 1000);
 }
 
 void DayValidityTest::test_clippedMsecInLocalDate_clips_to_day_bounds()
 {
-    TzGuard guard;
-    setTz("UTC");
+    TzGuard guard("UTC");
     // Interval spans one local midnight: 2025-06-15 23:00 -> 2025-06-16 01:00.
-    const QDateTime start(QDate(2025, 6, 15), QTime(23, 0, 0), Qt::LocalTime);
-    const QDateTime end(QDate(2025, 6, 16), QTime(1, 0, 0), Qt::LocalTime);
+    const QDateTime start = LocalTime::at(QDate(2025, 6, 15), QTime(23, 0, 0));
+    const QDateTime end = LocalTime::at(QDate(2025, 6, 16), QTime(1, 0, 0));
 
     // Portion falling on 2025-06-15: 23:00 -> 24:00 = 1h.
     QCOMPARE(DayValidity::clippedMsecInLocalDate(start, end, QDate(2025, 6, 15)),

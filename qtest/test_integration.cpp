@@ -1104,32 +1104,8 @@ void IntegrationTest::test_timer_startup_recovery_uses_store_recovered_msec()
 // ============================================================================
 
 namespace {
-// RAII helper that saves the current TZ env-var and restores it on destruction.
-struct TzGuard {
-    std::optional<QByteArray> saved;
-
-    TzGuard() {
-        const char* tz = getenv("TZ");
-        saved = tz ? std::make_optional(QByteArray(tz)) : std::nullopt;
-    }
-
-    void set(const QByteArray& tz) {
-        qputenv("TZ", tz);
-#ifdef Q_OS_UNIX
-        tzset();
-#endif
-    }
-
-    ~TzGuard() {
-        if (saved)
-            qputenv("TZ", *saved);
-        else
-            qunsetenv("TZ");
-#ifdef Q_OS_UNIX
-        tzset();
-#endif
-    }
-};
+// Scoped named timezone, restored on assertion returns too.
+using TestCommon::TzGuard;
 } // anonymous namespace
 
 /**
@@ -1162,7 +1138,7 @@ void IntegrationTest::test_hasEntriesForDate_timezone()
 
     // Construct noon on 2025-06-15 in the current (faked) local timezone.
     const QDate testDate(2025, 6, 15);
-    const QDateTime localNoon(testDate, QTime(12, 0, 0), Qt::LocalTime);
+    const QDateTime localNoon = LocalTime::at(testDate, QTime(12, 0, 0));
     const QDateTime localNoonEnd = localNoon.addSecs(3600); // 1 hour session
 
     SqliteSessionStore db(settings);
@@ -1203,8 +1179,8 @@ void IntegrationTest::test_bootCredit_suppressed_by_legacy_cross_midnight_row_on
 
     // Legacy row: 2025-03-29 23:30 local -> 2025-03-30 00:30 local, spanning
     // the local midnight into the DST-transition day.
-    const QDateTime legacyStart(QDate(2025, 3, 29), QTime(23, 30, 0), Qt::LocalTime);
-    const QDateTime legacyEnd(QDate(2025, 3, 30), QTime(0, 30, 0), Qt::LocalTime);
+    const QDateTime legacyStart = LocalTime::at(QDate(2025, 3, 29), QTime(23, 30, 0));
+    const QDateTime legacyEnd = LocalTime::at(QDate(2025, 3, 30), QTime(0, 30, 0));
     {
         SqliteSessionStore db(settings);
         // D11: this row deliberately crosses local midnight (the legacy,
@@ -1226,7 +1202,7 @@ void IntegrationTest::test_bootCredit_suppressed_by_legacy_cross_midnight_row_on
     SqliteSessionStore db(settings);
     TimeTracker tracker(settings, db);
     tracker.setNowProvider_dbg([]() {
-        return QDateTime(QDate(2025, 3, 30), QTime(10, 0, 0), Qt::LocalTime);
+        return LocalTime::at(QDate(2025, 3, 30), QTime(10, 0, 0));
     });
 
     tracker.useTimerViaButton(Button::Start);
@@ -1272,12 +1248,12 @@ void IntegrationTest::test_midnight_boundary_timezone()
 
     // Entry A: ends one second before local midnight on 2025-06-14.
     const QDate day14(2025, 6, 14);
-    const QDateTime endOfDay14(day14, QTime(23, 59, 59), Qt::LocalTime);
+    const QDateTime endOfDay14 = LocalTime::at(day14, QTime(23, 59, 59));
     const QDateTime startOfDay14 = endOfDay14.addSecs(-60);
 
     // Entry B: starts one second after local midnight → 2025-06-15.
     const QDate day15(2025, 6, 15);
-    const QDateTime startOfDay15(day15, QTime(0, 0, 1), Qt::LocalTime);
+    const QDateTime startOfDay15 = LocalTime::at(day15, QTime(0, 0, 1));
     const QDateTime endOfDay15 = startOfDay15.addSecs(60);
 
     SqliteSessionStore db(settings);

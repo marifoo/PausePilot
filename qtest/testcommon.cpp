@@ -44,7 +44,7 @@ QDateTime fixedNow()
     // must track QDate::currentDate() for fixtures that mix this with
     // day-relative lookups. Only the time-of-day needs pinning away from
     // midnight -- see the header comment for why.
-    return QDateTime(QDate::currentDate(), QTime(12, 0, 0), Qt::LocalTime);
+    return LocalTime::at(LocalTime::fromInstant(QDateTime::currentDateTime()).date(), QTime(12, 0, 0));
 }
 
 QDateTime fixedNowUtc()

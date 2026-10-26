@@ -106,7 +106,7 @@ void TimeTracker::DayBoundaryWatcher::tick(const QDateTime& now)
     //
     // 1. Forward-date History revoke: runs even when stopped. WP4: if the
     // local date moves forward (>) while editing, revoke the edit first.
-    const QDate nowLocalDate = now.toLocalTime().date();
+    const QDate nowLocalDate = LocalTime::fromInstant(now).date();
     if (owner_.dialog_open_ && nowLocalDate > owner_.exclusive_edit_date_) {
         owner_.revokeExclusiveEdit();
     }
@@ -117,13 +117,13 @@ void TimeTracker::DayBoundaryWatcher::tick(const QDateTime& now)
     // takes this path -- it falls through to the watchdog below.
     if (owner_.mode_ != Mode::None && owner_.session_.segment_start_time.isValid()) {
         const QDateTime& segmentStart = owner_.session_.segment_start_time;
-        if (nowLocalDate == segmentStart.toLocalTime().date()) {
+        if (nowLocalDate == LocalTime::fromInstant(segmentStart).date()) {
             // Construct the cutoff from `now`'s own instant (via
             // toLocalTime()) rather than from date()+time()+a default
             // timeSpec() -- the latter would silently default the UTC
             // offset to 0 for a Qt::OffsetFromUTC/Qt::TimeZone now-provider
             // (D2/LOW-4).
-            QDateTime cutoff = now.toLocalTime();
+            QDateTime cutoff = LocalTime::fromInstant(now);
             cutoff.setTime(QTime(23, 59, 59, 500));
             if (now >= cutoff) {
                 if (owner_.dialog_open_) {
@@ -500,7 +500,7 @@ void TimeTracker::startTimer(const QDateTime& now, TransitionCause cause)
         unsigned int boot_time_sec = settings_.getBootTimeSec();
         bool shouldAddBootTime = false;
         if (boot_time_sec > 0) {
-            QDate today = now.toLocalTime().date();
+            QDate today = LocalTime::fromInstant(now).date();
             bool hasEntriesInMemory = false;
             for (const auto &d : session_.durations) {
                 if (DayValidity::overlapsLocalDate(d.startTime, d.endTime, today)) {
@@ -1314,7 +1314,7 @@ HistoryEditContext TimeTracker::beginExclusiveEdit()
     QMutexLocker locker(&mutex_);
     dialog_open_ = true;
     const QDateTime openedAt = now_provider_();
-    exclusive_edit_date_ = openedAt.toLocalTime().date();
+    exclusive_edit_date_ = LocalTime::fromInstant(openedAt).date();
 
     HistoryEditContext ctx;
     ctx.openedAt = openedAt;
@@ -1366,7 +1366,7 @@ SessionStoreResult TimeTracker::saveHistoryEdit(const HistoryEditContext& opened
                    return !opened.isEditable(day.date);
                })) {
         result = SessionStoreResult::callerBug("saveHistoryEdit: date not editable at open");
-    } else if (now_provider_().toLocalTime().date() != opened.today) {
+    } else if (LocalTime::fromInstant(now_provider_()).date() != opened.today) {
         result = SessionStoreResult::conflict("saveHistoryEdit: local date changed since open");
     } else if (std::any_of(days.begin(), days.end(), [](const HistoryDayChange& day) {
                    return DayValidity::localDayStart(day.date).toUTC() != day.dayStartUtc ||

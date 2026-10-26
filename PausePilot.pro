@@ -13,6 +13,7 @@ HEADERS = \
    $$PWD/timetracker.h \
    $$PWD/lockstatewatcher.h \
    $$PWD/settings.h \
+   $$PWD/localtime.h \
    $$PWD/types.h \
    $$PWD/timeformat.h \
    $$PWD/splitdialog.h \

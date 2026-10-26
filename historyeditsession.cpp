@@ -27,7 +27,7 @@ void HistoryEditSession::buildFromContext(const HistoryEditContext& ctx)
         if (!row.finalized() || !row.parsed.has_value())
             continue;
         const TimeDuration& d = row.parsed.value();
-        const QDate startDate = d.startTime.toLocalTime().date();
+        const QDate startDate = LocalTime::fromInstant(d.startTime).date();
         if (DayValidity::overlapsLocalDate(d.startTime, d.endTime, startDate.addDays(2))) {
             // Spans more than one calendar boundary: skipped from the pages
             // entirely, but kept for the new-cross-type-overlap check below.
@@ -47,7 +47,7 @@ void HistoryEditSession::buildFromContext(const HistoryEditContext& ctx)
     QMap<QDate, std::deque<TimeDuration>> memoryByDay;
     for (const auto& d : ctx.live.completed()) {
         memoryIds.insert(d.segment_id.toString());
-        memoryByDay[d.startTime.toLocalTime().date()].push_back(d);
+        memoryByDay[LocalTime::fromInstant(d.startTime).date()].push_back(d);
     }
     if (!memoryIds.isEmpty()) {
         for (auto it = historyByDay.begin(); it != historyByDay.end(); ++it) {

@@ -139,7 +139,7 @@ MergeDecision classifyMerge(const TimeDuration& prev, const TimeDuration& curr)
 {
     if (prev.type != curr.type)
         return MergeDecision::None;
-    if (prev.startTime.toLocalTime().date() != curr.startTime.toLocalTime().date())
+    if (LocalTime::fromInstant(prev.startTime).date() != LocalTime::fromInstant(curr.startTime).date())
         return MergeDecision::None;
 
     const qint64 prev_end   = prev.endTime.toMSecsSinceEpoch();

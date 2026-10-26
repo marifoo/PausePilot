@@ -90,6 +90,7 @@ HEADERS += \
     $$PWD/../timeformat.h \
     $$PWD/../settings.h \
     $$PWD/../logger.h \
+    $$PWD/../localtime.h \
     $$PWD/../types.h \
     $$PWD/../historydialog.h \
     $$PWD/../timeline.h

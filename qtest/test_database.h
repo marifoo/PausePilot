@@ -15,7 +15,7 @@ private:
     void resetDatabaseFile() const
     {
         if (QFile::exists(db_path_)) {
-            QFile::remove(db_path_);
+            QVERIFY2(QFile::remove(db_path_), qPrintable("Could not reset database: " + db_path_));
         }
     }
 

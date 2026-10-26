@@ -161,6 +161,7 @@
     <ClInclude Include="..\timeformat.h" />
     <ClInclude Include="..\settings.h" />
     <ClInclude Include="..\logger.h" />
+    <ClInclude Include="..\localtime.h" />
     <ClInclude Include="..\types.h" />
     <ClInclude Include="..\timeline.h" />
     <ClInclude Include="..\startuprecovery.h" />

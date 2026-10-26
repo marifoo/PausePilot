@@ -4875,14 +4875,9 @@ void TimerTest::test_D2_scheduled_stop_late_across_date_defers_to_watchdog_disca
 
 void TimerTest::test_M6_scheduled_stop_offset_aware_across_spring_dst()
 {
-    // Arrange: Set TZ to Europe/Berlin and construct all QDateTimes after.
-    struct TzGuard {
-        QByteArray orig;
-        TzGuard() : orig(qgetenv("TZ")) {}
-        ~TzGuard() { orig.isEmpty() ? qunsetenv("TZ") : qputenv("TZ", orig); tzset(); }
-    } tzGuard;
-    qputenv("TZ", "Europe/Berlin");
-    tzset();
+    // Arrange: Select Europe/Berlin and construct all QDateTimes after.
+    TestCommon::TzGuard tzGuard;
+    tzGuard.set("Europe/Berlin");
 
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -4890,7 +4885,7 @@ void TimerTest::test_M6_scheduled_stop_offset_aware_across_spring_dst()
     FakeSessionStore fakeDb;
 
     // Start at 2025-03-30 01:00 CET (before the spring-forward jump to CEST).
-    const QDateTime t0(QDate(2025, 3, 30), QTime(1, 0, 0), Qt::LocalTime);
+    const QDateTime t0 = LocalTime::at(QDate(2025, 3, 30), QTime(1, 0, 0));
     FakeClock clock(t0);
     TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
@@ -4901,7 +4896,7 @@ void TimerTest::test_M6_scheduled_stop_offset_aware_across_spring_dst()
     QVERIFY(stoppedSpy.isValid());
 
     // Act: a heartbeat tick at 23:59:59.500 CEST, the same local date.
-    const QDateTime cutoff(QDate(2025, 3, 30), QTime(23, 59, 59, 500), Qt::LocalTime);
+    const QDateTime cutoff = LocalTime::at(QDate(2025, 3, 30), QTime(23, 59, 59, 500));
     clock.setNow(cutoff);
     tracker.onTick(clock.now());
 
@@ -5056,13 +5051,8 @@ void TimerTest::test_C5_unpause_after_cutoff_stops_at_first_later_tick_not_befor
 // offset representation's own raw date/time fields.
 void TimerTest::test_C5_offset_from_utc_now_provider_computes_cutoff_by_local_date()
 {
-    struct TzGuard {
-        QByteArray orig;
-        TzGuard() : orig(qgetenv("TZ")) {}
-        ~TzGuard() { orig.isEmpty() ? qunsetenv("TZ") : qputenv("TZ", orig); tzset(); }
-    } tzGuard;
-    qputenv("TZ", "Europe/Berlin"); // CET, UTC+1 in January -- no DST ambiguity.
-    tzset();
+    TestCommon::TzGuard tzGuard;
+    tzGuard.set("Europe/Berlin");
 
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -6230,14 +6220,9 @@ void TimerTest::test_WP3_saveHistoryEdit_backward_clock_date_change_is_conflict_
 
 void TimerTest::test_WP3_saveHistoryEdit_timezone_change_is_conflict_no_store_call()
 {
-    // Arrange: TZ restored on scope exit (test_dayvalidity.cpp's pattern).
-    struct TzGuard {
-        QByteArray orig;
-        TzGuard() : orig(qgetenv("TZ")) {}
-        ~TzGuard() { orig.isEmpty() ? qunsetenv("TZ") : qputenv("TZ", orig); tzset(); }
-    } tzGuard;
-    qputenv("TZ", "Etc/UTC");
-    tzset();
+    // Arrange: the local calendar is restored on scope exit.
+    TestCommon::TzGuard tzGuard;
+    tzGuard.set("Etc/UTC");
 
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -6246,9 +6231,9 @@ void TimerTest::test_WP3_saveHistoryEdit_timezone_change_is_conflict_no_store_ca
     const QDate today(2025, 6, 15);
     const QDate pastDate(2025, 6, 10);
     fakeDb.storedDurations.push_back(TimeDuration::fromPersistedRow(
-        DurationType::Activity, QDateTime(pastDate, QTime(9, 0, 0), Qt::LocalTime),
-        QDateTime(pastDate, QTime(10, 0, 0), Qt::LocalTime)));
-    FakeClock clock(QDateTime(today, QTime(9, 0, 0), Qt::LocalTime));
+        DurationType::Activity, LocalTime::at(pastDate, QTime(9, 0, 0)),
+        LocalTime::at(pastDate, QTime(10, 0, 0))));
+    FakeClock clock(LocalTime::at(today, QTime(9, 0, 0)));
     TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
     QVERIFY(tracker.isStopped());
@@ -6265,8 +6250,7 @@ void TimerTest::test_WP3_saveHistoryEdit_timezone_change_is_conflict_no_store_ca
 
     // Act: the process timezone changes before Save (the local date stays
     // the same, but the local day's UTC span shifts).
-    qputenv("TZ", "America/Los_Angeles");
-    tzset();
+    tzGuard.set("America/Los_Angeles");
     const int saveCallsBefore = fakeDb.callLog.count("saveHistoryDays");
     const SessionStoreResult result = tracker.saveHistoryEdit(ctx, days);
     tracker.endExclusiveEdit();

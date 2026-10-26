@@ -427,7 +427,7 @@ void HistoryDialog::updateTotalsLabel(uint idx)
 
     const QDate& pageDate = pages[idx].pageDate;
     auto portionInDay = [&](const TimeDuration& d) -> qint64 {
-        return DayValidity::clippedMsecInLocalDate(d.startTime.toLocalTime(), d.endTime.toLocalTime(), pageDate);
+        return DayValidity::clippedMsecInLocalDate(LocalTime::fromInstant(d.startTime), LocalTime::fromInstant(d.endTime), pageDate);
     };
     for (const auto& d : pages[idx].crossMidnight)
         (d.type == DurationType::Activity ? totalActivity : totalPause) += portionInDay(d);

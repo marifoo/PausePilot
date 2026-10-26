@@ -144,6 +144,17 @@ straight to the owner:
 | Shutdown sequence (orchestration)          | `ShutdownCoordinator`                |
 | Health warnings (long activity / pause)    | `HealthMonitor`                      |
 
+## Local calendar
+
+`LocalTime` (`localtime.h`) owns conversion of instants to the local calendar
+and construction from local date/time components. Day boundaries, timeline
+normalization, History grouping and SQLite timestamp reads share this seam.
+Production delegates directly to Qt's native `Qt::LocalTime` behavior, with
+no timezone setting or cache. Debug tests can scope a named `QTimeZone` through
+`TestCommon::TzGuard`, so DST and timezone-change tests use the same rules on
+Windows and Unix without changing the desktop timezone. Stored UTC text and
+the database schema are unchanged.
+
 ## Lock detection
 
 `LockStateWatcher` is the single boundary between the application and the OS's

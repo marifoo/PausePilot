@@ -26,6 +26,29 @@
 
 namespace TestCommon {
 
+/// Restores the previous calendar even on an early QtTest assertion return.
+/// QTimeZone supplies real DST rules on Windows as well as Unix.
+class TzGuard {
+    std::optional<QTimeZone> saved_ = LocalTime::zoneOverride_dbg;
+public:
+    TzGuard() = default;
+    explicit TzGuard(const QByteArray& id) { set(id); }
+    void set(const QByteArray& id) {
+        QTimeZone zone(id);
+#ifdef Q_OS_WIN
+        // Qt 5.14's Windows CLDR table predates the Kolkata spelling.
+        if (!zone.isValid() && id == "Asia/Kolkata")
+            zone = QTimeZone("Asia/Calcutta");
+#endif
+        Q_ASSERT_X(zone.isValid(), "TzGuard", "unknown test timezone");
+        LocalTime::zoneOverride_dbg = zone;
+    }
+    ~TzGuard() { LocalTime::zoneOverride_dbg = saved_; }
+    TzGuard(const TzGuard&) = delete;
+    TzGuard& operator=(const TzGuard&) = delete;
+};
+
+
 // Factory function for creating TimeDuration objects from millisecond timestamps
 TimeDuration mk(DurationType type, qint64 startMs, qint64 endMs);
 
@@ -66,10 +89,9 @@ QDateTime fixedNowUtc();
 /// do not consume this table yet -- they pin day-membership behaviour with
 /// their own hand-built scenarios instead.
 ///
-/// All date/time fields are local wall-clock components under `tz` (the TZ
-/// environment value the test must set -- via a TzGuard -- before
-/// constructing any QDateTime from this row, since Qt::LocalTime depends on
-/// the process's current zone). `expectedOverlap` is
+/// All date/time fields are local wall-clock components under `tz` (the IANA
+/// timezone id the test must set via TzGuard before constructing values
+/// with LocalTime::at). `expectedOverlap` is
 /// DayValidity::overlapsLocalDate(start, end, queryDate); `expectedCrossDay`
 /// is the free function isCrossMidnight(start, end) (types.h) i.e. whether
 /// this exact interval would be rejected as DayValidity::Violation::CrossDay /
