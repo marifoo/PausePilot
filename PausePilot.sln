@@ -14,20 +14,20 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "apptest", "apptest\apptest.
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
-		Debug|x86 = Debug|x86
-		Release|x86 = Release|x86
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
-		{77E3C304-6BDF-3D19-A4CF-BCBCBBBB5F09}.Debug|x86.ActiveCfg = Debug|Win32
-		{77E3C304-6BDF-3D19-A4CF-BCBCBBBB5F09}.Debug|x86.Build.0 = Debug|Win32
-		{77E3C304-6BDF-3D19-A4CF-BCBCBBBB5F09}.Release|x86.ActiveCfg = Release|Win32
-		{77E3C304-6BDF-3D19-A4CF-BCBCBBBB5F09}.Release|x86.Build.0 = Release|Win32
-		{BFCA6FF3-3929-454A-95CD-17E59BE81E35}.Debug|x86.ActiveCfg = Debug|Win32
-		{BFCA6FF3-3929-454A-95CD-17E59BE81E35}.Debug|x86.Build.0 = Debug|Win32
-		{BFCA6FF3-3929-454A-95CD-17E59BE81E35}.Release|x86.ActiveCfg = Release|Win32
-		{5D79149D-7427-44E4-9974-69FA4C91B68A}.Debug|x86.ActiveCfg = Debug|Win32
-		{5D79149D-7427-44E4-9974-69FA4C91B68A}.Debug|x86.Build.0 = Debug|Win32
-		{5D79149D-7427-44E4-9974-69FA4C91B68A}.Release|x86.ActiveCfg = Release|Win32
+		{77E3C304-6BDF-3D19-A4CF-BCBCBBBB5F09}.Debug|x64.ActiveCfg = Debug|x64
+		{77E3C304-6BDF-3D19-A4CF-BCBCBBBB5F09}.Debug|x64.Build.0 = Debug|x64
+		{77E3C304-6BDF-3D19-A4CF-BCBCBBBB5F09}.Release|x64.ActiveCfg = Release|x64
+		{77E3C304-6BDF-3D19-A4CF-BCBCBBBB5F09}.Release|x64.Build.0 = Release|x64
+		{BFCA6FF3-3929-454A-95CD-17E59BE81E35}.Debug|x64.ActiveCfg = Debug|x64
+		{BFCA6FF3-3929-454A-95CD-17E59BE81E35}.Debug|x64.Build.0 = Debug|x64
+		{BFCA6FF3-3929-454A-95CD-17E59BE81E35}.Release|x64.ActiveCfg = Release|x64
+		{5D79149D-7427-44E4-9974-69FA4C91B68A}.Debug|x64.ActiveCfg = Debug|x64
+		{5D79149D-7427-44E4-9974-69FA4C91B68A}.Debug|x64.Build.0 = Debug|x64
+		{5D79149D-7427-44E4-9974-69FA4C91B68A}.Release|x64.ActiveCfg = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

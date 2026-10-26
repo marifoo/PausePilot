@@ -32,8 +32,10 @@ admin-protected location, or it will fail to start.
 
 Grab the latest pre-built release from the
 [Releases page](https://github.com/marifoo/PausePilot/releases) and run the
-executable. No installer, no admin rights — just drop it in a folder and
-start it.
+executable. Windows releases target x64 and include the required Qt and
+Microsoft C++ runtime DLLs. Extract the whole ZIP and keep the DLLs beside
+the executable. No installer, no admin rights — just drop it in a folder
+and start it.
 
 ### Linux (build from source)
 
@@ -87,6 +89,20 @@ binary. The interesting keys:
 
 If you are looking at the source rather than just running the app, see
 [`doc/`](doc/README.md) for architecture and design documentation.
+
+For Windows builds, use Visual Studio 2022 with the Desktop development with
+C++ workload, Qt VS Tools, and the Qt 5.14.2 MSVC x64 kit (`msvc2017_64`).
+Register that kit in Qt VS Tools as `Qt 5.14.2 x64`, then open
+`PausePilot.sln` and select `Release | x64` to build the application. The
+output is `build/windows-x64/Release/PausePilot.exe`. The `Debug | x64`
+configuration also builds both test runners; run them with
+`QT_QPA_PLATFORM=offscreen`. Qt's Windows offscreen plugin also needs
+`QT_QPA_FONTDIR` pointing to a directory containing a TrueType font.
+For a portable release, deploy the matching
+x64 Qt libraries and plugins and the required release runtime DLLs from
+Visual Studio's `VC/Redist/MSVC/<version>/x64/Microsoft.VC143.CRT` directory.
+These locally bundled Microsoft runtime DLLs must be refreshed when shipping
+runtime updates; they are not serviced by a system-wide Redistributable install.
 
 GitHub Actions builds the application and runs both `qtest` and `apptest`
 on Ubuntu 24.04 for pushes and pull requests. The runners enforce their
