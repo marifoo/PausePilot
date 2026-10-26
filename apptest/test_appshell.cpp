@@ -30,6 +30,9 @@
 #include <functional>
 #include <memory>
 #include <vector>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 #ifdef Q_OS_UNIX
 #include <unistd.h>
 #endif
@@ -137,11 +140,24 @@ bool waitForLockPid(const QString& path, qint64 pid, int timeoutMsec)
     return false;
 }
 
+// QProcess::terminate() sends WM_CLOSE on Windows, but offscreen has no
+// native windows. WM_QUIT reaches Qt's real Win32 event dispatcher instead,
+// which quits the event loop and emits aboutToQuit just as a window close does.
+bool requestProductionQuit(QProcess& process)
+{
+#ifdef Q_OS_WIN
+    return PostThreadMessage(process.pid()->dwThreadId, WM_QUIT, 0, 0) != 0;
+#else
+    process.terminate();
+    return true;
+#endif
+}
+
 bool stopProduction(QProcess& process)
 {
     if (process.state() == QProcess::NotRunning)
         return true;
-    process.terminate();
+    requestProductionQuit(process);
     if (process.waitForFinished(5000))
         return true;
     process.kill();
@@ -1395,7 +1411,7 @@ void AppShellTest::test_stop_button_click_stops_tracker_and_updates_widget()
 // apptest's own process at all, since apptest never links main.cpp.
 // ============================================================================
 
-void AppShellTest::test_production_sigterm_drains_and_writes_clean_shutdown_marker()
+void AppShellTest::test_production_os_quit_drains_and_writes_clean_shutdown_marker()
 {
     // Arrange: autostart disabled (see the comment on
     // test_production_active_owner_survives_old_lock_timestamp) so the
@@ -1407,17 +1423,17 @@ void AppShellTest::test_production_sigterm_drains_and_writes_clean_shutdown_mark
     const QString dbPath = QDir(tempDir.path()).filePath("PausePilot.sqlite");
     QSettings ownerSettings(createSettingsFile(tempDir.path(), 7), QSettings::IniFormat);
     ownerSettings.setValue("PausePilot/press_start_button_on_app_start", false);
+    ownerSettings.setValue("PausePilot/debug_log_to_file", true);
     ownerSettings.sync();
 
     ProcessGuard production;
     QVERIFY2(startProduction(production.process, tempDir.path()),
              qPrintable(startFailureMessage(production.process)));
-    QVERIFY2(waitForFile(dbPath, 5000), "production did not initialize the database");
-    QTest::qWait(100);
+    QVERIFY2(waitForProductionReady(tempDir.path(), 5000), "production did not finish startup");
 
-    // Act: a real SIGTERM, delivered by the kernel to the production
-    // process's real signal handler -- not a call to any PausePilot function.
-    production.process.terminate();
+    // Act: deliver SIGTERM on Unix or WM_QUIT to the main thread on Windows.
+    // Both exercise the production event loop and main.cpp shutdown wiring.
+    QVERIFY(requestProductionQuit(production.process));
     const bool finished = production.process.waitForFinished(5000);
 
     // Assert: the process actually quit (a severed
@@ -1429,19 +1445,19 @@ void AppShellTest::test_production_sigterm_drains_and_writes_clean_shutdown_mark
     const QByteArray diagnostics = production.process.readAllStandardError()
         + production.process.readAllStandardOutput();
     QVERIFY2(finished, qPrintable(QString(
-        "production did not quit after SIGTERM (see UnixSignalBridge wiring in main.cpp): %1")
+        "production did not quit after the OS quit request (see main.cpp shutdown wiring): %1")
         .arg(QString::fromLocal8Bit(diagnostics))));
     QCOMPARE(production.process.exitStatus(), QProcess::NormalExit);
     QCOMPARE(production.process.exitCode(), 0);
 
-    const QString markerConnName = "sigterm_marker_check";
+    const QString markerConnName = "os_quit_marker_check";
     {
         QSqlDatabase markerDb = QSqlDatabase::addDatabase("QSQLITE", markerConnName);
         markerDb.setDatabaseName(dbPath);
         QVERIFY2(markerDb.open(), qPrintable(markerDb.lastError().text()));
         QSqlQuery query(markerDb);
         QVERIFY(query.exec("SELECT value FROM app_settings WHERE key = 'last_clean_shutdown'"));
-        QVERIFY2(query.next(), "SIGTERM must drain and write the clean-shutdown marker");
+        QVERIFY2(query.next(), "OS quit must drain and write the clean-shutdown marker");
         QVERIFY(!query.value(0).toString().isEmpty());
         markerDb.close();
     }

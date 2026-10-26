@@ -98,6 +98,23 @@ output is `build/windows-x64/Release/PausePilot.exe`. The `Debug | x64`
 configuration also builds both test runners; run them with
 `QT_QPA_PLATFORM=offscreen`. Qt's Windows offscreen plugin also needs
 `QT_QPA_FONTDIR` pointing to a directory containing a TrueType font.
+Qt 5.14.2's Windows offscreen plugin also needs a source correction: its
+missing native interface crashes `QMessageBox` before a test can click it.
+From an x64 Visual Studio developer shell, build the test plugin from the
+**matching Qt 5.14.2 sources** (the Qt installer Sources component):
+
+```powershell
+powershell -NoProfile -File scripts/windows-offscreen.ps1 -QtDir C:/Programs/Qt/Qt5.14.2/5.14.2/msvc2017_64 -QtBaseSource C:/Programs/Qt/Qt5.14.2/5.14.2/Src/qtbase
+$env:QT_QPA_PLATFORM_PLUGIN_PATH = "$PWD/build/windows-x64/offscreen/plugins/platforms"
+```
+
+Keep that environment variable set for both runners and their production
+children, including Release subprocess checks. The script builds Debug and
+Release plugins in the build tree and leaves the installed Qt kit untouched.
+The native interface reports that no Windows menu handle exists; real message
+boxes and all their assertions still run. The portable package uses the
+unmodified Windows platform plugin.
+
 For a portable release, deploy the matching
 x64 Qt libraries and plugins and the required release runtime DLLs from
 Visual Studio's `VC/Redist/MSVC/<version>/x64/Microsoft.VC143.CRT` directory.

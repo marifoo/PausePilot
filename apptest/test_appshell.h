@@ -103,12 +103,13 @@ private slots:
 
     // D13f: quit/shutdown composition through the REAL application entry
     // point (main.cpp), not the narrowed MainWin/ShutdownCoordinator seam
-    // above. A real SIGTERM exercises the full chain UnixSignalBridge's
+    // above. On Windows, WM_QUIT exercises the Win32 event dispatcher and
+      // aboutToQuit connection. On Linux, SIGTERM exercises UnixSignalBridge's
     // signal handler -> self-pipe -> QSocketNotifier::activated (a real Qt
     // signal fired by the real event loop, not a hand-invoked slot call) ->
     // main.cpp's lambda -> MainWin::onAboutToQuit() -> shutdown() ->
     // ShutdownCoordinator -> SqliteSessionStore -> QCoreApplication::quit().
-    void test_production_sigterm_drains_and_writes_clean_shutdown_marker();
+    void test_production_os_quit_drains_and_writes_clean_shutdown_marker();
 
     // D13f (F3, R02-001 follow-up): the mainwin.cpp:48 connect(&timetracker_,
     // &TimeTracker::stopped, health_monitor_, &HealthMonitor::reset) wiring,
