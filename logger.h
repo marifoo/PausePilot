@@ -10,7 +10,7 @@ class Logger
 	/// Set on the first open/rotate/write/flush failure and never cleared:
 	/// file logging is off for the rest of the process once this is true.
 	static bool s_disabled_;
-	QFile *logfile_;
+	QFile logfile_;
 	const static int max_lines_ = 1024;
 #ifndef QT_NO_DEBUG
 	static bool s_force_write_failure_dbg_;

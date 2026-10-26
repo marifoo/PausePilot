@@ -239,6 +239,12 @@ the gap since the last confirmed prefix.
   and the DB is untouched. Slept time counts as Activity with or without
   History; this is a known suspend finding and out of scope.
 
+## Logging failures
+
+The first log open, rotation, write or flush failure permanently disables file
+logging and reports one stderr diagnostic. The logger closes the file at that
+point; it retains no open handle while disabled.
+
 ## Shutdown flow
 
 The shutdown sequence is owned by `ShutdownCoordinator`. `MainWin::shutdown(ShutdownMode)`

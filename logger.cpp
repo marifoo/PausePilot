@@ -18,9 +18,8 @@ void Logger::configure(bool logToFile)
 
 Logger::Logger()
 {
-    logfile_ = new QFile();
-    logfile_->setFileName(AppPaths::logFile());
-    if (!logfile_->open(QIODevice::ReadWrite | QIODevice::Append | QIODevice::Text)) {
+    logfile_.setFileName(AppPaths::logFile());
+    if (!logfile_.open(QIODevice::ReadWrite | QIODevice::Append | QIODevice::Text)) {
         reportFailure("open");
         return;
     }
@@ -28,8 +27,8 @@ Logger::Logger()
     // Rotate on startup rather than in the destructor: the destructor never runs
     // on a crash or a Windows WM_ENDSESSION termination, which would otherwise
     // let the file grow unbounded across sessions that never exit cleanly.
-    logfile_->seek(0);
-    QTextStream in(logfile_);
+    logfile_.seek(0);
+    QTextStream in(&logfile_);
     in.setCodec("UTF-8");
     QStringList lines;
     while (!in.atEnd()) {
@@ -38,13 +37,13 @@ Logger::Logger()
     if (lines.size() > max_lines_) {
         lines = lines.mid(lines.size() - max_lines_);
         const QByteArray rotated = (lines.join("\n") + "\n").toUtf8();
-        if (!logfile_->resize(0)) {
+        if (!logfile_.resize(0)) {
             reportFailure("rotate");
             return;
         }
-        logfile_->seek(0);
-        const qint64 written = logfile_->write(rotated);
-        if (written != rotated.size() || !logfile_->flush()) {
+        logfile_.seek(0);
+        const qint64 written = logfile_.write(rotated);
+        if (written != rotated.size() || !logfile_.flush()) {
             reportFailure("rotate");
             return;
         }
@@ -80,8 +79,8 @@ void Logger::log(const QString &text)
     }
 #endif
 
-    const qint64 written = logfile_->write(bytes);
-    if (written != bytes.size() || !logfile_->flush()) {
+    const qint64 written = logfile_.write(bytes);
+    if (written != bytes.size() || !logfile_.flush()) {
         reportFailure(written != bytes.size() ? "write" : "flush");
         return;
     }
@@ -95,8 +94,10 @@ void Logger::reportFailure(const char* what)
     if (s_disabled_) return;
     s_disabled_ = true;
     std::fprintf(stderr, "[Logger] disabling file logging after %s failure (%s)\n",
-                 what, qPrintable(logfile_ ? logfile_->fileName() : QString()));
+                 what, qPrintable(logfile_.fileName()));
     std::fflush(stderr);
+    // No future writes are possible; release the handle now (also on Windows).
+    logfile_.close();
 }
 
 #ifndef QT_NO_DEBUG
@@ -110,8 +111,8 @@ Logger::~Logger()
 {
     log("PausePilot Shutdown <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
 
-    if (logfile_ != nullptr) {
-        logfile_->flush();
-        logfile_->close();
+    if (logfile_.isOpen()) {
+        logfile_.flush();
+        logfile_.close();
     }
 }

@@ -346,4 +346,8 @@ void LoggerTest::test_e_forced_write_failure_disables_logging_permanently()
     QVERIFY2(!contentAfter.contains(afterMarker),
              "No message must be written after the first failure -- logging is permanently disabled");
     QCOMPARE(contentAfter.size(), contentBefore.size());
+    // A disabled logger must release its file, including on Windows where an
+    // open QFile prevents removal and QTemporaryDir cleanup would otherwise fail.
+    QVERIFY(QFile::remove(logPath));
+    QVERIFY(!QFile::exists(logPath));
 }
