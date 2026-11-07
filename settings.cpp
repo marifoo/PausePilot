@@ -19,6 +19,7 @@
 namespace {
 static const QString kKeyPressStart        = "PausePilot/press_start_button_on_app_start";
 static const QString kKeyAutopause         = "PausePilot/autopause_enabled";
+static const QString kKeyAutoresumeAfterNight = "PausePilot/autoresume_after_night";
 static const QString kKeyAutopauseThresh   = "PausePilot/autopause_threshold_minutes";
 static const QString kKeyStartMinimized    = "PausePilot/start_minimized_to_tray";
 static const QString kKeyStartPinned       = "PausePilot/start_pinned_to_top";
@@ -113,6 +114,7 @@ void Settings::readSettingsFile()
 {
 	autostart_timing_ = readBoolChecked(sfile_, kKeyPressStart, true);
 	autopause_enabled_ = readBoolChecked(sfile_, kKeyAutopause, true);
+	autoresume_after_night_ = readBoolChecked(sfile_, kKeyAutoresumeAfterNight, true);
 	const int autopause_thresh = readIntChecked(sfile_, kKeyAutopauseThresh, 15);
 	backpause_min_ = noteRepair(kKeyAutopauseThresh, autopause_thresh, qBound(0, autopause_thresh, 99));
 	start_minimized_ = readBoolChecked(sfile_, kKeyStartMinimized, false);
@@ -133,6 +135,7 @@ void Settings::writeAndSync()
 {
 	sfile_.setValue(kKeyPressStart, autostart_timing_);
 	sfile_.setValue(kKeyAutopause, autopause_enabled_);
+	sfile_.setValue(kKeyAutoresumeAfterNight, autoresume_after_night_);
 	sfile_.setValue(kKeyAutopauseThresh, backpause_min_);
 	sfile_.setValue(kKeyStartMinimized, start_minimized_);
 	sfile_.setValue(kKeyStartPinned, start_pinned_to_top_);
@@ -165,6 +168,11 @@ int Settings::getHistoryDays() const
 bool Settings::isAutopauseEnabled() const
 {
 	return autopause_enabled_;
+}
+
+bool Settings::isOvernightAutoResumeEnabled() const
+{
+	return autoresume_after_night_;
 }
 
 bool Settings::isAutostartTimingEnabled() const

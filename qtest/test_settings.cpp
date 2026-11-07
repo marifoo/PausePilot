@@ -68,6 +68,7 @@ void SettingsTest::test_settings_defaults_and_bounds()
     Settings defaults(settingsPath);
     QCOMPARE(defaults.getHistoryDays(), 99);
     QCOMPARE(defaults.isAutopauseEnabled(), true);
+    QCOMPARE(defaults.isOvernightAutoResumeEnabled(), true);
     QCOMPARE(defaults.logToFile(), false);
     QCOMPARE(defaults.getBackpauseMsec(), convMinToMsec(15));
 
@@ -77,6 +78,64 @@ void SettingsTest::test_settings_defaults_and_bounds()
     writer.sync();
     Settings clamped(settingsPath);
     QCOMPARE(clamped.getHistoryDays(), 0);
+}
+
+void SettingsTest::test_settings_autoresume_after_night_default_true_and_persisted()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString settingsPath = QDir(tempDir.path()).filePath("user-settings.ini");
+
+    // Arrange: leave the ini empty.
+
+    // Act
+    Settings settings(settingsPath);
+
+    // Assert
+    QCOMPARE(settings.isOvernightAutoResumeEnabled(), true);
+    QSettings verify(settingsPath, QSettings::IniFormat);
+    QVERIFY(verify.contains("PausePilot/autoresume_after_night"));
+    QCOMPARE(verify.value("PausePilot/autoresume_after_night").toBool(), true);
+}
+
+void SettingsTest::test_settings_autoresume_after_night_false_respected()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString settingsPath = QDir(tempDir.path()).filePath("user-settings.ini");
+
+    // Arrange
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("PausePilot/autoresume_after_night", false);
+    writer.sync();
+
+    // Act
+    Settings settings(settingsPath);
+
+    // Assert
+    QCOMPARE(settings.isOvernightAutoResumeEnabled(), false);
+    QSettings verify(settingsPath, QSettings::IniFormat);
+    QCOMPARE(verify.value("PausePilot/autoresume_after_night").toBool(), false);
+}
+
+void SettingsTest::test_settings_autoresume_after_night_malformed_repaired()
+{
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString settingsPath = QDir(tempDir.path()).filePath("user-settings.ini");
+
+    // Arrange
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("PausePilot/autoresume_after_night", "maybe");
+    writer.sync();
+
+    // Act
+    Settings settings(settingsPath);
+
+    // Assert
+    QCOMPARE(settings.isOvernightAutoResumeEnabled(), true);
+    QSettings verify(settingsPath, QSettings::IniFormat);
+    QCOMPARE(verify.value("PausePilot/autoresume_after_night").toBool(), true);
 }
 
 // A14: boot_time_sec_ is the only numeric key without a qBound; a garbage/huge

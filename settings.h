@@ -11,6 +11,7 @@ private:
 	QSettings sfile_;
 	int backpause_min_;
 	bool autopause_enabled_;
+	bool autoresume_after_night_;
 	bool autostart_timing_;
 	bool start_minimized_;
 	bool start_pinned_to_top_;
@@ -35,6 +36,7 @@ public:
 	QSettings::Status syncStatus() const { return last_sync_status_; }
 	int getHistoryDays() const;
 	bool isAutopauseEnabled() const;
+	bool isOvernightAutoResumeEnabled() const;
 	bool isAutostartTimingEnabled() const;
 	bool isMinimizedStartEnabled() const;
 	bool isPinnedStartEnabled() const;

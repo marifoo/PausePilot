@@ -10,6 +10,9 @@ class SettingsTest : public QObject
 
 private slots:
     void test_settings_defaults_and_bounds();
+    void test_settings_autoresume_after_night_default_true_and_persisted();
+    void test_settings_autoresume_after_night_false_respected();
+    void test_settings_autoresume_after_night_malformed_repaired();
     // 9.4: unknown keys survive a load/save round-trip; sync failure is reported
     void test_settings_unknown_key_survives_roundtrip();
     void test_settings_sync_failure_reported();
