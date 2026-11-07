@@ -340,7 +340,7 @@ struct StartupRecoveryResult {
  * Result of checkSchemaOnStartup().
  *
  *   Ready        — existing DB has the expected schema; safe to use.
- *   Created      — DB file did not exist; a fresh schema was built.
+ *   Created      — DB file did not exist or was empty; a fresh schema was built.
  *   Outdated     — existing DB has wrong columns or missing/non-unique constraints;
  *                  caller must refuse to start and ask the user to remove the file.
  *   Inaccessible — DB file could not be opened (permissions, I/O error);

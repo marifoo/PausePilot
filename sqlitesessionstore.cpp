@@ -216,7 +216,7 @@ SqliteSessionStore::SqliteSessionStore(const Settings& settings, QObject *parent
     }
 
     // Record whether this is a fresh DB before opening.
-    db_was_fresh_ = !QFile::exists(db.databaseName());
+    db_was_fresh_ = QFileInfo(db.databaseName()).size() == 0;
 
     // Open the connection.
     if (!db.open()) {
@@ -465,7 +465,7 @@ void SqliteSessionStore::checkSegmentIdUniqueness()
  * before any recovery or data access.
  *
  * Returns:
- *   Created      — DB file did not previously exist; fresh schema was built.
+ *   Created      — DB file did not previously exist or was empty; fresh schema was built.
  *   Ready        — existing DB has the expected schema and demonstrated
  *                  write/journal capability; safe to use.
  *   Outdated     — the existing durations table's column names do not match,

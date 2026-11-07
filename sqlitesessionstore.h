@@ -104,7 +104,7 @@ private:
     /// real one. Defaults to the real UTC clock.
     std::function<QDateTime()> now_provider_ = QDateTime::currentDateTimeUtc;
     uint history_days_to_keep_;
-    bool db_was_fresh_;  // true if the DB file did not exist when the connection was first opened
+    bool db_was_fresh_;  // true if the DB file was missing or empty when the connection was first opened
     bool schema_creation_failed_ = false;
 #ifndef QT_NO_DEBUG
     bool force_reconcile_failure_dbg_ = false;

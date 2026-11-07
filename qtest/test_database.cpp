@@ -1,6 +1,7 @@
 #include "test_database.h"
 #include "fakesessionstore.h"
 #include <QtTest>
+#include <QFileInfo>
 #include <algorithm>
 #ifdef Q_OS_UNIX
 #include <unistd.h>
@@ -2335,6 +2336,31 @@ void DatabaseTest::test_schema_status_inaccessible_readonly_file()
     // Restore permissions.
     QVERIFY(dbFile.setPermissions(
         QFile::ReadOwner | QFile::WriteOwner | QFile::ReadUser));
+}
+
+void DatabaseTest::test_schema_status_created_on_empty_file()
+{
+    // Arrange: a 0-byte file, as left by a first run killed before its DDL.
+    resetDatabaseFile();
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    Settings settings(createSettingsFile(tempDir.path(), 7));
+    QFile emptyFile(db_path_);
+    QVERIFY(emptyFile.open(QIODevice::WriteOnly));
+    emptyFile.close();
+    QCOMPARE(QFileInfo(db_path_).size(), qint64(0));
+
+    // Act
+    SchemaStatus status;
+    {
+        SqliteSessionStore manager(settings);
+        status = manager.checkSchemaOnStartup();
+    }
+
+    // Assert: the schema was built and persists as the canonical one.
+    QCOMPARE(status, SchemaStatus::Created);
+    SqliteSessionStore reopened(settings);
+    QCOMPARE(reopened.checkSchemaOnStartup(), SchemaStatus::Ready);
 }
 
 // ============================================================================

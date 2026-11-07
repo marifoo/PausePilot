@@ -107,6 +107,7 @@ private slots:
     void test_schema_status_ready_recreates_missing_idx_start_utc();
     void test_schema_status_ready_enforces_unique_segment_id();
     void test_schema_status_inaccessible_readonly_file();
+    void test_schema_status_created_on_empty_file();
 
     // TimeTracker::initializeFromStore isolation: no side effects before recovery is called
     void test_constructor_only_does_not_consume_marker();

@@ -7,6 +7,8 @@ writes it. The schema is checked at startup via `checkSchemaOnStartup()`,
 which returns a `SchemaStatus` enum (`Ready`, `Created`, `Outdated`, or
 `Inaccessible`). If the result is `Outdated` or `Inaccessible`, the
 application refuses to start and asks the user to delete or rename the file.
+An empty (0-byte) file counts as missing, so a first run interrupted before
+the schema was written gets a fresh schema on the next start.
 Only on `Ready` or `Created` does `main.cpp` call `runStartupRecovery()`, which
 drives `TimeTracker::initializeFromStore()` (retrying on a modal Retry/Quit
 choice if it fails) to consume the clean-shutdown marker and reconcile orphan
