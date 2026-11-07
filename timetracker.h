@@ -106,6 +106,7 @@ public:
         MidnightScheduled,  ///< -> None: scheduled 23:59:59.500 cutoff.
         MidnightWatchdog,   ///< -> None: watchdog cross-midnight discard.
         Shutdown,           ///< -> None: application shutdown.
+        OvernightResume,    ///< None -> Activity: restart after a night spent locked or asleep.
     };
 
     /// One transition: the mode it left, the mode it entered, and why.
@@ -227,6 +228,8 @@ private:
     Mode mode_;
     bool autopause_pending_resume_;
     bool is_locked_;     // Track if desktop is currently locked (to prevent checkpoints while locked)
+    enum class OvernightArm { Off, AwaitUnlock };
+    OvernightArm overnight_resume_ = OvernightArm::Off;
     bool dialog_open_;   // True while HistoryDialog is open. Checkpoints keep running (WP6); lock-watcher events, a forward date change, the midnight stop/discard and shutdown revoke it first (revokeExclusiveEdit()); any other real mode change revokes it from inside emitTransition() (H5/WP7c).
     QDate exclusive_edit_date_;  // WP4: the date when beginExclusiveEdit() was called.
                                  // Used to detect when the date moves forward (>) and revoke the edit.
@@ -248,11 +251,12 @@ private:
     int startup_policy_dropped_count_;
     DayBoundaryWatcher day_boundary_watcher_; // Must be last: constructed after all other members
 
-    // cause defaults to the button/toggle path; the lock-resume caller (Unlock
-    // handling) passes TransitionCause::LockResume so the
-    // one transitioned() emission this method performs carries the right cause.
+    // cause defaults to the button/toggle path; Unlock passes LockResume or
+    // OvernightResume so the transition carries the right cause.
     void startTimer(const QDateTime& now, TransitionCause cause = TransitionCause::ButtonStart);
     void stopTimer(const QDateTime& now, StopReason reason);
+    OvernightArm overnightResumeAfterStop(StopReason reason, Mode fromMode) const;
+    void resumeAfterNight(const QDateTime& at);
     /// True when `now` precedes `referenceStart` -- a backward wall-clock
     /// step (NTP/manual/DST) after `referenceStart` was captured. The one
     /// owner of this rule, used by stopTimer/pauseTimer/backpauseTimer,
@@ -367,7 +371,7 @@ public:
     /// True once shutdown() has run and not yet cancelled (cleared by
     /// cancelShutdown()). Distinct from isStopped(): a normally stopped
     /// engine is still editable regardless of this flag. While set, Start
-    /// (button or lock-resume) is refused by startTimer() -- shutdown is
+    /// (button, lock-resume or overnight resume) is refused by startTimer() -- shutdown is
     /// terminal until cancelShutdown() (C9b). Test-only accessor
     /// today -- History's own per-dialog save gate is shutdownEpoch(), not
     /// this flag (D5 review fix, R15-002).

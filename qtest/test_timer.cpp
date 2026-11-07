@@ -9,6 +9,7 @@ using TestCommon::createSettingsFile;
 using TestCommon::fixedNow;
 using TestCommon::sumDurations;
 
+
 void TimerTest::initTestCase()
 {
     QVERIFY(data_dir_.isValid());
@@ -3115,7 +3116,7 @@ void TimerTest::test_N5_scheduled_stop_after_autopause_revokes_and_credits_all_s
 // N5b (*HEAD-red*): History stays open while still locked (no Unlock) right
 // up to the scheduled stop. The LongOngoingLock is still "still locked" at
 // that point, so the scheduled stop finalizes a Pause segment through the cutoff.
-void TimerTest::test_N5b_scheduled_stop_while_still_locked_revokes_and_stops_paused()
+void TimerTest::test_N5b_scheduled_stop_while_still_locked_revokes_stops_paused_and_resumes_on_unlock()
 {
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -3161,10 +3162,12 @@ void TimerTest::test_N5b_scheduled_stop_while_still_locked_revokes_and_stops_pau
     QVERIFY2(foundActivity, "Expected completed Activity segment 23:00->23:20");
     QVERIFY2(foundPause, "Expected the Pause interval to cover [23:20, cutoff] contiguously");
 
-    // A later Unlock does not restart the (now stopped) timer.
-    clock.setNow(QDateTime(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime));
+    // A later Unlock starts a fresh session.
+    const QDateTime nextDay(QDate(2025, 6, 2), QTime(0, 10, 0), Qt::LocalTime);
+    clock.setNow(nextDay);
     tracker.useTimerViaLockEvent(LockEvent::Unlock);
-    QVERIFY(tracker.isStopped());
+    QVERIFY(tracker.isActive());
+    QCOMPARE(tracker.sessionState_dbg().segment_start_time, nextDay);
     QVERIFY(!tracker.isAutopausePendingResume_dbg());
 }
 
@@ -3173,13 +3176,13 @@ void TimerTest::test_N5b_scheduled_stop_while_still_locked_revokes_and_stops_pau
 // deferral): the Lock checkpoint and the LongOngoingLock backpause run as
 // ordinary no-dialog code, producing completed Activity and Pause segments.
 // The overnight tick then discards only the still-ongoing Pause segment that
-// crosses midnight, exactly as the no-dialog watchdog would. HEAD instead
-// resumes Activity at 08:00.
+// crosses midnight, exactly as the no-dialog watchdog would. Unlock starts a
+// fresh Activity session at 08:00 instead of resuming the old Pause session.
 // C3: the Lock-instant checkpoint means the evening Activity segment and the
 // Pause segment up to LongOngoingLock maturation are kept via the ordinary
 // (non-cross-midnight) commit paths; only the still-ongoing overnight Pause
 // segment has no confirmed checkpoint (Pause segments never checkpoint) and
-// is discarded whole by the watchdog.
+// is discarded whole by the watchdog. Unlock then starts a fresh OvernightResume session.
 void TimerTest::test_N6_watchdog_tick_before_unlock_discards_unconfirmed_pause_segment()
 {
     QTemporaryDir tempDir;
@@ -3216,7 +3219,8 @@ void TimerTest::test_N6_watchdog_tick_before_unlock_discards_unconfirmed_pause_s
     tracker.endExclusiveEdit();
 
     // Assert
-    QVERIFY(tracker.isStopped());
+    QVERIFY(tracker.isActive());
+    QCOMPARE(tracker.sessionState_dbg().segment_start_time, nextMorning);
     QVERIFY(!tracker.isAutopausePendingResume_dbg());
     bool foundActivity = false, foundPause = false;
     for (const auto& seg : fakeDb.storedDurations) {
@@ -3233,6 +3237,315 @@ void TimerTest::test_N6_watchdog_tick_before_unlock_discards_unconfirmed_pause_s
     // Pause is discarded by the overnight watchdog.
     QVERIFY2(foundActivity, "Expected completed Activity segment 21:00->22:05");
     QVERIFY2(foundPause, "Expected completed Pause segment 22:05->22:20");
+}
+
+// Overnight auto-resume
+namespace {
+QDateTime overnightTime(int day, int hour, int minute = 0, int second = 0, int msec = 0)
+{
+    return QDateTime(QDate(2025, 6, day), QTime(hour, minute, second, msec), Qt::LocalTime);
+}
+
+struct OvernightFixture {
+    static QString makeSettings(const QString& dir, bool autopause, bool autoresume, int bootSeconds)
+    {
+        const QString path = createSettingsFile(dir, 7);
+        QSettings writer(path, QSettings::IniFormat);
+        writer.setValue("PausePilot/autopause_enabled", autopause);
+        writer.setValue("PausePilot/autopause_threshold_minutes", 15);
+        writer.setValue("PausePilot/autoresume_after_night", autoresume);
+        writer.setValue("PausePilot/boot_time_seconds", bootSeconds);
+        writer.sync();
+        return path;
+    }
+
+    QTemporaryDir dir;
+    QString path;
+    Settings settings;
+    FakeSessionStore db;
+    FakeClock clock;
+    TimeTracker tracker;
+
+    explicit OvernightFixture(bool autopause = true, bool autoresume = true, int bootSeconds = 0)
+        : path(makeSettings(dir.path(), autopause, autoresume, bootSeconds)),
+          settings(path), clock(overnightTime(1, 21)), tracker(settings, db)
+    {
+        tracker.setNowProvider_dbg([this]() { return clock.now(); });
+    }
+
+    void at(const QDateTime& t) { clock.setNow(t); }
+    void lock() { tracker.useTimerViaLockEvent(LockEvent::Lock); }
+    void unlock() { tracker.useTimerViaLockEvent(LockEvent::Unlock); }
+    void longLock(const QDateTime& lockTime)
+    { tracker.useTimerViaLockEvent(LockEvent::LongOngoingLock, lockTime); }
+    void tickAt(const QDateTime& t) { at(t); tracker.onTick(t); }
+    void tickFor(qint64 ms)
+    {
+        for (qint64 i = 0; i < ms / 100; ++i) {
+            clock.advance(100);
+            tracker.onTick(clock.now());
+        }
+    }
+    void startAndLock()
+    {
+        tracker.useTimerViaButton(Button::Start);
+        at(overnightTime(1, 22));
+        lock();
+    }
+    void autoPauseAndStop()
+    {
+        startAndLock();
+        at(overnightTime(1, 22, 20));
+        longLock(overnightTime(1, 22));
+        tickAt(overnightTime(1, 23, 59, 59, 500));
+    }
+    void activityAndStop()
+    {
+        startAndLock();
+        tickAt(overnightTime(1, 23, 59, 59, 500));
+    }
+};
+} // namespace
+
+void TimerTest::test_overnight_locked_autopause_resumes_on_next_day_unlock()
+{
+    OvernightFixture f;
+    QSignalSpy transitions(&f.tracker, &TimeTracker::transitioned);
+    QSignalSpy warnings(&f.tracker, &TimeTracker::userWarning);
+    f.autoPauseAndStop();
+    QVERIFY(f.tracker.isStopped());
+    QCOMPARE(warnings.size(), 0);
+
+    const QDateTime morning = overnightTime(2, 8);
+    f.at(morning);
+    f.unlock();
+
+    QVERIFY(f.tracker.isActive());
+    const auto transition = transitions.last().first().value<TimeTracker::Transition>();
+    QCOMPARE(transition.from, TimeTracker::Mode::None);
+    QCOMPARE(transition.to, TimeTracker::Mode::Activity);
+    QCOMPARE(transition.cause, TimeTracker::TransitionCause::OvernightResume);
+    QCOMPARE(f.tracker.sessionState_dbg().segment_start_time, morning);
+    QCOMPARE(warnings.size(), 1);
+    QCOMPARE(warnings.first().first().toString(), QString("Timer restarted automatically after the night."));
+    QVERIFY(!f.tracker.isLocked_dbg());
+}
+
+void TimerTest::test_overnight_locked_activity_resumes_with_autopause_disabled()
+{
+    OvernightFixture f(false);
+    f.activityAndStop();
+    f.at(overnightTime(2, 8));
+    f.unlock();
+    QVERIFY(f.tracker.isActive());
+    QCOMPARE(f.tracker.sessionState_dbg().segment_start_time, overnightTime(2, 8));
+}
+
+void TimerTest::test_overnight_unlock_event_triggering_watchdog_resumes_immediately()
+{
+    OvernightFixture f;
+    f.startAndLock();
+    f.at(overnightTime(2, 8));
+    f.unlock();
+
+    QVERIFY(f.tracker.isActive());
+    QCOMPARE(f.tracker.sessionState_dbg().segment_start_time, overnightTime(2, 8));
+    QVERIFY(!f.tracker.isLocked_dbg());
+    const int saves = f.db.callLog.count("saveCheckpoint");
+    f.at(overnightTime(2, 8, 5));
+    f.tracker.triggerCheckpoint_dbg();
+    QCOMPARE(f.db.callLog.count("saveCheckpoint"), saves + 1);
+}
+
+void TimerTest::test_overnight_long_lock_while_armed_does_not_disarm()
+{
+    OvernightFixture f;
+    f.activityAndStop();
+    f.at(overnightTime(2, 7));
+    f.longLock(overnightTime(1, 22));
+    QVERIFY(f.tracker.isStopped());
+    f.at(overnightTime(2, 8));
+    f.unlock();
+    QVERIFY(f.tracker.isActive());
+}
+
+void TimerTest::test_overnight_manual_pause_does_not_qualify()
+{
+    OvernightFixture f;
+    QSignalSpy warnings(&f.tracker, &TimeTracker::userWarning);
+    f.tracker.useTimerViaButton(Button::Start);
+    f.at(overnightTime(1, 21, 30));
+    f.tracker.useTimerViaButton(Button::Pause);
+    f.at(overnightTime(1, 22));
+    f.lock();
+    f.tickAt(overnightTime(1, 23, 59, 59, 500));
+    f.at(overnightTime(2, 8));
+    f.unlock();
+    QVERIFY(f.tracker.isStopped());
+    QCOMPARE(warnings.size(), 0);
+}
+
+void TimerTest::test_overnight_unlocked_scheduled_stop_does_not_resume()
+{
+    OvernightFixture f;
+    f.tracker.useTimerViaButton(Button::Start);
+    f.tickAt(overnightTime(1, 23, 59, 59, 500));
+    f.at(overnightTime(2, 8));
+    f.tickFor(3000);
+    f.unlock();
+    QVERIFY(f.tracker.isStopped());
+}
+
+void TimerTest::test_overnight_resumes_after_multiple_nights()
+{
+    OvernightFixture f;
+    f.autoPauseAndStop();
+    f.tickAt(overnightTime(2, 12));
+    f.tickAt(overnightTime(3, 12));
+    QVERIFY(f.tracker.isStopped());
+    f.at(overnightTime(4, 8));
+    f.unlock();
+    QVERIFY(f.tracker.isActive());
+    QCOMPARE(f.tracker.sessionState_dbg().segment_start_time, overnightTime(4, 8));
+}
+
+void TimerTest::test_overnight_setting_false_does_not_resume_on_unlock()
+{
+    OvernightFixture f(true, false);
+    QSignalSpy warnings(&f.tracker, &TimeTracker::userWarning);
+    f.autoPauseAndStop();
+    f.at(overnightTime(2, 8));
+    f.unlock();
+    QVERIFY(f.tracker.isStopped());
+    QCOMPARE(warnings.size(), 0);
+}
+
+void TimerTest::test_overnight_autopause_toggled_while_armed_still_resumes()
+{
+    OvernightFixture f;
+    f.autoPauseAndStop();
+    QCOMPARE(f.settings.setAutopauseState(false), QSettings::NoError);
+    f.at(overnightTime(2, 8));
+    f.unlock();
+    QVERIFY(f.tracker.isActive());
+}
+
+void TimerTest::test_overnight_button_after_arming_cancels_resume_data()
+{
+    QTest::addColumn<int>("button");
+    QTest::newRow("start") << static_cast<int>(Button::Start);
+    QTest::newRow("pause") << static_cast<int>(Button::Pause);
+    QTest::newRow("stop") << static_cast<int>(Button::Stop);
+}
+
+void TimerTest::test_overnight_button_after_arming_cancels_resume()
+{
+    QFETCH(int, button);
+    OvernightFixture f;
+    QSignalSpy transitions(&f.tracker, &TimeTracker::transitioned);
+    QSignalSpy warnings(&f.tracker, &TimeTracker::userWarning);
+    f.activityAndStop();
+    f.at(overnightTime(2, 8));
+    f.tracker.useTimerViaButton(static_cast<Button>(button));
+    const int afterButton = transitions.size();
+    f.unlock();
+    QCOMPARE(transitions.size(), afterButton);
+    QCOMPARE(warnings.size(), 0);
+    if (button == static_cast<int>(Button::Start)) {
+        QVERIFY(f.tracker.isActive());
+        QCOMPARE(transitions.last().first().value<TimeTracker::Transition>().cause,
+                 TimeTracker::TransitionCause::ButtonStart);
+    } else {
+        QVERIFY(f.tracker.isStopped());
+    }
+}
+
+void TimerTest::test_overnight_button_finding_missed_midnight_never_resumes_data()
+{
+    QTest::addColumn<int>("button");
+    QTest::newRow("start") << static_cast<int>(Button::Start);
+    QTest::newRow("pause") << static_cast<int>(Button::Pause);
+    QTest::newRow("stop") << static_cast<int>(Button::Stop);
+}
+
+void TimerTest::test_overnight_button_finding_missed_midnight_never_resumes()
+{
+    QFETCH(int, button);
+    OvernightFixture f;
+    f.startAndLock();
+    f.at(overnightTime(2, 8));
+    f.tracker.useTimerViaButton(static_cast<Button>(button));
+    f.unlock();
+    QVERIFY(f.tracker.isStopped());
+}
+
+void TimerTest::test_overnight_boot_time_added_on_resume_of_empty_day()
+{
+    for (const bool hasEntries : {false, true}) {
+        OvernightFixture f(true, true, 300);
+        f.db.entriesForDateResult = hasEntries ? EntriesForDateResult::Yes : EntriesForDateResult::No;
+        f.autoPauseAndStop();
+        f.at(overnightTime(2, 8));
+        f.unlock();
+        const auto completed = f.tracker.completedTimeline().completed();
+        QCOMPARE(completed.size(), hasEntries ? size_t(0) : size_t(1));
+        if (!hasEntries) {
+            QCOMPARE(completed.front().type, DurationType::Activity);
+            QCOMPARE(completed.front().startTime, overnightTime(2, 7, 55));
+            QCOMPARE(completed.front().endTime, overnightTime(2, 8));
+        }
+    }
+}
+
+void TimerTest::test_overnight_resume_boot_time_clamped_at_0003()
+{
+    OvernightFixture f(true, true, 300);
+    f.autoPauseAndStop();
+    f.at(overnightTime(2, 0, 3));
+    f.unlock();
+    const auto completed = f.tracker.completedTimeline().completed();
+    QCOMPARE(completed.size(), size_t(1));
+    QCOMPARE(completed.front().startTime, overnightTime(2, 0));
+    QCOMPARE(completed.front().endTime, overnightTime(2, 0, 3));
+}
+
+void TimerTest::test_overnight_shutdown_while_armed_prevents_resume()
+{
+    OvernightFixture f;
+    QSignalSpy transitions(&f.tracker, &TimeTracker::transitioned);
+    QSignalSpy warnings(&f.tracker, &TimeTracker::userWarning);
+    f.autoPauseAndStop();
+    f.tracker.shutdown();
+    f.tracker.cancelShutdown();
+    const int beforeUnlock = transitions.size();
+    f.at(overnightTime(2, 8));
+    f.unlock();
+    QVERIFY(f.tracker.isStopped());
+    QCOMPARE(transitions.size(), beforeUnlock);
+    QCOMPARE(warnings.size(), 0);
+}
+
+void TimerTest::test_overnight_refused_start_does_not_rearm()
+{
+    OvernightFixture f;
+    QSignalSpy warnings(&f.tracker, &TimeTracker::userWarning);
+    f.startAndLock();
+    f.at(overnightTime(1, 22, 20));
+    f.longLock(overnightTime(1, 22));
+    f.db.commitSessionResult = SessionStoreResult::transient("injected failure");
+    f.tickAt(overnightTime(1, 23, 59, 59, 500));
+    f.at(overnightTime(2, 8));
+    f.unlock();
+    QVERIFY(f.tracker.isStopped());
+    QVERIFY(f.tracker.hasPendingCommit_dbg());
+    QCOMPARE(warnings.size(), 1);
+    QCOMPARE(warnings.first().first().toString(), QString("Could not save previous session data. Please retry Start."));
+    f.db.commitSessionResult = SessionStoreResult::success();
+    f.lock();
+    f.unlock();
+    QVERIFY(f.tracker.isStopped());
+    QCOMPARE(warnings.size(), 1);
+    QVERIFY(f.tracker.drainForShutdown().clean());
 }
 
 // N7 (*HEAD-red*; the Medium): once a scheduled stop has already revoked and

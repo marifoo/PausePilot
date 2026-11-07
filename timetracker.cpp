@@ -49,6 +49,7 @@ namespace {
 // History edit. One neutral text for every revoke trigger.
 const QString kHistoryRevokedNotice =
     "History was closed (screen lock, sleep, midnight or shutdown); any unsaved changes were discarded.";
+const QString kOvernightResumeNotice = "Timer restarted automatically after the night.";
 
 // D10: the only translation needed between the pre-existing StopReason
 // vocabulary (still used wherever a stop's own reason is threaded through --
@@ -85,6 +86,7 @@ TimeTracker::StopReason stopReasonFromCause(TimeTracker::TransitionCause cause)
     case TimeTracker::TransitionCause::ButtonPause:
     case TimeTracker::TransitionCause::LockAutopause:
     case TimeTracker::TransitionCause::LockResume:
+    case TimeTracker::TransitionCause::OvernightResume:
         Q_UNREACHABLE();
     }
     Q_UNREACHABLE();
@@ -466,6 +468,7 @@ void TimeTracker::startTimer(const QDateTime& now, TransitionCause cause)
     // Clear autopause flag at the top of startTimer so both Pause→Activity
     // and None→Activity paths start with a clean state.
     autopause_pending_resume_ = false;
+    overnight_resume_ = OvernightArm::Off;
 
     if (mode_ == Mode::Pause) {
         Logger::Log("[DEBUG] Starting TimeTracker from Pause - D=" + QString::number(session_.durations.size()));
@@ -648,6 +651,19 @@ void TimeTracker::backpauseTimer(const QDateTime& now, const QDateTime& lockTime
 }
 
 
+TimeTracker::OvernightArm TimeTracker::overnightResumeAfterStop(StopReason reason, Mode fromMode) const
+{
+    const bool qualifies = settings_.isOvernightAutoResumeEnabled()
+        && (fromMode == Mode::Activity || autopause_pending_resume_);
+    switch (reason) {
+    case StopReason::MidnightScheduled:
+    case StopReason::MidnightWatchdog: return qualifies && is_locked_ ? OvernightArm::AwaitUnlock : OvernightArm::Off;
+    case StopReason::ButtonStop:
+    case StopReason::Shutdown: return OvernightArm::Off;
+    }
+    Q_UNREACHABLE();
+}
+
 /**
  * Ends the current timing session.
  *
@@ -724,6 +740,9 @@ void TimeTracker::stopTimer(const QDateTime& now, StopReason reason)
     mode_ = Mode::None;
     session_.clearSegment();
     checkpointTimer_.stop();
+    overnight_resume_ = overnightResumeAfterStop(reason, fromMode);
+    if (overnight_resume_ == OvernightArm::AwaitUnlock)
+        Logger::Log("[OVERNIGHT] Armed until Unlock");
     autopause_pending_resume_ = false;
     Logger::Log("[TIMER] TimeTracker stopped <<");
 
@@ -783,11 +802,10 @@ void TimeTracker::useTimerViaButton(Button button)
 {
     QMutexLocker locker(&mutex_);
     const QDateTime now = now_provider_();
-    if (discardCrossMidnightOngoingAndStop(now)) {
-        // Ongoing segment crossed midnight — engine is now in None state.
-        // Whatever the user asked for, discard it: per the day-boundary
-        // policy the timer must remain stopped until the user starts
-        // again manually.
+    const bool missedMidnight = discardCrossMidnightOngoingAndStop(now);
+    overnight_resume_ = OvernightArm::Off;
+    if (missedMidnight) {
+        // A button that finds a missed midnight stays stopped and cancels overnight resume.
 #ifndef QT_NO_DEBUG
         checkDurationInvariants();
 #endif
@@ -831,7 +849,7 @@ void TimeTracker::onStopPressed()
  * Event handling:
  * - Lock: Saves final checkpoint, suspends further checkpoints via is_locked_
  * - LongOngoingLock: Triggers backpause if timer was in Activity mode
- * - Unlock: Resumes checkpoints, restarts timer if it was auto-paused
+ * - Unlock: Resumes checkpoints, restarts after autopause or an armed overnight stop
  *
  * Note: Lock/Unlock events for checkpoint control are always processed.
  * Autopause behavior (LongOngoingLock handling) respects isAutopauseEnabled().
@@ -851,15 +869,8 @@ void TimeTracker::useTimerViaLockEvent(LockEvent event, const QDateTime& lockTim
     }
     const QDateTime now = now_provider_();
     if (dialog_open_ && event != LockEvent::None) revokeExclusiveEdit();
-    if (discardCrossMidnightOngoingAndStop(now)) {
-        // Already-forced stopped — ignore the lock event for engine
-        // purposes. autopause_pending_resume_ is already cleared inside
-        // the helper so a subsequent Unlock does not restart.
-#ifndef QT_NO_DEBUG
-        checkDurationInvariants();
-#endif
-        return;
-    }
+    // Apply the event in None after a watchdog stop: lock state stays truthful and Unlock can resume.
+    discardCrossMidnightOngoingAndStop(now);
     // D10/plan4 B16: each event kind owns its complete behavior. The dialog
     // gate that used to live in each case (WP5) is gone: the revoke above
     // already closed History before this switch runs, so only the
@@ -891,6 +902,10 @@ void TimeTracker::onUnlockDetected(const QDateTime& now)
 {
     is_locked_ = false;
     Logger::Log("[LOCK] Desktop unlocked - checkpoint saving resumed");
+    if (overnight_resume_ != OvernightArm::Off) {
+        resumeAfterNight(now);
+        return;
+    }
     if (!settings_.isAutopauseEnabled()) {
         Logger::Log("[DEBUG] Autopause disabled; lock event ignored");
         return;
@@ -899,6 +914,14 @@ void TimeTracker::onUnlockDetected(const QDateTime& now)
         startTimer(now, TransitionCause::LockResume);
     }
     autopause_pending_resume_ = false;
+}
+
+void TimeTracker::resumeAfterNight(const QDateTime& at)
+{
+    overnight_resume_ = OvernightArm::Off;
+    Logger::Log("[OVERNIGHT] Restarting timer");
+    startTimer(at, TransitionCause::OvernightResume);
+    if (mode_ == Mode::Activity) emit userWarning(kOvernightResumeNotice);
 }
 
 void TimeTracker::onLongOngoingLockDetected(const QDateTime& now, const QDateTime& lockTime)
@@ -1012,6 +1035,7 @@ TimeTracker::ShutdownResult TimeTracker::shutdown()
     QMutexLocker locker(&mutex_);
     if (dialog_open_) revokeExclusiveEdit();
     shutdown_called_ = true;
+    overnight_resume_ = OvernightArm::Off;
     ++shutdown_epoch_;
     if (mode_ != Mode::None) {
         stopTimer(now_provider_(), StopReason::Shutdown);

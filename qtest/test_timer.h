@@ -214,7 +214,7 @@ private slots:
     void test_N3_watchdog_tick_revokes_edit_and_keeps_confirmed_prefix();
     void test_N4_lock_event_revokes_edit_and_stops();
     void test_N5_scheduled_stop_after_autopause_revokes_and_credits_all_segments();
-    void test_N5b_scheduled_stop_while_still_locked_revokes_and_stops_paused();
+    void test_N5b_scheduled_stop_while_still_locked_revokes_stops_paused_and_resumes_on_unlock();
     void test_N6_watchdog_tick_before_unlock_discards_unconfirmed_pause_segment();
     void test_N7_shutdown_after_revoked_scheduled_stop_leaves_segment_unchanged();
     void test_N8_before_cutoff_tick_does_not_revoke_or_stop();
@@ -500,6 +500,25 @@ private slots:
     void test_WP7c_backward_clock_pause_refusal_does_not_revoke();
     void test_WP7c_failed_pending_commit_retry_start_does_not_revoke();
     void test_WP7c_start_refused_after_shutdown_does_not_revoke();
+
+    // Overnight auto-resume
+    void test_overnight_locked_autopause_resumes_on_next_day_unlock();
+    void test_overnight_locked_activity_resumes_with_autopause_disabled();
+    void test_overnight_unlock_event_triggering_watchdog_resumes_immediately();
+    void test_overnight_long_lock_while_armed_does_not_disarm();
+    void test_overnight_manual_pause_does_not_qualify();
+    void test_overnight_unlocked_scheduled_stop_does_not_resume();
+    void test_overnight_resumes_after_multiple_nights();
+    void test_overnight_setting_false_does_not_resume_on_unlock();
+    void test_overnight_autopause_toggled_while_armed_still_resumes();
+    void test_overnight_button_after_arming_cancels_resume_data();
+    void test_overnight_button_after_arming_cancels_resume();
+    void test_overnight_button_finding_missed_midnight_never_resumes_data();
+    void test_overnight_button_finding_missed_midnight_never_resumes();
+    void test_overnight_boot_time_added_on_resume_of_empty_day();
+    void test_overnight_resume_boot_time_clamped_at_0003();
+    void test_overnight_shutdown_while_armed_prevents_resume();
+    void test_overnight_refused_start_does_not_rearm();
 };
 
 #endif // TEST_TIMER_H
