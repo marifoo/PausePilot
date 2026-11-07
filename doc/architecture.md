@@ -162,7 +162,7 @@ notion of "the desktop is locked". On Windows it polls
 `WTSQuerySessionInformation` (querying the current session, not the physical
 console, so RDP sessions behave correctly) on each 100 ms heartbeat tick. On
 Linux it tries several D-Bus backends in order — `systemd-logind`, the
-freedesktop screensaver, the GNOME screensaver, then the KDE screensaver —
+freedesktop screensaver, then the GNOME screensaver —
 and uses the first one whose real per-session query succeeds; a failing
 active backend triggers a rate-limited (exponential-backoff) rescan of the
 chain rather than a scan on every tick. The exact order and method names live

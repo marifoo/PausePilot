@@ -49,7 +49,7 @@ make
 ```
 
 Lock detection on Linux uses D-Bus — systemd-logind, the generic freedesktop
-screensaver, GNOME, or KDE, whichever responds first.
+screensaver, or GNOME, whichever responds first.
 
 ## Using it
 

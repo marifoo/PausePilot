@@ -6,7 +6,7 @@
  *
  * Platform implementations:
  * - Windows: WtsApi32.dll WTSQuerySessionInformation for session lock state
- * - Linux: DBus queries with fallback chain (systemd-logind → Freedesktop → GNOME → KDE)
+ * - Linux: DBus queries with fallback chain (systemd-logind → Freedesktop → GNOME)
  *
  * Debouncing:
  * - Hysteresis on a debounced level tracked in a 5-sample buffer
@@ -264,7 +264,6 @@ void LockStateWatcher::update()
  * 1. systemd-logind: The modern standard. Most reliable on recent distros.
  * 2. freedesktop.ScreenSaver: The standard interface implemented by many DEs (XFCE, MATE, etc.).
  * 3. GNOME ScreenSaver: Legacy specific interface.
- * 4. KDE ScreenSaver: Legacy specific interface.
  *
  * This only builds the list; it performs no DBus I/O and selects nothing.
  * queryLinuxBackends() validates and selects a backend using its real query
@@ -279,8 +278,6 @@ void LockStateWatcher::buildLinuxBackends()
 			return queryScreenSaverDBus("org.freedesktop.ScreenSaver", "/org/freedesktop/ScreenSaver", "org.freedesktop.ScreenSaver"); } },
 		{ "GNOME ScreenSaver", [this]() {
 			return queryScreenSaverDBus("org.gnome.ScreenSaver", "/org/gnome/ScreenSaver", "org.gnome.ScreenSaver"); } },
-		{ "KDE ScreenSaver", [this]() {
-			return queryScreenSaverDBus("org.kde.screensaver", "/ScreenSaver", "org.kde.screensaver"); } },
 	};
 }
 
