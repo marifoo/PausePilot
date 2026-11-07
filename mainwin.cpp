@@ -53,6 +53,10 @@ MainWin::MainWin(Settings& settings, TimeTracker& timetracker, SessionStore& db,
 	// Re-arm the health warnings when a session ends so they can fire again in
 	// the next session (at most once per session, not once per app lifetime).
 	connect(&timetracker_, &TimeTracker::stopped, health_monitor_, &HealthMonitor::reset);
+#ifdef Q_OS_WIN
+	// A hidden window needs a native handle to receive WM_QUERYENDSESSION.
+	winId();
+#endif
 }
 
 void MainWin::setupCentralWidget(Settings& settings, TimeTracker& timetracker)

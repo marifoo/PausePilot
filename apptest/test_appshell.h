@@ -83,6 +83,9 @@ private slots:
     // WM_ENDSESSION delivery itself is Windows-only.
     void test_D5_translateWindowsShutdownMessage_data();
     void test_D5_translateWindowsShutdownMessage();
+    // Minimized startup keeps a native window for Windows session-end messages.
+    void test_minimized_start_creates_native_window_data();
+    void test_minimized_start_creates_native_window();
 
     // D10 (requirement 4): ContentWidget reduces the single
     // TimeTracker::transitioned() event, wired up through MainWin. Exercised

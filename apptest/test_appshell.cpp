@@ -27,6 +27,7 @@
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QTimer>
+#include <QWindow>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -1256,6 +1257,41 @@ void AppShellTest::test_D5_translateWindowsShutdownMessage()
 
     // Assert
     QCOMPARE(static_cast<int>(result), expected);
+}
+
+void AppShellTest::test_minimized_start_creates_native_window_data()
+{
+    QTest::addColumn<bool>("pinned");
+    QTest::newRow("minimized") << false;
+    QTest::newRow("minimized+pinned") << true;
+}
+
+void AppShellTest::test_minimized_start_creates_native_window()
+{
+#ifndef Q_OS_WIN
+    QSKIP("session-end delivery to a hidden top-level window is Windows-specific");
+#endif
+    QFETCH(bool, pinned);
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("PausePilot/start_minimized_to_tray", true);
+    writer.setValue("PausePilot/start_pinned_to_top", pinned);
+    writer.setValue("PausePilot/press_start_button_on_app_start", false);
+    writer.sync();
+    Settings settings(settingsPath);
+    FakeSessionStore fakeDb;
+    TimeTracker tracker(settings, fakeDb);
+    ShutdownCoordinator coordinator(tracker, fakeDb);
+    MainWin mainWin(settings, tracker, fakeDb, coordinator);
+    // Act
+    mainWin.start();
+    // Assert
+    QVERIFY(!mainWin.isVisible());
+    QVERIFY(mainWin.windowHandle());
+    QVERIFY(mainWin.windowHandle()->handle());
 }
 
 // ============================================================================
