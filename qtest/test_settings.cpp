@@ -138,8 +138,8 @@ void SettingsTest::test_settings_autoresume_after_night_malformed_repaired()
     QCOMPARE(verify.value("PausePilot/autoresume_after_night").toBool(), true);
 }
 
-// A14: boot_time_sec_ is the only numeric key without a qBound; a garbage/huge
-// value must be capped rather than silently voiding the boot credit.
+// A14: boot_time_sec_ is bounded so a garbage/huge value cannot grant an
+// unreasonably large amount of boot credit.
 void SettingsTest::test_settings_boot_time_sec_bound()
 {
     QTemporaryDir tempDir;

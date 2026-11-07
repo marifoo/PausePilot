@@ -520,7 +520,8 @@ void TimeTracker::startTimer(const QDateTime& now, TransitionCause cause)
         }
         session_.resetForNewSession();
         if (shouldAddBootTime) {
-            QDateTime bootStart = now.addMSecs(-static_cast<qint64>(boot_time_sec) * 1000);
+            const QDateTime dayStart = DayValidity::localDayStart(LocalTime::fromInstant(now).date());
+            const QDateTime bootStart = std::max(now.addMSecs(-static_cast<qint64>(boot_time_sec) * 1000), dayStart);
             addDuration(DurationType::Activity, bootStart, now);
         }
         mode_ = Mode::Activity;

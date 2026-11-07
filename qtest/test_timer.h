@@ -99,7 +99,9 @@ private slots:
 
     void test_stop_clears_was_active_before_autopause();
 
-    void test_startTimer_drops_cross_midnight_boot_time_entry();
+    void test_startTimer_clamps_boot_time_to_local_midnight();
+    void test_startTimer_boot_time_unclamped_away_from_midnight();
+    void test_startTimer_boot_time_at_exact_midnight_adds_nothing();
 
     void test_getOngoingDuration_returns_nullopt_when_cross_midnight();
 

@@ -651,13 +651,9 @@ void TimerTest::test_boot_time_added_once_on_empty_db()
 
     Settings settings(settingsPath);
     SqliteSessionStore db(settings);
-    // D15/F1 (part 3, B1): Start computes bootStart = now - boot_time_seconds
-    // (timetracker.cpp:646). On the real clock, within 30s of local midnight
-    // that lands on the previous civil day and addDuration() rejects the
-    // cross-midnight interval as CrossMidnight -- boot time silently isn't
-    // credited and this assertion fails. Pin to fixedNow() (local noon), far
-    // from that window. FakeClock declared before TimeTracker so it outlives
-    // it (see the outlives-tracker note at test_integration.cpp:614).
+    // Pin to fixedNow() (local noon) to keep this test independent of the
+    // host clock. FakeClock declared before TimeTracker so it outlives it
+    // (see the outlives-tracker note at test_integration.cpp:614).
     FakeClock clock(fixedNow());
     TimeTracker tracker(settings, db);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
@@ -1038,14 +1034,9 @@ void TimerTest::test_stop_clears_was_active_before_autopause()
     QVERIFY(tracker.isStopped());
 }
 
-void TimerTest::test_startTimer_drops_cross_midnight_boot_time_entry()
+void TimerTest::test_startTimer_clamps_boot_time_to_local_midnight()
 {
-    // A boot_time_sec large enough that bootStart falls on the previous day.
-    // addDuration should silently discard it and the user still enters Activity.
-    //
-    // A14: boot_time_sec_ is now capped at 3600s (1h), so the fake clock is
-    // parked shortly after midnight (00:30) rather than relying on a
-    // multi-hour boot time to reach across the day boundary.
+    // A boot interval crossing local midnight is clamped to today's midnight.
 
     // Arrange
     resetDatabaseFile();
@@ -1053,8 +1044,7 @@ void TimerTest::test_startTimer_drops_cross_midnight_boot_time_entry()
     QVERIFY(tempDir.isValid());
     QString settingsPath = createSettingsFile(tempDir.path(), 7);
     QSettings writer(settingsPath, QSettings::IniFormat);
-    // Boot time at the (post-A14) cap; combined with "now" just after midnight
-    // below, bootStart still lands on the previous day.
+    // The one-hour cap still allows this 00:30 start to exercise the clamp.
     writer.setValue("PausePilot/boot_time_seconds", 3600); // 1 hour (capped max)
     writer.sync();
 
@@ -1067,12 +1057,71 @@ void TimerTest::test_startTimer_drops_cross_midnight_boot_time_entry()
     // Act
     tracker.useTimerViaButton(Button::Start);
 
-    // Assert: cross-midnight boot entry was dropped; no completed durations
-    // (the ongoing segment is fresh from startTimer)
-    QCOMPARE(tracker.completedTimeline().completed().size(), static_cast<size_t>(0));
+    // Assert: boot Activity is retained from local midnight through Start.
+    const auto completed = tracker.completedTimeline().completed();
+    QCOMPARE(completed.size(), static_cast<size_t>(1));
+    QCOMPARE(completed.front().type, DurationType::Activity);
+    QCOMPARE(completed.front().startTime,
+             QDateTime(QDate(2025, 6, 1), QTime(0, 0), Qt::LocalTime));
+    QCOMPARE(completed.front().endTime,
+             QDateTime(QDate(2025, 6, 1), QTime(0, 30), Qt::LocalTime));
     QVERIFY(tracker.isActive());
 
     tracker.useTimerViaButton(Button::Stop);
+}
+
+void TimerTest::test_startTimer_boot_time_unclamped_away_from_midnight()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("PausePilot/boot_time_seconds", 300);
+    writer.sync();
+
+    Settings settings(settingsPath);
+    FakeSessionStore db;
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(10, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Act
+    tracker.useTimerViaButton(Button::Start);
+
+    // Assert
+    const auto completed = tracker.completedTimeline().completed();
+    QCOMPARE(completed.size(), static_cast<size_t>(1));
+    QCOMPARE(completed.front().type, DurationType::Activity);
+    QCOMPARE(completed.front().startTime,
+             QDateTime(QDate(2025, 6, 1), QTime(9, 55), Qt::LocalTime));
+    QCOMPARE(completed.front().endTime,
+             QDateTime(QDate(2025, 6, 1), QTime(10, 0), Qt::LocalTime));
+    QVERIFY(tracker.isActive());
+}
+
+void TimerTest::test_startTimer_boot_time_at_exact_midnight_adds_nothing()
+{
+    // Arrange
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    QString settingsPath = createSettingsFile(tempDir.path(), 7);
+    QSettings writer(settingsPath, QSettings::IniFormat);
+    writer.setValue("PausePilot/boot_time_seconds", 300);
+    writer.sync();
+
+    Settings settings(settingsPath);
+    FakeSessionStore db;
+    FakeClock clock(QDateTime(QDate(2025, 6, 1), QTime(0, 0), Qt::LocalTime));
+    TimeTracker tracker(settings, db);
+    tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
+
+    // Act
+    tracker.useTimerViaButton(Button::Start);
+
+    // Assert
+    QCOMPARE(tracker.completedTimeline().completed().size(), static_cast<size_t>(0));
+    QVERIFY(tracker.isActive());
 }
 
 void TimerTest::test_getOngoingDuration_returns_nullopt_when_cross_midnight()
@@ -1211,10 +1260,9 @@ void TimerTest::test_E_boot_time_gate_entries_no_adds_boot_time()
     Settings settings(settingsPath);
     FakeSessionStore fakeDb;
     fakeDb.entriesForDateResult = EntriesForDateResult::No;
-    // D15/F1 (part 3, B1): see test_boot_time_added_once_on_empty_db() above
-    // -- Start's bootStart = now - boot_time_seconds can cross local midnight
-    // on the real clock. FakeClock declared before TimeTracker so it outlives
-    // it (see the outlives-tracker note at test_integration.cpp:614).
+    // Pin to fixedNow() (local noon) to keep this test independent of the
+    // host clock. FakeClock declared before TimeTracker so it outlives it
+    // (see the outlives-tracker note at test_integration.cpp:614).
     FakeClock clock(fixedNow());
     TimeTracker tracker(settings, fakeDb);
     tracker.setNowProvider_dbg([&clock]() { return clock.now(); });
