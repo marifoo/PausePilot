@@ -657,7 +657,10 @@ TimeTracker::OvernightArm TimeTracker::overnightResumeAfterStop(StopReason reaso
         && (fromMode == Mode::Activity || autopause_pending_resume_);
     switch (reason) {
     case StopReason::MidnightScheduled:
-    case StopReason::MidnightWatchdog: return qualifies && is_locked_ ? OvernightArm::AwaitUnlock : OvernightArm::Off;
+        return qualifies && is_locked_ ? OvernightArm::AwaitUnlock : OvernightArm::Off;
+    case StopReason::MidnightWatchdog:
+        return !qualifies ? OvernightArm::Off
+             : is_locked_ ? OvernightArm::AwaitUnlock : OvernightArm::AwaitSettle;
     case StopReason::ButtonStop:
     case StopReason::Shutdown: return OvernightArm::Off;
     }
@@ -741,6 +744,11 @@ void TimeTracker::stopTimer(const QDateTime& now, StopReason reason)
     session_.clearSegment();
     checkpointTimer_.stop();
     overnight_resume_ = overnightResumeAfterStop(reason, fromMode);
+    if (overnight_resume_ == OvernightArm::AwaitSettle) {
+        overnight_wake_instant_ = now;
+        overnight_settle_ticks_ = 0;
+        Logger::Log("[OVERNIGHT] Armed until wake settles");
+    }
     if (overnight_resume_ == OvernightArm::AwaitUnlock)
         Logger::Log("[OVERNIGHT] Armed until Unlock");
     autopause_pending_resume_ = false;
@@ -889,6 +897,10 @@ void TimeTracker::useTimerViaLockEvent(LockEvent event, const QDateTime& lockTim
 void TimeTracker::onLockDetected(const QDateTime& now)
 {
     is_locked_ = true;
+    if (overnight_resume_ == OvernightArm::AwaitSettle) {
+        overnight_resume_ = OvernightArm::AwaitUnlock;
+        Logger::Log("[OVERNIGHT] Lock detected during settle; armed until Unlock");
+    }
     // Save a checkpoint when lock is detected (only if actively tracking time)
     if (mode_ == Mode::Activity) {
         saveCheckpoint_locked(now);
@@ -940,6 +952,12 @@ void TimeTracker::onTick(const QDateTime& now)
 {
     QMutexLocker locker(&mutex_);
     day_boundary_watcher_.tick(now);
+    if (overnight_resume_ != OvernightArm::AwaitSettle) return;
+    if (++overnight_settle_ticks_ < kWakeSettleTicks
+        || now < overnight_wake_instant_.addMSecs(kWakeSettleMs)) return;
+    const bool sameDay = LocalTime::fromInstant(overnight_wake_instant_).date()
+                         == LocalTime::fromInstant(now).date();
+    resumeAfterNight(sameDay ? overnight_wake_instant_ : now);
 }
 
 qint64 TimeTracker::getActiveTime() const

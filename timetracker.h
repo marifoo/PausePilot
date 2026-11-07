@@ -228,8 +228,12 @@ private:
     Mode mode_;
     bool autopause_pending_resume_;
     bool is_locked_;     // Track if desktop is currently locked (to prevent checkpoints while locked)
-    enum class OvernightArm { Off, AwaitUnlock };
+    enum class OvernightArm { Off, AwaitUnlock, AwaitSettle };
     OvernightArm overnight_resume_ = OvernightArm::Off;
+    QDateTime overnight_wake_instant_;  // Meaningful only in AwaitSettle.
+    int overnight_settle_ticks_ = 0;
+    static constexpr qint64 kWakeSettleMs = 1000;
+    static constexpr int kWakeSettleTicks = 5;
     bool dialog_open_;   // True while HistoryDialog is open. Checkpoints keep running (WP6); lock-watcher events, a forward date change, the midnight stop/discard and shutdown revoke it first (revokeExclusiveEdit()); any other real mode change revokes it from inside emitTransition() (H5/WP7c).
     QDate exclusive_edit_date_;  // WP4: the date when beginExclusiveEdit() was called.
                                  // Used to detect when the date moves forward (>) and revoke the edit.

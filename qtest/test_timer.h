@@ -93,7 +93,7 @@ private slots:
     void test_useTimerViaButton_force_stops_on_cross_midnight_ongoing();
     void test_useTimerViaButton_pause_event_is_dropped_when_cross_midnight();
 
-    void test_useTimerViaLockEvent_unlock_does_not_restart_after_cross_midnight_discard();
+    void test_useTimerViaLockEvent_unlock_after_cross_midnight_discard_resumes_overnight();
 
     void test_saveCheckpoint_locked_does_not_write_cross_midnight_row();
 
@@ -519,6 +519,18 @@ private slots:
     void test_overnight_resume_boot_time_clamped_at_0003();
     void test_overnight_shutdown_while_armed_prevents_resume();
     void test_overnight_refused_start_does_not_rearm();
+    void test_overnight_sleep_unlocked_resumes_at_wake_instant_after_settle();
+    void test_overnight_settle_requires_five_ticks();
+    void test_overnight_lock_during_settle_waits_for_unlock();
+    void test_overnight_lock_event_triggering_watchdog_waits_for_unlock();
+    void test_overnight_checkpoint_timer_watchdog_arms_settle();
+    void test_overnight_unlock_during_settle_resumes_immediately();
+    void test_overnight_button_during_settle_data();
+    void test_overnight_button_during_settle();
+    void test_overnight_wake_on_earlier_local_date_starts_at_now();
+    void test_overnight_setting_false_does_not_resume_after_wake();
+    void test_overnight_manual_pause_sleep_does_not_resume();
+    void test_overnight_shutdown_during_settle_prevents_resume();
 };
 
 #endif // TEST_TIMER_H
