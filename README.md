@@ -13,6 +13,9 @@ numbers honest without you having to remember to press anything.
 - **Smart auto-pause.** Short lock-screens (e.g. a quick chat at the door)
   don't count as breaks. Only locks longer than a configurable threshold
   (15 minutes by default) are treated as pauses.
+- **Overnight auto-resume.** Leave the timer running and lock or sleep the PC
+  overnight, and PausePilot starts a fresh day on your next unlock (or shortly
+  after wake if the screen is not locked), with a tray notice.
 - **Editable history.** Optionally keep a history of past sessions and
   fix-up entries after the fact if you forgot to start or stop the timer.
 - **Crash-resilient.** PausePilot checkpoints the running session every few
@@ -67,7 +70,9 @@ the current day, plus the time you started.
 - **Auto-Pause** — toggles whether long locks count as pauses.
 - **Pin / Tray** — keeps the window on top, or hides it to the system tray.
 
-PausePilot resets at midnight and writes each day's totals to its history.
+PausePilot stops at midnight and writes each day's totals to its history. If
+you leave the timer running while locked or asleep overnight, it restarts for
+the new day when you unlock or shortly after waking with the screen unlocked.
 
 ## Settings
 
@@ -78,6 +83,8 @@ binary. The interesting keys:
 | --- | --- | --- |
 | `autopause_enabled` | `true` | Master switch for auto-pause. |
 | `autopause_threshold_minutes` | `15` | Locks shorter than this stay counted as Activity. |
+| `autoresume_after_night` | `true` | Restart tracking after a night spent locked or asleep. |
+| `boot_time_seconds` | `0` | Activity credited before the first Start of a day (0–3600 s), never before local midnight. |
 | `history_days_to_keep` | `99` | How many days of history to retain. `0` disables history entirely. |
 | `press_start_button_on_app_start` | `true` | Start the timer automatically on launch. |
 | `start_minimized_to_tray` | `false` | Launch hidden in the system tray. |

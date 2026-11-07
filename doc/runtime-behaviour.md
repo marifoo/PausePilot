@@ -9,13 +9,15 @@ and how shutdown is orchestrated. For *what the components are*, see
 
 `TimeTracker` runs three modes: `None` (stopped), `Activity`, and `Pause`.
 Transitions are driven by user buttons, lock events from
-`LockStateWatcher`, and the `DayBoundaryWatcher` at the day boundary.
+`LockStateWatcher`, and the day-boundary and overnight-resume checks on the
+heartbeat.
 
 ```mermaid
 stateDiagram-v2
     [*] --> None
 
     None --> Activity : Button.Start
+    None --> Activity : OvernightResume (Unlock / wake settle)
 
     Activity --> Pause : Button.Pause / LockEvent.LongOngoingLock
     Pause --> Activity : Button.Start / LockEvent.Unlock (if was active before autopause)
@@ -31,7 +33,7 @@ itself, so the GUI can react without keeping its own state:
   every real mode change, button/lock/midnight/shutdown-driven alike.
   `Transition` holds `from`, `to`, and a `TransitionCause` (`ButtonStart`,
   `ButtonPause`, `ButtonStop`, `LockAutopause`, `LockResume`,
-  `MidnightScheduled`, `MidnightWatchdog`, `Shutdown`).
+  `MidnightScheduled`, `MidnightWatchdog`, `Shutdown`, `OvernightResume`).
   `ContentWidget::onTransitioned` reduces it to a GUI
   update; there is no separate per-cause signal for each transition kind
   the way there used to be.
@@ -56,9 +58,9 @@ its `timeout()` signal:
 2. **`TimeTracker::onTick`** — calls `DayBoundaryWatcher::tick`, which owns the
    forward-date History revoke, the 23:59:59.500 scheduled stop, and the
    cross-midnight watchdog for a segment that started on a prior local date.
-   This is the *only* path that runs `TimeTracker` code from the heartbeat;
-   mode transitions are otherwise driven exclusively by buttons and lock
-   events.
+   It then checks whether an overnight wake has settled and should restart
+   tracking. This is the *only* path that runs `TimeTracker` code from the
+   heartbeat; buttons and lock events can also trigger mode transitions.
 3. **`LockStateWatcher::update`** — polls the OS lock state, pushes the
    boolean through the 5-tick debounce buffer, and emits at most one
    `desktopLockEvent` per tick.
@@ -88,9 +90,10 @@ A session must never contain a segment that spans two dates: the persistence
 layer stores `start_utc`/`end_utc` timestamps (see `persistence.md`), and
 downstream UI groups rows by the local date those timestamps convert to, not
 by a stored date column. `TimeTracker` enforces this with a single dedicated
-subsystem: `DayBoundaryWatcher`. Both checks below run purely from the
-100 ms heartbeat (`DayBoundaryWatcher::tick`, called from
-`TimeTracker::onTick`) — there is no dedicated timer.
+subsystem: `DayBoundaryWatcher`. It runs both checks below from the 100 ms
+heartbeat (`DayBoundaryWatcher::tick`, called from `TimeTracker::onTick`) —
+there is no dedicated timer. Button, lock-event and checkpoint paths also
+check for a missed midnight before proceeding.
 
 1. **Scheduled stop** — on each heartbeat, if a segment is running and its
    start time falls on the same local calendar date as `now`
@@ -131,6 +134,43 @@ bug elsewhere cannot poison the in-memory session or the database.
 
 `MainWin` has **no** midnight logic. It reacts to `stopped(StopReason)` like
 any other stop.
+
+### Overnight auto-resume
+
+With `PausePilot/autoresume_after_night` enabled (the default), a midnight
+stop can arm a one-shot restart if tracking was in Activity or a lock-driven
+auto-Pause. A manual Pause or an already stopped timer does not qualify.
+Only `TimeTracker::stopTimer` arms the restart. A scheduled midnight stop
+arms it only while locked; an awake, unlocked user remains stopped. A
+watchdog stop while locked waits for Unlock, even across multiple nights.
+This setting is independent of `autopause_enabled`.
+
+When a watchdog stop finds the desktop unlocked, the tracker waits for both
+five heartbeat ticks (including the watchdog tick) and one second after the
+watchdog instant. It then starts Activity at that wake instant. If the local
+date changed during the wait, it starts at the current tick's instant instead,
+so the new segment stays within one local day. A Lock during the wait switches
+the restart to waiting for Unlock; an Unlock during the wait starts immediately
+at the Unlock instant. A Lock or Unlock event that itself triggers the
+watchdog is still applied, keeping the tracked lock state accurate.
+
+Any button cancels the pending restart; a button that finds a missed midnight
+also leaves the timer stopped. Shutdown disarms it, and cancelling shutdown
+does not re-arm it. The restart clears its arm before attempting Start, so a
+refused Start cannot retry automatically. When Start reaches Activity,
+`TimeTracker` emits the existing `userWarning` tray/status notice, "Timer
+restarted automatically after the night."
+
+Boot time follows the normal Start-from-`None` rule on an overnight restart:
+when the store confirms there are no entries for the new day, up to
+`boot_time_seconds` of Activity is credited before Start. The segment start
+is clamped to that day's local midnight, including when Start occurs shortly
+after midnight.
+
+Accepted gaps: a stalled GUI, forward clock step, or timezone change can make
+the watchdog treat an awake interval as sleep and trigger this restart. An
+`Unknown` OS lock state during the settle window counts as unlocked; only a
+reported Lock switches the tracker to waiting for Unlock.
 
 ### History permission (H5/WP5)
 
@@ -174,7 +214,9 @@ revokes History's edit, closes the dialog, and discards any unsaved changes:
 - **Midnight boundary:** scheduled stop (23:59:59.500), watchdog tick detecting
   a crossed midnight boundary, or the date moving forward (`now.date() > date_
   when_edit_began`).
-- **Lock events:** any lock-watcher event (Lock, LongOngoingLock, or Unlock).
+- **Lock events:** any lock-watcher event (Lock, LongOngoingLock, or Unlock),
+  including one that triggers the midnight watchdog; the event is still
+  applied after History closes.
 - **Sleep:** a lock event is usually what closes History during sleep; if the
   machine sleeps across midnight without a lock, the midnight watchdog closes
   it.
@@ -207,6 +249,10 @@ A tray notification (`userWarning` signal) is sent whenever History closes:
 status bar for ~10 seconds and may go unseen if the user is away (e.g. at
 lock time or overnight).
 
+If History is opened during the roughly one-second overnight wake settle,
+the restart revokes it. The History-closed notice is immediately followed by
+the overnight-restart notice.
+
 ### Sleep outcomes
 
 Without History open (or after History closes), the night-time behaviour is:
@@ -218,10 +264,11 @@ spent locked (checkpoints are suspended while `is_locked_`) can all extend
 the gap since the last confirmed prefix.
 
 - **Lock before sleep, with auto-pause matured:** Activity up to the lock and
-  Pause up to the auto-pause threshold are committed. After an overnight resume,
+  Pause up to the auto-pause threshold are committed. After waking the next morning,
   the watchdog discards only the ongoing Pause (it has no checkpoint prefix of
   its own -- checkpoints only ever run in Activity, and rotation clears the
-  prefix). The evening's Activity is kept.
+  prefix). The evening's Activity is kept. If overnight auto-resume is enabled,
+  tracking starts a fresh day on Unlock.
 - **Lock before sleep, without auto-pause matured:** the segment is still
   Activity. The immediate lock-instant checkpoint (`onLockDetected`) attempts
   a save at the lock instant; **(C3)** if that write succeeded, the overnight
@@ -229,11 +276,13 @@ the gap since the last confirmed prefix.
   unverified tail after it. If the lock-instant write failed (or History
   persistence is `Disabled`), there is no confirmed prefix and the overnight
   tick discards the **whole segment**, including the evening's Activity, with
-  a discard intent recorded durably once its database insert commits.
+  a discard intent recorded durably once its database insert commits. If
+  overnight auto-resume is enabled, tracking starts a fresh day on Unlock.
 - **Sleep across midnight without a lock:** the tick revokes any open History,
   then keeps the last successfully checkpointed same-day prefix of the
   segment (the periodic 5-minute Activity checkpoint) if one exists, else
-  discards the whole segment -- same rule as with a dialog open.
+  discards the whole segment -- same rule as with a dialog open. If overnight
+  auto-resume is enabled, tracking starts a fresh day after the wake settles.
 - **Same-day resume:** the Lock and LongOngoingLock are handled normally.
 - **Sleep same day without a lock:** History stays open, nothing is deferred
   and the DB is untouched. Slept time counts as Activity with or without
@@ -269,9 +318,10 @@ is the single entry point into it, reached from three places:
 **Shutdown is terminal until cancelled (C9b):** once `TimeTracker::shutdown()`
 has run (via `ShutdownCoordinator::run()` on any of the three paths above),
 `shutdown_called_` stays set and `TimeTracker::startTimer()` refuses every
-Start -- button Start and a pending lock-resume (autopause unlock) alike --
-logging the refusal and returning without touching autopause state, the
-pending commit, the session, the store, or emitting a transition. Only
+Start -- button Start, a pending lock-resume (autopause unlock), and an
+overnight resume alike -- logging the refusal and returning without touching
+autopause state, the pending commit, the session, the store, or emitting a
+transition. Only
 `TimeTracker::cancelShutdown()` clears the flag. A cancelled Windows shutdown
 (`WM_ENDSESSION` with `wParam == 0`) is the one path that calls it: it re-arms
 both `ShutdownCoordinator`'s own `run()` guard and `TimeTracker`'s latch

@@ -255,8 +255,8 @@ private:
     int startup_policy_dropped_count_;
     DayBoundaryWatcher day_boundary_watcher_; // Must be last: constructed after all other members
 
-    // cause defaults to the button/toggle path; Unlock passes LockResume or
-    // OvernightResume so the transition carries the right cause.
+    // cause defaults to the button/toggle path; lock resume and overnight
+    // restart pass their own causes, including restart from the heartbeat.
     void startTimer(const QDateTime& now, TransitionCause cause = TransitionCause::ButtonStart);
     void stopTimer(const QDateTime& now, StopReason reason);
     OvernightArm overnightResumeAfterStop(StopReason reason, Mode fromMode) const;

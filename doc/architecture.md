@@ -135,7 +135,7 @@ straight to the owner:
 | Concern                                    | Owner                                |
 | ------------------------------------------ | ------------------------------------ |
 | Midnight policy (cross-day cutoff)         | `TimeTracker` via `DayBoundaryWatcher`     |
-| Autopause / lock-driven auto-resume        | `TimeTracker` (signalled via `transitioned`)|
+| Autopause / lock-driven and overnight auto-resume | `TimeTracker` (signalled via `transitioned`)|
 | Checkpoint cadence                         | `TimeTracker`                        |
 | Orphan checkpoint reconciliation (decision and mechanics) | `SqliteSessionStore`  |
 | Clean-shutdown marker                      | `ShutdownCoordinator` + `SessionStore` |
