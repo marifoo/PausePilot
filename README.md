@@ -169,6 +169,11 @@ shell commands through ShellCheck. CI downloads actionlint 1.7.12 and
 verifies its SHA-256 checksum before running it. With actionlint and
 ShellCheck installed, run `actionlint -shellcheck=shellcheck` locally.
 
+## Project history
+
+PausePilot was previously called **µTimer**, with the GitHub repository name
+**uTimer**.
+
 ## Credits
 
 - Icon by [Icons8](https://icons8.com/icon/63253/clock).
